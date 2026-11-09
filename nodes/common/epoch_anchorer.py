@@ -261,13 +261,15 @@ class EpochAnchorer:
             # Encode + CID the off-chain agent_mint blob (money only,
             # Decision 2026-07-10 — no agent_rep map; REP is DAO-claimed).
             agent_mint = close_result.get("agent_mint") or payload.get("agent_mint", {})
-            mint_blob = encode_agent_mint_blob(agent_mint)
+            concluded = payload.get("concluded") or close_result.get("concluded") or {}
+            mint_blob = encode_agent_mint_blob(agent_mint, concluded=concluded)
             cid = cid_for_blob(mint_blob)
 
-            # Merkle root over the mint map: each household's share is
-            # proven against this when claimed (claimFor), a 2-field
-            # (claimant, amount) leaf.
-            mint_root = mint_merkle_root(agent_mint)
+            # Merkle root over the mint map and the concluded tools: each
+            # household's share is proven against this when claimed
+            # (claimFor, a 2-field (claimant, amount) leaf), and each
+            # concluded tool's leaf opens its verdict (ToolBond.conclude).
+            mint_root = mint_merkle_root(agent_mint, concluded=concluded)
 
             from .voice_state import epoch_id_cutoff
             cutoff = epoch_id_cutoff(epoch_id)

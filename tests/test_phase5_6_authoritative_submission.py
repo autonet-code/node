@@ -206,15 +206,8 @@ def _build_close_and_anchor(
     # review round per registered tool, from a REP-holding reviewer.
     regs = federated_epoch_close(canonical)["tool_registrations"]
     reviewer = "0x" + "9e" * 20
-    snapshot = {
-        "supply": 10 ** 21, "reviewer_share_bps": 4000,
-        "tools": {d: {"axes": {"correctness": {"sum": 100 * 10 ** 18, "mass": 10 ** 18}},
-                      "harm": {"sum": 0, "mass": 0}} for d in regs},
-        "rounds": {d: [{"epoch": 1, "supply": 10 ** 21, "prior_mass": {},
-                        "reviews": [{"reviewer": reviewer, "stake": 0,
-                                     "accuracy": 10 ** 18, "axes": ["correctness"],
-                                     "harm": False}]}] for d in regs},
-    }
+    from tests.substrate_chain_helpers import review_snapshot
+    snapshot = review_snapshot(list(regs), reviewer)
     result = federated_epoch_close(
         canonical, rep_shares={reviewer: 0.5}, review_snapshot=snapshot)
     result["epoch_id"] = epoch_id
@@ -257,7 +250,8 @@ def test_agent_reads_anchor_and_submits_authoritative_mint(chain):
     # CID matches.
     expected_blob_mint = decode_agent_mint_blob(resolver.get(
         result["authoritative_payload"]["agent_mint"]
-        and cid_for_blob(encode_agent_mint_blob(result["agent_mint"]))
+        and cid_for_blob(encode_agent_mint_blob(
+            result["agent_mint"], concluded=result["concluded"]))
     ))
 
     # Pick the first agent that actually has mint; submit for it.

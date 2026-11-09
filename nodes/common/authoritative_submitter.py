@@ -64,6 +64,7 @@ from typing import Any, Dict, Optional
 from .authoritative_encoding import (
     cid_for_blob,
     decode_agent_mint_blob,
+    decode_concluded,
 )
 from .blob_resolver import BlobIntegrityError, BlobResolver
 from .mint_merkle import mint_merkle_proof, scale_mint, verify_mint_proof
@@ -241,6 +242,7 @@ class AuthoritativeChainSubmitter:
             # the anchor's agentMintRoot was built from the same
             # conversion, and a mismatched integer is an unprovable leaf.
             mint_map = decode_agent_mint_blob(blob)
+            concluded = decode_concluded(blob)
             raw_mint = float(mint_map.get(
                 self.claimant_id, mint_map.get(str(self.claimant_id).lower(), 0.0)))
             scaled = scale_mint(raw_mint, self.config.mint_scale)
@@ -261,6 +263,7 @@ class AuthoritativeChainSubmitter:
             # on chain. The leaf commits (claimant, amount), money only.
             proof = mint_merkle_proof(
                 mint_map, self.claimant_address, self.config.mint_scale,
+                concluded=concluded,
             )
             if proof is None:
                 return AuthoritativeSubmissionResult(

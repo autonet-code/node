@@ -197,7 +197,9 @@ def _normalize_review_snapshot(
        "rounds": {digest: [{"epoch", "supply",
                             "fields": {...}, "axes": {...},
                             "reviews": [{"reviewer", "accuracy"}]}]},
-       "bonds": {digest: {"author", "stake", "unbonding"}}, "min_stake": int}
+       "bonds": {digest: {"author", "stake", "unbonding"}}, "min_stake": int,
+       "verdicts": {digest: {"concluded": bool, "ruling": bool | None,
+                             "settled": bool | None}}}
 
     ``fields`` are the fixed review fields (``review_fields.REVIEW_FIELDS``)
     and ``axes`` the charter axes. A tool's cells cover every round
@@ -209,13 +211,15 @@ def _normalize_review_snapshot(
     mass / 100 and malware's is the share of the reviewing REP that said
     yes. ``rounds`` holds the rounds finalized since the anchor before the
     snapshot; a review's ``accuracy`` is 1e18-scaled, None when
-    uninformative. Integers stay integers, digests lose any 0x, addresses
-    are lowercased, bps clamps to [0, BPS], garbage is dropped.
+    uninformative. ``verdicts`` is ToolBond's malware verdict state per
+    tool: concluded on chain, the DAO's ruling, the settled verdict.
+    Integers stay integers, digests lose any 0x, addresses are lowercased,
+    bps clamps to [0, BPS], garbage is dropped.
     """
     from .library.review_fields import REVIEW_FIELDS
 
     out: Dict[str, Any] = {"reviewer_share_bps": REVIEWER_SHARE_BPS_DEFAULT,
-                           "supply": 0, "tools": {}, "rounds": {}}
+                           "supply": 0, "tools": {}, "rounds": {}, "verdicts": {}}
     if not snapshot:
         return out
     out["reviewer_share_bps"] = max(0, min(BPS, _int(
@@ -268,6 +272,16 @@ def _normalize_review_snapshot(
             }
         out["bonds"] = bonds
         out["min_stake"] = max(0, _int(snapshot.get("min_stake")))
+    verdicts: Dict[str, Dict[str, Any]] = {}
+    for digest, v in sorted((snapshot.get("verdicts") or {}).items()):
+        if not isinstance(v, dict):
+            continue
+        verdicts[str(digest).lower().removeprefix("0x")] = {
+            "concluded": bool(v.get("concluded")),
+            "ruling": None if v.get("ruling") is None else bool(v["ruling"]),
+            "settled": None if v.get("settled") is None else bool(v["settled"]),
+        }
+    out["verdicts"] = verdicts
     return out
 
 
@@ -347,7 +361,10 @@ def _normalize_tool_rounds(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     Shape: {"pool_carry": int (ATN base units left unminted so far),
     "counts": {epoch: {household: n reviews}},
     "tools": {digest: {"concluded": bool, "rounds": [{"epoch", "decay",
-    "reviews": [{"reviewer", "house", "rep", "n", "accuracy"}]}]}}}.
+    "reviews": [{"reviewer", "house", "rep", "n", "accuracy"}]}],
+    "held"?: {"weight": float, "on": [digest]}}}}. ``held`` is a concluded
+    tool's author side waiting on the malware verdicts of the tools in
+    ``on`` (itself or a dependency).
     Derived purely from prior closes' pinned snapshots, so it is identical
     on every honest daemon (the carry-over commitment covers it)."""
     out: Dict[str, Any] = {"pool_carry": 0, "counts": {}, "tools": {}}
@@ -379,10 +396,18 @@ def _normalize_tool_rounds(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             rounds.append({"epoch": int(rnd.get("epoch") or 0),
                            "decay": round(float(rnd.get("decay", 1.0)), 12),
                            "reviews": revs})
-        out["tools"][str(digest).lower().removeprefix("0x")] = {
+        entry: Dict[str, Any] = {
             "concluded": bool(t.get("concluded")),
             "rounds": sorted(rounds, key=lambda r: r["epoch"]),
         }
+        held = t.get("held")
+        if isinstance(held, dict):
+            entry["held"] = {
+                "weight": round(float(held.get("weight") or 0.0), 12),
+                "on": sorted(str(d).lower().removeprefix("0x")
+                             for d in (held.get("on") or [])),
+            }
+        out["tools"][str(digest).lower().removeprefix("0x")] = entry
     return out
 
 
@@ -423,10 +448,17 @@ def compute_tool_mint(
         declared dependencies split 1 - N (``_composition_shares``); with
         none, 1 - N stays unminted;
       - malware: when more than half the REP that reviewed the tool says
-        malware, or any tool it depends on (transitively) has that verdict,
-        the author side is unpaid. A dependency's verdict counts once its
-        own reviewers clear the gate;
+        malware (in bps, as its concluded leaf carries it), or any tool it
+        depends on (transitively) has that verdict, the author side is not
+        paid: it is held until ToolBond settles the verdicts (the pay waits
+        for the vote). A final malware verdict drops it; the DAO clearing
+        every tool it waits on pays it in that close. A dependency's verdict
+        counts once its own reviewers clear the gate; a DAO ruling replaces
+        the reviewers';
       - everything unpaid goes to UNMINTED and stays unminted.
+    ``concluded`` maps each tool concluding in this close to its malware
+    share in bps: the anchor commits one leaf per entry, from which
+    ToolBond opens the verdict.
     Not paid at all: unbonded tools and unpinned tools (they never
     conclude). Not counted: the author's own household as a reviewer,
     sanctioned households in the gate and in W.
@@ -566,11 +598,36 @@ def compute_tool_mint(
             return False, weight
         return True, round(weight, 12)
 
+    verdicts = rev_snap["verdicts"]
+    verdict_bps = int(round(MALWARE_VERDICT_SHARE * BPS))
+
+    def _share_bps(digest: str) -> Optional[int]:
+        """The share of the tool's reviewing REP that says malware, in bps
+        (floored): the number its concluded leaf carries."""
+        cell = ((rev_snap["tools"].get(digest) or {}).get("fields") or {}).get("malware")
+        if not cell or int(cell["mass"]) <= 0:
+            return None
+        return max(0, int(cell["sum"]) * 100 // int(cell["mass"]))
+
+    def _ruled(digest: str) -> Optional[bool]:
+        """ToolBond's final word: the DAO's ruling, else the settled
+        verdict; None while open (or never formed on chain)."""
+        v = verdicts.get(digest) or {}
+        if v.get("ruling") is not None:
+            return bool(v["ruling"])
+        if v.get("settled") is not None:
+            return bool(v["settled"])
+        return None
+
     def _malware(digest: str) -> bool:
         """The tool's malware verdict: more than half its reviewing REP says
-        malware, once its reviewers have cleared the gate."""
-        share = (ratings.get(digest) or {}).get("malware")
-        if share is None or share <= MALWARE_VERDICT_SHARE:
+        malware (in bps, as its leaf carries it), once its reviewers have
+        cleared the gate; a DAO ruling replaces the reviewers'."""
+        ruled = _ruled(digest)
+        if ruled is not None:
+            return ruled
+        bps = _share_bps(digest)
+        if bps is None or bps <= verdict_bps:
             return False
         t = state["tools"].get(digest)
         if t is None:
@@ -579,8 +636,11 @@ def compute_tool_mint(
             return True
         return bool(t["rounds"]) and _weigh(t, _author_house(digest))[0]
 
-    def _uses_malware(root: str) -> bool:
+    def _uses_malware(root: str) -> List[str]:
+        """The tools with a malware verdict among ``root`` and everything it
+        depends on, sorted."""
         seen: set = set()
+        found: List[str] = []
         stack = [root]
         while stack:
             d = stack.pop()
@@ -588,17 +648,73 @@ def compute_tool_mint(
                 continue
             seen.add(d)
             if _malware(d):
-                return True
+                found.append(d)
             stack.extend(x for x in deps_of.get(d, []) if x in deps_of)
-        return False
+        return sorted(found)
 
     def _own_share(digest: str) -> float:
         n = (ratings.get(digest) or {}).get("novelty")
         return COMPOSITE_ROOT_SHARE if n is None else float(n)
 
-    # 3. Conclusions.
     per_digest: Dict[str, Dict[str, Any]] = {}
     node_agent: Dict[str, Dict[str, float]] = {}
+    concluded_bps: Dict[str, int] = {}
+
+    def _pay_author_side(digest: str, author: str, side: float,
+                         bucket: Dict[str, float]) -> float:
+        """Fan ``side`` over the tool and its dependencies into ``bucket``;
+        returns what was paid."""
+        paid = 0.0
+        if side <= 0:
+            return paid
+        shares = _composition_shares(digest, deps_of, _own_share)
+        for target in sorted(shares):
+            recipient = author if target == digest else _bonded_author(target)
+            part = side * shares[target]
+            if not recipient or part <= 0:
+                continue
+            bucket[recipient] = bucket.get(recipient, 0.0) + part
+            paid += part
+        return paid
+
+    # 3. Author sides held on a malware verdict (the pay waits for the
+    # vote): a final malware verdict drops them (they stay unminted), the
+    # DAO clearing every tool they wait on pays them now, from this pool.
+    for digest in sorted(state["tools"]):
+        t = state["tools"][digest]
+        held = t.get("held")
+        if not held:
+            continue
+        finals = [_ruled(d) for d in held["on"]]
+        if any(f is True for f in finals):
+            del t["held"]
+            continue
+        if not all(f is False for f in finals):
+            continue
+        still = _uses_malware(digest)
+        if still:
+            held["on"] = still
+            continue
+        del t["held"]
+        author = _bonded_author(digest)
+        weight = float(held["weight"])
+        if not author or weight <= 0:
+            continue
+        bucket = node_agent.setdefault(digest, {})
+        rating = ratings.get(digest) or tool_rating(None, axis_ids, supply)
+        score = tool_score(rating)
+        author_paid = _pay_author_side(digest, author, weight * score, bucket)
+        rest = weight - author_paid
+        if rest > 0:
+            bucket[UNMINTED] = bucket.get(UNMINTED, 0.0) + rest
+        per_digest[digest] = {
+            "author": author, "trust_class": TRUST_PINNED, "weight": weight,
+            "score": score, "novelty": rating.get("novelty"), "malware": False,
+            "released": True, "reviewers": 0, "reviewer_mint": 0.0,
+            "author_mint": round(author_paid, 12), "mint": round(author_paid, 12),
+        }
+
+    # 4. Conclusions.
     for digest in sorted(state["tools"]):
         t = state["tools"][digest]
         if t["concluded"] or not t["rounds"]:
@@ -610,8 +726,10 @@ def compute_tool_mint(
         conclusive, weight = _weigh(t, author_house)
         if not conclusive:
             continue   # not conclusive yet: carried to the next close
-        malware = _uses_malware(digest)
+        malware_on = _uses_malware(digest)
+        malware = bool(malware_on)
         t["concluded"] = True
+        concluded_bps[digest] = _share_bps(digest) or 0
         if weight <= 0.0:
             continue
         bucket = node_agent.setdefault(digest, {})
@@ -644,20 +762,15 @@ def compute_tool_mint(
                     reviewer_paid += part
 
         # Author side: the rest x the tool's score, the author keeping N and
-        # the dependencies splitting 1 - N. Nothing on a malware verdict.
+        # the dependencies splitting 1 - N. On a malware verdict it is held
+        # until ToolBond settles it (the DAO may clear the tool on appeal).
         rating = ratings.get(digest) or tool_rating(None, axis_ids, supply)
         score = 0.0 if malware else tool_score(rating)
-        author_side = (weight - reviewer_pool) * score
-        author_paid = 0.0
-        if author_side > 0:
-            shares = _composition_shares(digest, deps_of, _own_share)
-            for target in sorted(shares):
-                recipient = author if target == digest else _bonded_author(target)
-                part = author_side * shares[target]
-                if not recipient or part <= 0:
-                    continue
-                bucket[recipient] = bucket.get(recipient, 0.0) + part
-                author_paid += part
+        if malware:
+            t["held"] = {"weight": round(weight - reviewer_pool, 12),
+                         "on": malware_on}
+        author_paid = _pay_author_side(
+            digest, author, (weight - reviewer_pool) * score, bucket)
         rest = weight - reviewer_paid - author_paid - bucket.get(UNMINTED, 0.0)
         if rest > 0:
             bucket[UNMINTED] = bucket.get(UNMINTED, 0.0) + rest
@@ -710,6 +823,7 @@ def compute_tool_mint(
         "registrations_next": dict(sorted(known_regs.items())),
         "ratings_next": ratings_next,
         "tool_rounds_next": state,
+        "concluded": dict(sorted(concluded_bps.items())),
     }
 
 
@@ -864,6 +978,7 @@ def federated_epoch_close(
             rounds_next["pool_carry"] / ATN_BASE_UNITS)
     result["tool_rounds"] = rounds_next
     result["tool_ratings"] = tool_result["ratings_next"]
+    result["concluded"] = tool_result["concluded"]
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)
     result["n_events"] = len(all_events)
@@ -875,20 +990,22 @@ def federated_epoch_close(
     from .library.charter_version import charter_hash as _charter_hash
 
     result["authoritative_payload"] = {
-        # schema 7 (Decision 2026-11-08, the world leaves the system): the
-        # payload drops agent_novelty, total_novelty, gate_applied and
-        # world_cid. agent_mint is keyed by household claimant (lowercase
-        # owner wallet, schema 6), the 2-field leaf claimFor verifies;
-        # carry_cid (set by FederatedCloseDriver) commits the next close's
-        # carry-over bundle; charter_hash and sanctioned_households decide
-        # the mint, so they are committed too.
-        "schema": 7,
+        # schema 8 (Decision 2026-11-09): ``concluded`` commits each
+        # concluding tool's malware share (bps), one agentMintRoot leaf
+        # each. Schema 7 dropped the world's fields. agent_mint is keyed by
+        # household claimant (lowercase owner wallet, schema 6), the
+        # 2-field leaf claimFor verifies; carry_cid (set by
+        # FederatedCloseDriver) commits the next close's carry-over bundle;
+        # charter_hash and sanctioned_households decide the mint, so they
+        # are committed too.
+        "schema": 8,
         "epoch_root": result["epoch_root"],
         "agent_mint": result["agent_mint"],
         "total_mint": result["total_mint"],
         "output_decimals": output_decimals,
         "charter_hash": _charter_hash(),
         "sanctioned_households": result["sanctioned_households"],
+        "concluded": result["concluded"],
         "n_batches": result["n_batches"],
         "n_events": result["n_events"],
     }

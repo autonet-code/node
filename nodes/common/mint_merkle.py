@@ -31,6 +31,17 @@ disagreement means an unprovable leaf.
 Only keys that parse as 0x addresses enter the tree: non-address agent
 ids could never be paid on-chain anyway. Zero ATN shares are excluded (the contract treats zero
 as a no-op without a proof).
+
+Concluded tools (Decision 2026-11-09) share the tree: after the mint
+leaves, sorted by digest, one leaf per tool that concluded in the close,
+
+  leaf = keccak256(bytes.concat(keccak256(abi.encode(
+             keccak256("autonet.tool_concluded"), bytes32 digest,
+             uint256 shareBps))))
+
+which ``ToolBond.conclude`` proves to open the tool's malware verdict.
+Its first word is a hash, never an abi-encoded address, so it cannot
+collide with a mint leaf.
 """
 
 from __future__ import annotations
@@ -45,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MINT_SCALE = 1_000_000
 EMPTY_ROOT = b"\x00" * 32
+CONCLUDED_TAG = keccak(text="autonet.tool_concluded")
 
 
 def scale_mint(raw: float, mint_scale: int = DEFAULT_MINT_SCALE) -> int:
@@ -83,6 +95,38 @@ def _leaf_hash(address: str, amount: int) -> bytes:
         ["address", "uint256"], [address, amount])))
 
 
+def concluded_leaf(digest: str, share_bps: int) -> bytes:
+    """A concluded tool's leaf (ToolBond.conclude)."""
+    d = bytes.fromhex(str(digest).lower().removeprefix("0x"))
+    return keccak(keccak(abi_encode(
+        ["bytes32", "bytes32", "uint256"], [CONCLUDED_TAG, d, int(share_bps)])))
+
+
+def _all_leaves(agent_mint: Dict[str, float], concluded: Optional[Dict[str, int]],
+                mint_scale: int) -> List[bytes]:
+    """The tree's leaves: mint leaves (by address), then concluded leaves
+    (by digest)."""
+    leaves = [_leaf_hash(a, m) for a, m in mint_leaves(agent_mint, mint_scale)]
+    for digest in sorted(str(d).lower().removeprefix("0x") for d in (concluded or {})):
+        share = {str(k).lower().removeprefix("0x"): v
+                 for k, v in (concluded or {}).items()}[digest]
+        leaves.append(concluded_leaf(digest, share))
+    return leaves
+
+
+def _proof_at(leaves: List[bytes], target: int) -> List[bytes]:
+    levels = _build_levels(leaves)
+    proof: List[bytes] = []
+    idx = target
+    for level in levels[:-1]:
+        sibling = idx + 1 if idx % 2 == 0 else idx - 1
+        if sibling < len(level):
+            proof.append(level[sibling])
+        # else: odd node promoted unchanged — no proof element.
+        idx //= 2
+    return proof
+
+
 def _hash_pair(a: bytes, b: bytes) -> bytes:
     return keccak(a + b) if a <= b else keccak(b + a)
 
@@ -104,21 +148,23 @@ def _build_levels(leaf_hashes: List[bytes]) -> List[List[bytes]]:
 def mint_merkle_root(
     agent_mint: Dict[str, float],
     mint_scale: int = DEFAULT_MINT_SCALE,
+    concluded: Optional[Dict[str, int]] = None,
 ) -> bytes:
-    """Root over the mint map. EMPTY_ROOT (32 zero bytes) when no
-    claimable entries exist — the contract rejects claims against it.
+    """Root over the mint map and the concluded tools. EMPTY_ROOT (32
+    zero bytes) when the tree has no leaf — the contract rejects claims
+    against it.
     """
-    entries = mint_leaves(agent_mint, mint_scale)
-    if not entries:
+    leaves = _all_leaves(agent_mint, concluded, mint_scale)
+    if not leaves:
         return EMPTY_ROOT
-    levels = _build_levels([_leaf_hash(a, m) for a, m in entries])
-    return levels[-1][0]
+    return _build_levels(leaves)[-1][0]
 
 
 def mint_merkle_proof(
     agent_mint: Dict[str, float],
     address: str,
     mint_scale: int = DEFAULT_MINT_SCALE,
+    concluded: Optional[Dict[str, int]] = None,
 ) -> Optional[List[bytes]]:
     """Proof for one agent's leaf, or None when the agent has no
     claimable ATN share. A single-leaf tree yields an empty proof.
@@ -131,17 +177,32 @@ def mint_merkle_proof(
             break
     if target is None:
         return None
+    return _proof_at(_all_leaves(agent_mint, concluded, mint_scale), target)
 
-    levels = _build_levels([_leaf_hash(a, m) for a, m in entries])
-    proof: List[bytes] = []
-    idx = target
-    for level in levels[:-1]:
-        sibling = idx + 1 if idx % 2 == 0 else idx - 1
-        if sibling < len(level):
-            proof.append(level[sibling])
-        # else: odd node promoted unchanged — no proof element.
-        idx //= 2
-    return proof
+
+def concluded_proof(
+    agent_mint: Dict[str, float],
+    concluded: Dict[str, int],
+    digest: str,
+    mint_scale: int = DEFAULT_MINT_SCALE,
+) -> Optional[List[bytes]]:
+    """Proof for one concluded tool's leaf, or None when the close did not
+    conclude it."""
+    d = str(digest).lower().removeprefix("0x")
+    ordered = sorted(str(k).lower().removeprefix("0x") for k in concluded)
+    if d not in ordered:
+        return None
+    target = len(mint_leaves(agent_mint, mint_scale)) + ordered.index(d)
+    return _proof_at(_all_leaves(agent_mint, concluded, mint_scale), target)
+
+
+def verify_concluded_proof(root: bytes, digest: str, share_bps: int,
+                           proof: List[bytes]) -> bool:
+    """Python mirror of ToolBond.conclude's proof check."""
+    computed = concluded_leaf(digest, share_bps)
+    for p in proof:
+        computed = _hash_pair(computed, p)
+    return computed == root
 
 
 def verify_mint_proof(

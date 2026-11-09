@@ -9,7 +9,7 @@ Spec
 
 The authoritative payload is a dict with these fields, in this order:
 
-  1. schema:           int (currently 7)
+  1. schema:           int (currently 8)
   2. epoch_id:         str
   3. epoch_root:       64-char lowercase hex string (sha256 digest)
   4. prev_epoch_root:  64-char lowercase hex string (sha256 digest)
@@ -30,7 +30,12 @@ The authoritative payload is a dict with these fields, in this order:
   12. sanctioned_households: list[str], sorted lowercase households under
                        a DAO sanction at the snapshot (their mint is
                        withheld).
-  13. seed:            true, ONLY on a genesis seed anchor
+  13. concluded:       dict[str, int] — each tool that concluded in this
+                       close (digest hex) -> its malware share in bps; the
+                       anchor's agentMintRoot holds one leaf per entry,
+                       from which ToolBond opens the tool's verdict
+                       (Decision 2026-11-09).
+  14. seed:            true, ONLY on a genesis seed anchor
                        (docs/multi_jurisdiction.md decision 9): the
                        carry bundle is an adopted snapshot, not the output
                        of an observed epoch. Omitted entirely otherwise, so
@@ -95,7 +100,10 @@ from typing import Any, Dict, List, Tuple
 # ``agent_rep`` key (REP is claimed DAO-side now, never anchored). Schema 2
 # was the v4.1 era (3-field merkle leaf + agent_rep blob key); bumped so the
 # blob shape change is explicit, not silently reusing a different-shape number.
-SCHEMA_VERSION = 7
+# Schema 8 (Decision 2026-11-09): the payload commits ``concluded`` (each
+# concluding tool's malware share in bps), and the mint blob carries it so
+# a submitter rebuilds the whole agentMintRoot tree.
+SCHEMA_VERSION = 8
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
@@ -113,6 +121,7 @@ _FIELD_ORDER = [
     "carry_cid",
     "charter_hash",
     "sanctioned_households",
+    "concluded",
 ]
 
 
@@ -134,6 +143,12 @@ def _format_agent_dict(d: Dict[str, float], decimals: int) -> Dict[str, str]:
         k: _format_float(d[k], decimals)
         for k in sorted(d.keys())
     }
+
+
+def _format_concluded(d: Dict[str, Any]) -> Dict[str, int]:
+    """Concluded tools: lowercase digest hex (no 0x) -> share bps, sorted."""
+    out = {str(k).lower().removeprefix("0x"): int(v) for k, v in d.items()}
+    return {k: out[k] for k in sorted(out)}
 
 
 def _validate_hex32(name: str, value: str) -> str:
@@ -178,6 +193,7 @@ def encode_authoritative_payload(
         "charter_hash": str(payload.get("charter_hash", "")).lower(),
         "sanctioned_households": sorted(
             {str(h).lower() for h in payload.get("sanctioned_households") or ()}),
+        "concluded": _format_concluded(payload.get("concluded") or {}),
     }
 
     # Canonical order: NOT alphabetical, but the explicit _FIELD_ORDER.
@@ -201,24 +217,32 @@ def encode_agent_mint_blob(
     agent_mint: Dict[str, float],
     *,
     decimals: int = DEFAULT_DECIMALS,
+    concluded: Dict[str, Any] | None = None,
 ) -> bytes:
-    """Encode the off-chain ``agent_mint`` blob (money only).
+    """Encode the off-chain ``agent_mint`` blob.
 
     Format:
       {
-        "schema": 7,
-        "agent_mint": {claimant: float-as-str (sorted keys)}
+        "schema": 8,
+        "agent_mint": {claimant: float-as-str (sorted keys)},
+        "concluded": {digest: share bps (sorted keys)}   (only when any)
       }
+
+    ``concluded`` holds the tools whose leaves share the agentMintRoot
+    tree with the mint leaves (Decision 2026-11-09), so a submitter can
+    rebuild the tree and prove either kind.
 
     Decision 2026-07-10 (money only): the v4.1 decoupled ``agent_rep``
     key is gone — REP is claimed DAO-side (RepToken) on ratified ATN
     earnings, never anchored on the close path. The submitter builds its
     merkle proof from the ``agent_mint`` map alone (2-field leaf).
     """
-    blob = {
+    blob: Dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "agent_mint": _format_agent_dict(agent_mint, decimals),
     }
+    if concluded:
+        blob["concluded"] = _format_concluded(concluded)
     return json.dumps(
         blob,
         ensure_ascii=False,
@@ -254,6 +278,12 @@ def decode_agent_mint_blob(blob: bytes) -> Dict[str, float]:
     for k, v in data.get("agent_mint", {}).items():
         out[str(k)] = float(v)
     return out
+
+
+def decode_concluded(blob: bytes) -> Dict[str, int]:
+    """The concluded tools a mint blob carries (digest -> share bps)."""
+    data = json.loads(blob.decode("utf-8"))
+    return _format_concluded(data.get("concluded") or {})
 
 
 # ---------------------------------------------------------------------------

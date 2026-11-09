@@ -78,13 +78,13 @@ def _review_inputs(digests: List[str], reviewers: List[str]) -> Dict[str, Any]:
     """REP shares and a ToolBond snapshot in which every reviewer reviewed
     every tool in this window (accuracy 1, a positive correctness rating)."""
     share = 1.0 / (len(reviewers) + 1)
+    from tests.test_tool_mint import tool_cells
     snapshot = {
         "supply": SUPPLY,
-        "tools": {d: {"axes": {"correctness": {"sum": 70 * E18, "mass": E18}},
-                      "harm": {"sum": 0, "mass": 0}} for d in digests},
-        "rounds": {d: [{"epoch": 1, "supply": SUPPLY, "prior_mass": {},
-                        "reviews": [{"reviewer": r, "stake": 0, "accuracy": E18,
-                                     "axes": ["correctness"]} for r in reviewers]}]
+        "tools": {d: tool_cells(correctness=0.7) for d in digests},
+        "rounds": {d: [{"epoch": 1, "supply": SUPPLY,
+                        "reviews": [{"reviewer": r, "accuracy": E18}
+                                    for r in reviewers]}]
                    for d in digests},
     }
     return {"rep_shares": {r: share for r in reviewers},
@@ -122,7 +122,7 @@ def test_three_daemons_produce_byte_identical_maps():
     # Both tool authors minted (their reviews concluded this close).
     assert results[0]["agent_mint"].get("alice", 0) > 0
     assert results[0]["agent_mint"].get("bob", 0) > 0
-    assert results[0]["authoritative_payload"]["schema"] == 7
+    assert results[0]["authoritative_payload"]["schema"] == 8
 
 
 def test_serialized_json_is_byte_identical_across_daemons():
@@ -191,7 +191,8 @@ def test_empty_canonical_yields_empty_authoritative_map():
     assert result["authoritative"] is True
     assert set(result["authoritative_payload"]) == {
         "schema", "epoch_root", "agent_mint", "total_mint", "output_decimals",
-        "charter_hash", "sanctioned_households", "n_batches", "n_events"}
+        "charter_hash", "sanctioned_households", "concluded", "n_batches",
+        "n_events"}
 
 
 # ---------------------------------------------------------------------------

@@ -299,3 +299,25 @@ def test_submitter_builds_proof_end_to_end(chain):
         addrs[0], eid).call() == scale_mint(3.5)
     assert contract.functions.balanceOf(addrs[0]).call() == scale_mint(3.5)
     assert contract.functions.balanceOf(operator).call() == op_before
+
+
+def test_concluded_leaves_share_the_tree():
+    """Decision 2026-11-09: each concluding tool's leaf sits after the mint
+    leaves; both kinds prove against the same root."""
+    from nodes.common.mint_merkle import (
+        concluded_leaf, concluded_proof, verify_concluded_proof)
+    mint = {ADDRS[0]: 1.0, ADDRS[1]: 2.0}
+    concluded = {"bb" * 32: 6000, "0x" + "aa" * 32: 0}
+    root = mint_merkle_root(mint, concluded=concluded)
+    assert root != mint_merkle_root(mint)
+    for a in ADDRS[:2]:
+        proof = mint_merkle_proof(mint, a, concluded=concluded)
+        assert verify_mint_proof(root, a, scale_mint(mint[a]), proof)
+    for d, bps in (("aa" * 32, 0), ("bb" * 32, 6000)):
+        proof = concluded_proof(mint, concluded, d)
+        assert verify_concluded_proof(root, d, bps, proof)
+        assert not verify_concluded_proof(root, d, bps + 1, proof)
+    assert concluded_proof(mint, concluded, "cc" * 32) is None
+    # A tree of concluded leaves alone is still a tree.
+    only = mint_merkle_root({}, concluded={"bb" * 32: 1})
+    assert only == concluded_leaf("bb" * 32, 1)

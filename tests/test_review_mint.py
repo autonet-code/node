@@ -272,6 +272,51 @@ class TestMalware:
         assert out["per_digest"][DIGEST]["malware"] is True
 
 
+class TestVerdictFlow:
+    """The pay waits for the vote: a malware verdict holds the author side
+    until ToolBond settles it (Decision 2026-11-09)."""
+
+    def _concluded_malware(self):
+        out = _mint({DIGEST: [_round(1, _rev(R1), _rev(R2))]}, snap={"malware": 0.6})
+        return out, out["tool_rounds_next"]
+
+    def _later(self, state, verdict, **kw):
+        snap = _snap({}, tools={DIGEST: tool_cells(malware=0.6)})
+        snap["verdicts"] = {DIGEST: {"concluded": True, **verdict}}
+        return _mint(None, snapshot=snap, state=state, **kw)
+
+    def test_the_author_side_is_held_and_the_leaf_carries_the_share(self):
+        out, state = self._concluded_malware()
+        assert out["concluded"] == {DIGEST: 6000}
+        assert state["tools"][DIGEST]["held"] == {
+            "weight": pytest.approx(0.5 * 0.6), "on": [DIGEST]}
+
+    def test_a_dao_ruling_of_no_malware_pays_it_in_that_close(self):
+        _, state = self._concluded_malware()
+        waiting = self._later(state, {"ruling": None, "settled": None})
+        assert waiting["node_agent"] == {}
+        assert "held" in waiting["tool_rounds_next"]["tools"][DIGEST]
+        cleared = self._later(state, {"ruling": False, "settled": None})
+        tot = _totals(cleared)
+        assert tot[AUTHOR] == pytest.approx(0.5 * 0.6)
+        assert cleared["per_digest"][DIGEST]["released"] is True
+        assert "held" not in cleared["tool_rounds_next"]["tools"][DIGEST]
+        assert cleared["concluded"] == {}          # it concluded before
+
+    def test_a_settled_malware_verdict_drops_it(self):
+        _, state = self._concluded_malware()
+        out = self._later(state, {"ruling": None, "settled": True})
+        assert out["node_agent"] == {}
+        assert "held" not in out["tool_rounds_next"]["tools"][DIGEST]
+
+    def test_the_leaf_share_is_floored_bps(self):
+        out = _mint({DIGEST: [_round(1, _rev(R1))]},
+                    snapshot=_snap({DIGEST: [_round(1, _rev(R1))]},
+                                   tools={DIGEST: tool_cells(malware=0.0)}))
+        assert out["concluded"] == {DIGEST: 0}
+        assert out["per_digest"][DIGEST]["malware"] is False
+
+
 class TestRatingsCarry:
     def test_ratings_are_plain_means(self):
         cells = tool_cells(correctness=0.9, simplicity=0.4, novelty=0.3,
