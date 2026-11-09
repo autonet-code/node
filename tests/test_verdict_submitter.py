@@ -102,6 +102,24 @@ def test_every_concluded_leaf_is_shown_once(tmp_path):
     assert bond.sent == [] and {r.get("concluded") for r in rows} == {"already"}
 
 
+def test_a_conclude_lost_to_another_daemon_counts_as_concluded(tmp_path):
+    """Every operator shows ToolBond the same leaves: when another daemon's
+    conclude lands between the read and this one's transaction, the revert
+    is no error, and the malware verdict is still tracked for settling."""
+    vs, bond = _setup(tmp_path)
+    inner = vs._send
+
+    def racing(call: Any) -> Dict[str, Any]:
+        inner(call)                                  # theirs lands
+        return {"success": False, "error": "would revert: WrongStage()"}
+    vs._send = racing
+    rows = vs.conclude_epoch("e2")
+    assert {r["digest"]: r.get("concluded") for r in rows} == {CLEAN: "already",
+                                                               BAD: "already"}
+    assert not any(r.get("error") for r in rows)
+    assert vs.open_verdicts == {BAD: 7000}
+
+
 def test_settles_after_the_appeal_window(tmp_path):
     vs, bond = _setup(tmp_path)
     vs.conclude_epoch("e2")

@@ -151,7 +151,12 @@ class VerdictSubmitter:
                         d, int(index), int(bps), [bytes(p) for p in proof]))
                     row["concluded"] = bool(res.get("success"))
                     if not res.get("success"):
-                        row["error"] = res.get("error", "conclude failed")
+                        if int(self._bond.functions.verdicts(d).call()[0]) != 0:
+                            # Another daemon's conclude landed first: every
+                            # operator shows ToolBond the same leaves.
+                            row["concluded"] = "already"
+                        else:
+                            row["error"] = res.get("error", "conclude failed")
                 else:
                     row["concluded"] = "already"
                 if bps * 2 > _BPS:
