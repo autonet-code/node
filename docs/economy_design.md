@@ -161,13 +161,17 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   reviewers clear the conclusion gate. Then the author's side is not paid,
   nor that of any composite using the tool, and ToolBond slashes the bond
   and burns the author household's REP by that share (in full when the DAO
-  rules malware; the REP burn capped at the REP that said yes). The author
+  rules malware; no cap, the appeal is the guard). The author
   can't withdraw the bond while a verdict is forming. The close commits
   one leaf per concluding tool with its share in the anchor's tree, from
   which ToolBond opens the verdict. Only the author can appeal, only a
   malware yes; the pay and the slash wait for the vote, and the DAO's
-  ruling (yes or no) replaces the reviewers'. Cleared, the author's side
-  is paid in the next close. Ratings are not appealable.
+  ruling (yes or no) replaces the reviewers'. The held side is fixed in
+  ATN at the conclusion, as the author's and the dependencies' parts it
+  would have paid, and reserved: later closes divide a pool without it.
+  Cleared, exactly those amounts are paid in the next close; a settled
+  malware verdict returns them to the pool (unminted, carried over). The
+  carry bundle holds the reservations. Ratings are not appealable.
 - **Disqualified means unpaid, nothing else**: the tool stays in the
   library, spreads to every daemon, shows in search with its ratings and
   can be adopted. A fix is a new version with a new bond.

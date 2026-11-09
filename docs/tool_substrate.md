@@ -36,9 +36,12 @@ the network's judgement" and the reviewed own-share of Decision
   "autonet.tool_concluded"), digest, shareBps))))`, in the anchor's
   agentMintRoot) and ToolBond opens the verdict from it, slashes the bond
   and burns the author's REP by the share. Only the author appeals, only a
-  malware yes; the DAO's ruling replaces the reviewers'. A settled malware
-  verdict drops the held side; the DAO clearing the tool pays it in the
-  next close. A flag needs evidence: free text pointing into the code,
+  malware yes; the DAO's ruling replaces the reviewers'. The held side is
+  fixed in ATN at the conclusion (the parts it would have paid) and
+  reserved out of later pools, in the carry bundle's `tool_rounds`. A
+  settled malware verdict returns it to the pool; the DAO clearing the
+  tool pays exactly the reserved amounts in the next close (the pay waits
+  for the vote: the author is paid what the conclusion computed). A flag needs evidence: free text pointing into the code,
   kept by the reviewer's daemon as a content-addressed blob whose sha256
   is `evidenceHash`, read with `fetch_evidence`.
 - **Disqualified means unpaid, nothing else.** The tool stays in the
