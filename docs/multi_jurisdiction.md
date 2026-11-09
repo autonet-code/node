@@ -55,7 +55,10 @@ extension with exactly one slot).
    served peer to peer, scrutinized beforehand). Members who don't show up
    simply didn't merge. Tokens move by ordinary treasury transfer
    proposals. No absorb mechanism, no vault changes.
-10. **Staked reviews (one review type, audits included).** Ordinary reviews
+10. **Staked reviews (one review type, audits included).** (Superseded by
+    `tool_substrate.md` Decision (2026-11-09): reviews carry no ATN stake,
+    four fixed fields replace the per-axis scores and the harm score, and
+    malware is a yes/no verdict. Kept below as history.) Ordinary reviews
     have paid nothing since v4.1 (2026-07-09) dropped the vet royalty,
     which fake agents could buy. Owner binding plus ε = 0 closes that hole,
     so reviews get paid again:

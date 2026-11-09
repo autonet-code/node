@@ -215,7 +215,8 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   existing tools. Reviewers score novelty against it, so copies and thin
   wrappers keep almost nothing.
 - **ToolBond**: an author stake behind every tool; reviews are
-  commit-reveal, weighted by household REP; slashes capped.
+  commit-reveal, weighted by household REP; a malware verdict slashes
+  the bond and burns REP by the share that said yes.
 - Search orders by relevance only; each match carries its ratings, bond
   and the malware share as metadata. Nothing is pruned or hidden.
 
