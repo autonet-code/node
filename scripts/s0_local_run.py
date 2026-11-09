@@ -43,8 +43,10 @@ default ``<S0_DIR>/models``), fetched and verified once before they start.
 The collector writes ``<run>/epochs.jsonl`` (one line per anchor and per
 close, with the close's tool mint) and ``<run>/status.jsonl`` (per daemon,
 every poll); ``CLOSE`` lines name each concluding tool's weight, score
-(V x C x S) and mint, and the end of the run reports ``MINT``, ``BOUNTY``
-and ``VERDICT`` lines. Success, in the owner's
+(V x C x S) and mint, and the end of the run reports ``MINT``, ``BOUNTY``,
+``VERDICT`` and ``EVIDENCE`` lines (a household that neither wrote nor
+flagged the canary reads each flag's evidence by its hash, from the
+reviewer's daemon). Success, in the owner's
 words: the system works, epochs move forward with durations getting shorter
 with volume of activity, and nothing gets stuck.
 
@@ -1065,6 +1067,44 @@ class Activity:
         except Exception as exc:  # noqa: BLE001
             log(f"VERDICT: read failed: {exc}")
 
+    async def report_evidence(self) -> int:
+        """The canary's malware flags, read by a household that neither
+        wrote nor flagged it: ``tool_round_reviews`` names each flag's
+        evidence hash (ToolBond's logs) and ``fetch_evidence`` gets the
+        blob from the reviewer's daemon, which provides it in the DHT.
+        Returns how many flags' evidence was read."""
+        digest = next((d for d, m in self.published.items() if m["name"] == CANARY), "")
+        author = (self.published.get(digest) or {}).get("author")
+        reader = next((h for h in self.hs
+                       if h.name not in HARM_REVIEWERS and h.name != author), None)
+        if not digest or reader is None:
+            log("EVIDENCE: no canary or no household to read its flags")
+            return 0
+        names = {h.operator.lower(): h.name for h in self.hs if h.operator}
+        try:
+            res = await reader.client.ok({"type": "tool_round_reviews", "digest": digest})
+        except Exception as exc:  # noqa: BLE001
+            log(f"EVIDENCE: tool_round_reviews failed: {exc}")
+            return 0
+        flags = {}
+        for r in res.get("reviews") or []:
+            if r.get("malware") and r.get("evidence_hash"):
+                flags.setdefault(r["evidence_hash"], names.get(r.get("reviewer", ""), "?"))
+        read = 0
+        for h, who in flags.items():
+            try:
+                ev = await reader.client.ok({"type": "fetch_evidence", "evidence_hash": h},
+                                            timeout=120.0)
+            except Exception as exc:  # noqa: BLE001
+                ev = {"error": str(exc)}
+            body = ev.get("evidence") if isinstance(ev.get("evidence"), dict) else {}
+            ok = bool(ev.get("found")) and body.get("manifest_digest") == digest
+            read += ok
+            log(f"EVIDENCE: {reader.name} read {who}'s flag on {CANARY} ({h[:12]}): "
+                f"found={ev.get('found')} {str(body.get('evidence') or ev.get('error') or ev.get('note'))[:80]}")
+        log(f"EVIDENCE: {read}/{len(flags)} malware flag(s) on {CANARY} read by {reader.name}")
+        return read
+
     def epoch_threshold(self) -> int:
         """Fees that end an epoch now: the target share of the supply."""
         return EPOCH_TARGET_SHARE * int(self.sub.functions.atnTotalSupply().call()) // 1_000_000
@@ -1462,6 +1502,7 @@ async def amain() -> int:
         await drain(act)
         act.report_mint()
         act.report_verdicts()
+        await act.report_evidence()
         act.report_batches()
         act.report_shared()
         await report_p2p(households, peer, "at the end")
