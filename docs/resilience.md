@@ -13,7 +13,7 @@ two different readers:
 
 | Layer | Attacker | Defenses | Doc |
 |-------|----------|----------|-----|
-| Daemon-local | a malicious TOOL or AGENT running on *your* machine | secret vault (fail-closed allowance algebra, host binding, names-only audit), process isolation + vault, `tool_guard.py` adoption containment, tool-bound secrets | `secrets.md`, `cross_platform_isolation_design.md`, `tool_secret_binding.md` |
+| Daemon-local | a malicious TOOL or AGENT running on *your* machine | secret vault (fail-closed allowance algebra, host binding, names-only audit), process isolation + vault, tool-bound secrets (no tool containment since Decision 2026-11-09) | `secrets.md`, `cross_platform_isolation_design.md`, `tool_secret_binding.md` |
 | Network economic | a malicious PARTICIPANT (sybil rings, colluding reviewers, wash traders) | everything in this doc §2 to §4 | here |
 | Settlement | a compromised or censoring CHAIN (sequencer, RPC) | deterministic off-chain consensus + consensus-gated migration, §5 | here |
 | Code integrity | a TAMPERED daemon posing as an honest node | fingerprint enforcement + peer attestation (designed, pre-implementation) | `anti_tamper_design.md` |

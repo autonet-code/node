@@ -1,4 +1,4 @@
-# Economy design: the current state (2026-10-28)
+# Economy design: the current state (2026-11-09)
 
 One page, kept current. Where this disagrees with older text elsewhere,
 this wins; the reasoning behind each rule is in `tool_substrate.md`
@@ -15,10 +15,10 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   operator proposes and votes with REP the owner delegates to it. No automatic delegation; a delegate
   who doesn't vote loses delegators, not REP.
 - **External agents act as the operator** (Decision 2026-11-08): every
-  external session's tools, bonds, stakes, reviews and payments come from
-  the operator's address and balance. So a household reviews as one batch
-  per epoch (no second review of a tool that ToolBond would weigh at zero),
-  and the owner funds only the operator: ATN for stakes and bonds, the
+  external session's tools, bonds, reviews and payments come from the
+  operator's address and balance. So a household reviews as one batch per
+  epoch (no second review of a tool that ToolBond would weigh at zero),
+  and the owner funds only the operator: ATN for bonds and services, the
   native token for gas. Native agents keep their own addresses and spend
   only their own balances.
 - **Reward pools** (decided 2026-11-06, being built): a passive income pool
@@ -105,13 +105,30 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   votes, the winner is anchored.
 - A silent chain pauses settlement only; work continues.
 
-## Tool mint (the only mint rail; Decision 2026-11-07)
+## Tool mint (the only mint rail; Decisions 2026-11-07 and 2026-11-09)
 
-- **Paid once, from staked reviews.** Nothing can observe a household's
-  private use, so attestations count for nothing and daemons no longer
-  gossip them (the local log only drives review reminders). A **bonded, pinned (code)** tool is paid once, in the close where
-  its ToolBond review rounds **conclude**; later rounds still rate it but
-  pay nothing.
+- **Paid once, from reviews.** Nothing can observe a household's private
+  use, so attestations count for nothing and daemons no longer gossip them
+  (the local log only drives review reminders). A **bonded, pinned (code)**
+  tool is paid once, in the close where its ToolBond review rounds
+  **conclude**; later rounds still rate it but pay nothing. Why once: after
+  the first conclusion the ratings are public, so repeat payouts would pay
+  later reviewers for copying them; and paying once steers reviews and
+  authors toward new tools.
+- **Every review carries four fixed fields**, the same in every
+  jurisdiction; one missing any is invalid: **correctness** (-1..1),
+  **simplicity** (0..1), **novelty** (0..1, how much of the tool's value
+  is new beyond its dependencies and the prior art it names) and
+  **malware** (yes or no, NIST SP 800-53 Rev. 5 "malicious code": software
+  or firmware intended to perform an unauthorized process with adverse
+  impact on the confidentiality, integrity or availability of a system,
+  any system; a destructive bug is correctness, not malware). A malware
+  yes needs evidence (free text pointing into the code, a content-addressed
+  blob whose sha256 is the review's `evidenceHash`, kept by the reviewer's
+  daemon). The **charter axes** (the DAO's values only) are optional, each
+  scored on its own; an axis a review leaves unscored counts as 0.5 of the
+  top score for that review, with its REP (Registry
+  `unscored_axis_bps`, default 5000).
 - **Conclusion = the breakthrough gate on reviewers**: the distinct
   reviewing households (the author's own and sanctioned ones excluded) hold
   1% of REP and are 0.5% of REP-holding households. Below it the rounds
@@ -121,32 +138,52 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   counts its household's REP share / n, n = the reviews that household made
   in that epoch, so reviewing many tools never multiplies a household's REP.
   Concluding tools split the epoch's pool (carry-over included) by that
-  weight.
+  weight. The ratings never change a tool's share against the others.
 - **Reviewers** take 40% (ToolBond `reviewerShareBps`) of the tool's share
-  **whatever the verdict**, split by accuracy (leave-one-out against the
-  round's consensus) x the round's fade, among reviewers whose household
-  holds at least `reviewer_min_rep_bps` of REP (Registry; default 0 = any
-  REP). REP is a bar, not a multiplier, so it doesn't compound.
-- **The author** takes the other 60% x the tool's rating (the mean of its
-  REP-weighted charter-axis scores, negatives counted as 0). A composite
-  keeps 70% of that and fans 30% over its declared dependencies, up to
-  depth 4; cycles, missing or unpayable deps forfeit. What the author
-  doesn't get stays unminted and carries over.
-- **Excluded**: denied tools and every tool that depends on one, directly or
-  further down (it can't be fetched whole; its author isn't slashed for
-  it), unbonded tools, and sanctioned households' mint (withheld).
+  **whatever their scores**, split by accuracy (the mean over every field
+  and charter axis of 1 - the distance from the others' mean, leave-one-out)
+  x the round's fade, among reviewers whose household holds at least
+  `reviewer_min_rep_bps` of REP (Registry; default 0 = any REP). REP is a
+  bar, not a multiplier, so it doesn't compound.
+- **The author's side** is the other 60% x V x C x S: C the correctness
+  mean and V the REP-weighted mean over all charter axes together, each
+  with negatives counted as 0 (at or below 0, nothing: broken, or against
+  the DAO's values); S = 0.5 + 0.5 x the simplicity mean. The author keeps
+  N (the novelty mean) of it; the declared dependencies split 1 - N
+  equally, each composite dependency keeping its own N (0.7 while
+  unrated), up to depth 4; cycles, missing or unpayable deps forfeit.
+  Without dependencies 1 - N stays unminted (a copy earns nothing). A
+  badly rated dependency still gets its part from a correct composite (it
+  comes out of the composite author's pay). What isn't paid stays unminted
+  and carries over.
+- **Malware verdict**: more than half the REP that reviewed the tool says
+  malware (the share in bps, as the close computes it), judged once its
+  reviewers clear the conclusion gate. Then the author's side is not paid,
+  nor that of any composite using the tool, and ToolBond slashes the bond
+  and burns the author household's REP by that share. The close commits
+  one leaf per concluding tool with its share in the anchor's tree, from
+  which ToolBond opens the verdict. Only the author can appeal, only a
+  malware yes; the pay and the slash wait for the vote, and the DAO's
+  ruling (yes or no) replaces the reviewers'. Cleared, the author's side
+  is paid in the next close. Ratings are not appealable.
+- **Disqualified means unpaid, nothing else**: the tool stays in the
+  library, spreads to every daemon, shows in search with its ratings and
+  can be adopted. A fix is a new version with a new bond.
+- **Excluded**: unbonded tools, and sanctioned households' mint (withheld).
 - **Bounty** (ToolBond, on chain): anyone can add ATN to a tool's bounty
   (`addBounty`). As each round finalizes, every settled review takes
   bounty x (its REP / the REP a tool needs to conclude) x its accuracy,
   paid to its household; a household whose REP alone covers the
-  requirement can take it all. Sanctioned households get none. It is
+  requirement can take it all. Never by the scores given, also when the
+  tool is disqualified or malicious. Sanctioned households get none. It is
   author money, not mint, so it earns no REP and REP may weigh it. The
   author gets the unspent rest back only with the bond.
-- **The ATN stake** only moves ATN inside a round: each review loses
-  stake x (1 - accuracy) to the round's pool, paid out by stake x accuracy;
-  an unrevealed batch loses its whole stake to the treasury. REP moves the
-  same way (see Voice). Reviews written before the household registers are
-  held by its daemon and submitted to the open round once it does.
+- **No ATN stakes on reviews.** They deterred nothing (the reviewer chose
+  the amount, default 0), changed no weight, rating or payment, and as a
+  group lost the fee. A household with no REP cannot review (ToolBond
+  refuses its commit); its daemon sends nothing and reminds no one.
+  Reviews written before the household registers are held by its daemon
+  and submitted to the open round once it does.
 
 ## Voice (REP)
 
@@ -156,31 +193,36 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 - **Moves on reviews** (ToolBond): each review risks `degradeBps` (10%) of the
   household REP it weighed, losing that x (1 - accuracy), reassigned to the
   round's reviews by REP x accuracy; none is created. An unrevealed batch
-  loses the full amount per review. A tool settled harmful costs its author's
-  household H x `authorSlashBps` (100%) of its REP, which is **burned**, not
-  given to the reviewers (a false harm call must not buy voting weight; the
-  slashed bond still pays the reviewers who called harm right). So REP is
-  earned only from the tool pool, but can be won or lost by reviewing.
+  loses the full amount per review. A malware verdict costs its author's
+  household share x `authorSlashBps` (100%) of its REP, which is **burned**,
+  not given to the reviewers (a false flag must not buy voting weight; the
+  slashed bond pays the reviewers who said yes, by REP). So REP is earned
+  only from the tool pool, but can be won or lost by reviewing.
 
 ## Tools
 
-- Manifest is the tool (content-addressed; the author is inside it).
+- Manifest is the tool (content-addressed; the author is inside it). Its
+  declared capabilities (net, fs, spawn, env, secrets) are part of the
+  claim reviewers check.
 - **Novelty claim required to publish**: what is new and the closest
-  existing tools. Reviewers score it on correctness, so copies and thin
-  wrappers rate low.
+  existing tools. Reviewers score novelty against it, so copies and thin
+  wrappers keep almost nothing.
 - **ToolBond**: an author stake behind every tool; reviews are
   commit-reveal, weighted by household REP; slashes capped.
-- Ratings (correctness, simplicity) rank discovery multiplicatively; low
-  ratings bury, nothing is pruned.
+- Search orders by relevance only; each match carries its ratings, bond
+  and the malware share as metadata. Nothing is pruned or hidden.
 
-## Containment
+## Safety is the household's policy
 
-- Per tool: **denied / strict / declared**, from settled harm reviews
-  (including harm still under appeal) against REP supply.
-- Defaults: deny at harm ≥ 50/100, declared below 10, both only once the
-  reviewers hold **0.1% of REP** (`containment_trust_mass_bps` 10;
-  ToolBond `harmQuorumBps` 10). The DAO must lower it as the network
-  grows (about 0.02% at 100k households).
+- The framework rates tools; it does not try to make running them safe.
+  There are no containment tiers, no trust labels, no run gate and no
+  audit hook (Decision 2026-11-09): an agent with a shell runs checked-out
+  code directly, native code bypasses any hook, and a tier would suggest a
+  tool is safe. What a household runs is its own policy (the owner's or
+  its agent's), read from the ratings.
+- Kept: a tool run through `use_tool` is a subprocess that gets only the
+  environment variables and secrets its manifest declares, never the
+  daemon's own (not giving things away, not containment).
 
 ## Attacks and sanctions
 

@@ -1,4 +1,4 @@
-# Architecture: the whole system on one page (2026-10-28)
+# Architecture: the whole system on one page (2026-11-09)
 
 Kept current: every decision that changes a component, a connection or a
 user journey updates this page in the same change. The economy's rules are
@@ -27,9 +27,12 @@ daemon). Also `atn jurisdiction <dao_registry> <rpc_url>`, or `packaged`
 registered in the packaged jurisdiction keeps it. It:
 
 - hosts agents and keeps their keys (age-encrypted vault);
-- runs tools under containment (`tool_guard`, consensus tiers); a tool is a
-  codebase anywhere on the machine, snapshotted by content
-  (`docs/tool_codebases.md`), or a single script;
+- runs tools (`use_tool`) as subprocesses that get only the environment
+  variables and secrets their manifest declares, never the daemon's own;
+  nothing contains them (Decision 2026-11-09: the framework rates tools,
+  what a household runs is its own policy). A tool is a codebase anywhere
+  on the machine, snapshotted by content (`docs/tool_codebases.md`), or a
+  single script;
 - gossips events over libp2p (a published tool's one `tool_registered`
   event) and serves blobs;
 - with a registered agent or operator: runs the federated close, votes epoch elections
@@ -38,10 +41,15 @@ registered in the packaged jurisdiction keeps it. It:
   anchor's carry bundle (registrations, review rounds, ratings), the same
   one a joiner or a rewind installs;
 - reviews on its agents' behalf (commit-reveal): commits when its close
-  fires, reveals once that epoch is anchored;
+  fires, reveals once that epoch is anchored. Every review carries
+  correctness, simplicity, novelty and malware; a malware flag's evidence
+  is a blob the daemon keeps and serves (`fetch_evidence`). A household
+  without REP sends no reviews;
 - searches the tool library locally (`atn/tool_search.py`): keyword and
-  semantic over every manifest it holds, in relevance order, with ratings,
-  harm, bond, author and the household's own relation as metadata. The
+  semantic over every manifest it holds, in relevance order, with the
+  rating as of the latest close (the four fields' means, the malware
+  share, the charter axes), bond, author and the household's own relation
+  as metadata. Unbonded and malware-rated tools are listed too. The
   model (all-MiniLM-L6-v2, pinned by revision and sha256,
   `atn/search_model.py`) downloads in the background on the first run,
   from Hugging Face or from peers that hold it, into `<data_dir>/models`;
@@ -67,7 +75,7 @@ is the brain; the daemon signs and acts for it. External is the main
 journey: people bring the agents they already use. On chain an external
 agent IS the household's operator (Decision 2026-11-08): it makes no
 keypair, its address is the operator's, and the daemon signs everything it
-does (publishing and bonds, staked reviews, service payments and channels,
+does (publishing and bonds, reviews, service payments and channels,
 `send_transaction`) with the operator key. So a household's reviews go out
 as one batch per epoch from one address, and the owner funds only the
 operator. There is no registration per external agent: each one counts as
@@ -166,7 +174,7 @@ agent directory.
   deliver.
 - Daemon to chain: one RPC URL. Contract addresses come from the
   jurisdiction's Registry, read at each start (latest block). The close's
-  parameters (REP, charter, sanctions, containment, epoch rules) are read
+  parameters (REP, charter, sanctions, mint gate, review params, epoch rules) are read
   pinned to the previous anchor so every daemon agrees. A jurisdiction
   won't start without `substrate`, `rep_token`, `tool_bond`, `dao` and
   `timelock` in its Registry and `epoch_rules` "2". Chain calls run off the

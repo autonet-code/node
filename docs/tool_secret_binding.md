@@ -1,5 +1,9 @@
 # Tool–Secret Binding
 
+> Since Decision 2026-11-09 (`docs/tool_substrate.md`) there is no tool guard:
+> the host narrowing in (2) and the guard in (3) below are gone. What stands is
+> the scrubbed environment and the per-PID secret binding.
+
 **Status:** BUILT 2026-07-29, committed (664ad0a). All four changes landed.
 Tests: `tests/atn/test_tool_secret_binding.py` (23),
 `tests/atn/test_tool_guard_hosts.py` (8+1 skip). Regression: 142 tests

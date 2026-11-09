@@ -122,13 +122,13 @@ Two triggers raise a names-only alarm in the app, and both are live.
 text of known secret values. Values shorter than 6 characters are skipped as a
 false-positive guard.
 
-**Out of network scope.** A tool that was bound a host-bound secret runs under
-`atn/tool_guard.py`, which denies any destination outside that secret's
-authorized hosts. The denial fires an alarm carrying the attempted destination
-alongside the secret names. Scope covers secrets bound to a TOOL: a secret the
-agent stages for itself through `secret_request_secret` and reads with its own
-shell or python tool is outside the guard, so host binding does not constrain
-it.
+**Out of network scope: gone.** The tool guard that denied a tool's
+destinations outside a bound secret's authorized hosts was removed with
+containment (Decision 2026-11-09, `docs/tool_substrate.md`): nothing contains
+a tool when it runs. A tool still gets only the secrets it declares, bound to
+its own process; `authorized_hosts` is shown, not enforced. A tool that holds
+a credential and declares net can send it anywhere, which is a claim
+reviewers check against the code.
 
 Both are a **backstop, not a barrier**: they tell you a value has already
 leaked or already been aimed somewhere it should not go, after the fact. Treat

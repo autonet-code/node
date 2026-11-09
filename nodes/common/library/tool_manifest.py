@@ -2,19 +2,21 @@
 
 Design: ``docs/tool_substrate.md``. A tool manifest is a JSON payload
 stored on the existing blob/ArtifactIndex rail, addressed by sha256
-digest. The manifest is the substrate item; claims in the verdict layer
-reference it by digest, usage receipts attest invocations of it, and
-epoch close mints to its author proportional to standing x usage.
+digest. The manifest is the tool: ToolBond reviews rate it by digest
+(correctness, simplicity, novelty, malware, the charter axes), and the
+epoch close pays its author once, when those reviews conclude
+(Decisions 2026-11-07 and 2026-11-09). Its declared capabilities are part
+of the claim reviewers check.
 
 Two trust classes (v2 — docs/tool_substrate.md):
 
   - ``pinned``   — codebase tools. Behavior is locked by ``code_digest``
-                   (sha256 of the code blob). Verdicts are permanent;
-                   the only mintable class.
+                   (sha256 of the code blob), so a review rates exactly
+                   that code; the only mintable class.
   - ``attested`` — connector-backed tools: they run LOCALLY with the
                    user's own credentials but lean on an external API,
-                   so their CON evidence is a timestamp, not a
-                   permanent proof. Publishable, debatable, unminted.
+                   so a review rates behavior that can change. Publishable,
+                   unminted.
 
 Endpoint-backed manifests are NOT tools — remote counterparties with an
 ask price are Services (``docs/services_market.md``) and are rejected

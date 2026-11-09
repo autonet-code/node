@@ -1,5 +1,79 @@
 # Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
+## Decision (2026-11-09): fixed review fields, the score formula, malware, no containment
+
+Amends Decision 2026-11-07 (the share of the pool, conclusion and the
+reviewer share stand); supersedes Decision 2026-10-27 "containment follows
+the network's judgement" and the reviewed own-share of Decision
+2026-10-13 section 9. The current rules are in `economy_design.md`.
+
+- **Fixed review fields**, the same in every jurisdiction, all required (a
+  review missing one is invalid): correctness (-1..1), simplicity (0..1),
+  novelty (0..1, how much of the tool's value is new beyond its
+  dependencies and the prior art it names), malware (yes or no, NIST SP
+  800-53 Rev. 5 "malicious code", any system; a destructive bug is
+  correctness). correctness and simplicity leave the charter: the charter
+  holds only the DAO's values (the default keeps its four axes), each
+  optional per review and scored on its own. An unscored axis counts as
+  0.5 of the top score for that review, with its REP (Registry
+  `unscored_axis_bps`), so every review has a value on every axis and
+  accuracy covers all of them.
+- **Payment of a concluding tool.** Its share of the pool is still the REP
+  behind its reviews. Reviewers take 40% by accuracy, whatever the scores.
+  The author's side is 60% x V x C x S: C the correctness mean, V the
+  REP-weighted mean over all charter axes together (the values work
+  together: no per-axis disqualification), each with negatives counted as
+  0; S = 0.5 + 0.5 x the simplicity mean. The author keeps N, the novelty
+  mean; the dependencies split 1 - N (each composite dependency keeping its
+  own N, 0.7 while unrated); without dependencies 1 - N stays unminted. A
+  disqualified dependency still receives its part from a correct composite.
+  Unpaid parts stay unminted and carry over.
+- **Malware verdict**: more than half the reviewing REP says yes, in bps as
+  the close computes it, once the tool's reviewers clear the conclusion
+  gate. The author's side and that of every composite using the tool are
+  held: the close commits a leaf per concluding tool with its share
+  (`keccak256(bytes.concat(keccak256(abi.encode(keccak256(
+  "autonet.tool_concluded"), digest, shareBps))))`, in the anchor's
+  agentMintRoot) and ToolBond opens the verdict from it, slashes the bond
+  and burns the author's REP by the share. Only the author appeals, only a
+  malware yes; the DAO's ruling replaces the reviewers'. A settled malware
+  verdict drops the held side; the DAO clearing the tool pays it in the
+  next close. A flag needs evidence: free text pointing into the code,
+  kept by the reviewer's daemon as a content-addressed blob whose sha256
+  is `evidenceHash`, read with `fetch_evidence`.
+- **Disqualified means unpaid, nothing else.** The tool stays in the
+  library, in search with its ratings, and can be adopted. Positions (the
+  head/mass geometry) became plain means: the carry bundle keeps
+  `tool_ratings`.
+- **No containment.** The tiers (denied, strict, declared), the trust
+  labels, the bonded-only run gate and the Python audit hook
+  (`atn/tool_guard.py`) are gone. Kept: a tool run through `use_tool` gets
+  only the environment and secrets its manifest declares, and the declared
+  capabilities stay part of the claim reviewers check.
+- **No ATN stakes on reviews**, and a household with no REP cannot review
+  (ToolBond refuses the commit; the daemon sends nothing and reminds no
+  one).
+- **Why pay once.** After the first conclusion the ratings are public, so
+  repeat payouts would pay later reviewers for copying them; and paying
+  once steers reviews and authors toward new tools. Accepted risk: a good
+  tool rated unfairly at conclusion is never paid, and a new version is
+  judged against it; an unfair conclusion takes many households scoring
+  together.
+- **Why the fields and the formula.** Reviewers make no overall judgment:
+  the formula decides. The charter is one factor like correctness, never a
+  boost to a tool's share against the others (that would let a household
+  with a tool in the same close gain by scoring the others low, the gap
+  Decision 2026-11-07 closed). Novelty replaces the reviewed own-share and
+  the fixed 70/30 split: a copy earns nothing, building on good tools pays.
+- **Why no containment.** The framework rates tools; it does not try to
+  solve security. The run gate was bypassed by the checkout, the audit
+  hook by native code and by any agent with a shell running the code
+  directly ("honesty, not hermetics"), and both suggested a tool was safe.
+  Safety is the household's own policy, from the ratings.
+- **Why no stakes.** The reviewer picked the amount (default 0), it changed
+  no weight, rating or payment, rewarded matching the consensus and as a
+  group lost the fee: a wager with no function. The REP at risk stays.
+
 ## Decision (2026-11-09): a household's external sessions share adopted tools
 
 - **Rule.** A tool any external agent of a daemon adopted is installed for
@@ -109,11 +183,13 @@
   download.
 - **Relevance order, ratings as metadata.** The rating lift
   (`base x (1 + tanh(rating))`) and the coverage density blend are gone,
-  and the coverage atlas with them. Each match carries the ToolBond
-  rating per axis with its REP mass, harm with its mass, bond state,
-  author context, and the household's relation: adopted here, authored
-  here, reviewed by us (our scores and harm, from the held reviews and
-  the batches on disk). Unbonded and denied tools stay excluded.
+  and the coverage atlas with them. Each match carries the tool's rating
+  as of the latest close (since Decision 2026-11-09: the four fields'
+  means, the malware share, the charter axes and the REP mass), bond
+  state, author context, and the household's relation: adopted here,
+  authored here, reviewed by us (our review, from the held reviews and the
+  batches on disk). Unbonded and malware-rated tools are listed too
+  (Decision 2026-11-09).
 - **No embedding in consensus.** The registration event should carry only
   the charter axes: nothing in the close reads the embedding tail, and
   the author's embedder output has no place in consensus. **Done** by
