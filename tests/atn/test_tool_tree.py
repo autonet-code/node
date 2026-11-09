@@ -140,7 +140,7 @@ async def test_codebase_cannot_be_the_daemon_data(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_codebase_tool_is_adopted_and_runs_strict(tmp_path):
+async def test_a_codebase_tool_is_adopted_and_runs(tmp_path):
     from tests.atn.test_tool_store import TestAdoption, _register_agent
     author = _make_runtime(tmp_path / "author_daemon")
     await _register_agent(author, "foreign-author")
@@ -154,8 +154,7 @@ async def test_a_codebase_tool_is_adopted_and_runs_strict(tmp_path):
     assert out.get("origin") == "adopted", out
     record = rt.tool_store.get(res["digest"])
     result = await rt.tool_store.call(record, {"x": "net"}, caller_id="worker")
-    assert result["result"] == {"said": "hi net"}, result
-    assert result["containment"]["tier"] == "strict"
+    assert result == {"result": {"said": "hi net"}}, result
 
 
 @pytest.mark.asyncio

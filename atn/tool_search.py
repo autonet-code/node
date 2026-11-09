@@ -16,9 +16,12 @@ keyword list at ``KEYWORD_WEIGHT`` (0.5), except that an exact-name hit
 (``exact_name_hit``) takes keyword rank 1 at full weight. Meaning carries
 the order; keywords are there to catch exact names. Ties break on the
 digest, so the order is a pure function of the query and the manifests
-held. Order is relevance only: ratings, review mass, harm, bond state,
-author context and this household's own relation to the tool come back as
-metadata on each match, never as a weight.
+held. Order is relevance only: the rating (correctness, simplicity,
+novelty, the malware share, the charter values and the REP behind them),
+bond state, author context and this household's own relation to the tool
+come back as metadata on each match, never as a weight. Every tool the
+daemon holds can match, unbonded or rated malware included: what to run is
+the household's own policy (Decision 2026-11-09).
 
 Until the model is loaded (the first run downloads it), results are keyword
 matches and the reply says semantic search is not ready, with the download
@@ -549,10 +552,9 @@ async def search_tools(runtime: Any, query: str, k: int = 8, *,
     semantic = semantic_state(runtime)
     ranked = await asyncio.to_thread(
         index.rank, query, list(manifests), semantic=semantic["ready"])
-    # Headroom: the bond pass drops unbonded and denied tools.
     rows = [_base_row(h["digest"], manifests[h["digest"]], h)
-            for h in ranked[:max(k * 2, k + 8)]]
-    rows = (await annotate_probe_rows(runtime, rows))[:k]
+            for h in ranked[:k]]
+    rows = await annotate_probe_rows(runtime, rows)
     reviews = household_reviews(runtime)
     for row in rows:
         row["household"] = household_relation(runtime, row["digest"], reviews)

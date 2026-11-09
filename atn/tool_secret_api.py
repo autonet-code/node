@@ -14,17 +14,14 @@ that was content-hashed before it ran; giving it the value is the point of the
 binding. The exfiltration path this closes is the AGENT holding a secret it
 only needs a TOOL to use.
 
-SELF-CONTAINED BY NECESSITY. Adopted tools run under ``tool_guard`` with a
-scrubbed environment and a deny-by-default audit hook, so this module must not
-import from the ``atn`` package at call time or drag in optional dependencies.
-It speaks the broker's newline-JSON protocol directly.
+SELF-CONTAINED BY NECESSITY. Tools run with a scrubbed environment and their
+own code on the path, so this module must not import from the ``atn`` package
+at call time or drag in optional dependencies. It speaks the broker's
+newline-JSON protocol directly.
 
-THE GUARD INTERACTION. Reading a secret needs the broker pipe/socket, which the
-audit hook sees as a ``socket.*`` (POSIX) event. An adopted tool that declares
-secrets therefore also needs ``net``. Weigh that when approving an adoption: a
-tool with secrets AND net is a tool that can send them somewhere. The narrower
-review is a tool whose declared ``authorized_hosts`` constrain where net may
-go (change 2 in the spec).
+A tool that declares secrets AND net can send them somewhere. Nothing stops it
+(Decision 2026-11-09: no containment); reviewers check the declaration against
+the code, and a household weighs the tool's rating before running it.
 """
 from __future__ import annotations
 

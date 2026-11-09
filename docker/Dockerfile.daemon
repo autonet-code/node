@@ -1,5 +1,5 @@
 # Autonet daemon container: the full ATN Runtime (keystore, vault, event
-# gossip, federated close, chain submission, tool_guard execution).
+# gossip, federated close, chain submission, tool execution).
 #
 # Supersedes the pre-substrate Dockerfile.node (moved to
 # legacy/pre-substrate/, it ran the dissolved nodes.core.node roles).
@@ -106,6 +106,6 @@ EXPOSE 4001
 WORKDIR /home/atn
 USER atn
 
-# tini reaps the tool_guard / worker subprocesses.
+# tini reaps the tool / worker subprocesses.
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["atn", "--headless"]

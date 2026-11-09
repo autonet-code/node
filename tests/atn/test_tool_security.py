@@ -1,8 +1,6 @@
-"""Tool security rail, part A (docs/tool_substrate.md, Decision 2026-10-13):
-novelty claims, same-author successors, stake on publish, the run gate for
-network tools (bonded; there is no vetted flag since staked reviews,
-docs/multi_jurisdiction.md decision 10) and probe_tools bond + rating
-context.
+"""Tool rail (docs/tool_substrate.md, Decisions 2026-10-13 and 2026-11-09):
+novelty claims, same-author successors, stake on publish, no run gate (an
+adopted tool runs bonded or not), and search's bond + rating context.
 
 No chain: ToolBond is a fake client / checker-backed gate throughout.
 """
@@ -18,7 +16,7 @@ from atn.events import EventBus
 from atn.models import AgentDefinition, AgentMode
 from atn.runtime.tool_bond import DEV_OVERRIDE_ENV, ToolBondGate
 from atn.tool_security import (
-    RunOptIns, annotate_probe_rows, publish_with_stake, run_clearance,
+    RunOptIns, annotate_probe_rows, publish_with_stake, rating_for,
 )
 from nodes.common.library.tool_manifest import (
     novelty_errors, publish_novelty_errors, states_nothing_comparable,
@@ -74,9 +72,8 @@ async def _register(rt, caller, name="echo_tool", **extra):
 class FakeClient:
     """ToolBondClient stand-in: records stakes, serves canned status."""
 
-    def __init__(self, statuses=None, *, available=True, ok=True, ratings=None):
+    def __init__(self, statuses=None, *, available=True, ok=True):
         self.statuses = statuses or {}
-        self.ratings = ratings or {}
         self._available = available
         self.ok = ok
         self.bonds: list[tuple[str, str]] = []
@@ -100,22 +97,20 @@ class FakeClient:
             raise st
         return st
 
-    async def rating(self, digest, axis_ids):
-        return self.ratings.get(digest)
-
 
 def _st(bonded=True):
     return {"bonded": bonded, "stake": 100, "author": AUTH,
             "unbond_requested_at": 0, "unbond_epoch": 0, "pending_rounds": 0}
 
 
-def _rating(harm=None, correctness=None, mass=300):
-    axes = {"correctness": {"sum": int(correctness * 100 * mass) if correctness is not None else 0,
-                            "mass": mass if correctness is not None else 0,
-                            "mean": correctness}}
-    return {"axes": axes, "harm": {"sum": int((harm or 0) * 100 * mass),
-                                   "mass": mass if harm is not None else 0,
-                                   "mean": harm}}
+def _rating(malware=None, correctness=None, mass=0.3):
+    """A rating as the close carries it (federated_reconcile.tool_rating)."""
+    return {"correctness": correctness, "simplicity": None, "novelty": None,
+            "malware": malware, "axes": {}, "value": None, "mass": mass}
+
+
+def _ratings(rt, table):
+    rt.tool_store.rating_provider = table.get
 
 
 # ---------------------------------------------------------------------------
@@ -366,48 +361,23 @@ async def _adopted(tmp_path):
     return rt, rt.tool_store.get(res["digest"])
 
 
-class TestRunGate:
-    async def test_bonded_runs(self, tmp_path):
-        rt, rec = await _adopted(tmp_path)
-        out = await rt.tool_store.call(rec, {"x": "hi"}, caller_id="worker")
-        assert out["result"] == {"echo": "hi"}
-        assert await run_clearance(rt, rec) == (True, "bonded")
-
-    async def test_unbonded_never_runs_even_opted_in(self, tmp_path):
+class TestNoRunGate:
+    async def test_unbonded_adopted_tool_runs(self, tmp_path):
+        """No run gate (Decision 2026-11-09): what runs is the household's
+        call; search shows the bond."""
         rt, rec = await _adopted(tmp_path)
         rt.tool_bond_gate = ToolBondGate(rt, checker=lambda d: False)
-        rt.tool_store.run_optins = RunOptIns(tmp_path / "optins.json")
-        rt.tool_store.run_optins.set(rec.digest, True)
         out = await rt.tool_store.call(rec, {"x": "hi"}, caller_id="worker")
-        assert "not cleared to run" in out["error"]
-        assert out["run_gate"].startswith("not bonded")
+        assert out == {"result": {"echo": "hi"}}
 
-    async def test_optin_is_a_note_not_a_gate(self, tmp_path):
-        """No vetted flag: a bonded tool runs with or without the owner's
-        opt-in note, which persists per digest."""
+    async def test_optin_is_a_note(self, tmp_path):
         rt, rec = await _adopted(tmp_path)
         from atn.tool_security import run_optins
         run_optins(rt.tool_store).set(rec.digest, True, name=rec.name)
         reloaded = RunOptIns(Path(rt.tool_store._dir) / "run_optins.json")
         assert reloaded.allows(rec.digest)
         run_optins(rt.tool_store).set(rec.digest, False)
-        assert await run_clearance(rt, rec) == (True, "bonded")
-
-    async def test_no_chain_fails_closed(self, tmp_path, monkeypatch):
-        rt, rec = await _adopted(tmp_path)
-        rt.tool_bond_gate = ToolBondGate(rt)
-        monkeypatch.setattr("atn.runtime.tool_bond._registry_seed", lambda r: {})
-        ok, why = await run_clearance(rt, rec)
-        assert not ok and "no ToolBond address" in why
-
-    async def test_own_tools_not_gated(self, tmp_path):
-        rt = _make_runtime(tmp_path)
-        await _agent(rt, "a")
-        rt.tool_bond_gate = ToolBondGate(rt, checker=lambda d: False)
-        res = await _register(rt, "a")
-        rec = rt.tool_store.get(res["digest"])
-        assert (await rt.tool_store.call(rec, {"x": "y"}, caller_id="a")) == {
-            "result": {"echo": "y"}}
+        assert not run_optins(rt.tool_store).allows(rec.digest)
 
     async def test_corrupt_optin_file_reads_empty(self, tmp_path):
         p = tmp_path / "optins.json"
@@ -440,23 +410,26 @@ def _rows():
 
 
 class TestProbeContext:
-    async def test_drops_unbonded_and_annotates(self, tmp_path):
+    async def test_keeps_every_row_and_annotates(self, tmp_path):
         rt = _make_runtime(tmp_path)
         rt.tool_bond_client = FakeClient({
             D1: _st(),
             D2: _st(bonded=False),
             D3: RuntimeError("rpc down"),
-        }, ratings={D1: _rating(harm=0.1, correctness=0.8), D2: _rating(harm=0.9)})
+        })
+        _ratings(rt, {D1: _rating(malware=0.1, correctness=0.8),
+                      D2: _rating(malware=0.9)})
         rows = await annotate_probe_rows(rt, _rows())
-        assert [r["digest"] for r in rows] == [D1, D3]
-        one, three = rows
+        assert [r["digest"] for r in rows] == [D1, D2, D3]
+        one, two, three = rows
         assert one["bonded"] is True and "vetted" not in one
-        assert one["harm"] == 0.1 and one["harm_mass"] == "300"
-        assert one["chain_rating"]["correctness"] == 0.8
-        assert three["bonded"] is None and three["harm"] is None  # fault: unknown
+        assert one["rating"]["malware"] == 0.1 and one["rating"]["correctness"] == 0.8
+        assert two["bonded"] is False and two["rating"]["malware"] == 0.9
+        assert three["bonded"] is None and three["rating"] is None  # fault: unknown
+        assert not any(k in one for k in ("harm", "trust", "containment"))
         ctx = one["author_context"]
         assert {o["digest"] for o in ctx["other_tools"]} == {D2, D3}
-        assert ctx["max_other_harm"] == 0.9
+        assert ctx["max_other_malware"] == 0.9
         assert ctx["rep"] is None          # no RepToken configured here
 
     async def test_status_cached(self, tmp_path):
@@ -472,7 +445,7 @@ class TestProbeContext:
         rt.tool_bond_client = FakeClient(available=False)
         rows = await annotate_probe_rows(rt, _rows())
         assert len(rows) == 3 and all(r["bonded"] is None for r in rows)
-        assert rows[0]["author_context"]["max_other_harm"] is None
+        assert rows[0]["author_context"]["max_other_malware"] is None
 
     async def test_author_rep_read(self, tmp_path, monkeypatch):
         rt = _make_runtime(tmp_path)
@@ -483,9 +456,9 @@ class TestProbeContext:
         monkeypatch.setattr("atn.tool_security._rep_reader", lambda r: _rep)
         rows = await annotate_probe_rows(rt, _rows()[:1])
         assert rows[0]["author_context"]["rep"] == str(5 * 10**18)
-        assert rows[0]["author_context"]["max_other_harm"] is None
+        assert rows[0]["author_context"]["max_other_malware"] is None
 
-    async def test_probe_tools_drops_unbonded_network_tools(self, tmp_path):
+    async def test_probe_tools_lists_unbonded_tools_with_their_bond(self, tmp_path):
         rt = _make_runtime(tmp_path)
         rt.tool_bond_client = FakeClient({D1: _st(), D2: _st(bonded=False)})
         manifests = {d: {"kind": "tool_manifest", "name": n, "description": "echo",
@@ -496,8 +469,16 @@ class TestProbeContext:
         rt.autonet = SimpleNamespace(_service=SimpleNamespace(_library=lib))
         out = await execute_tool("probe_tools", {"query": "echo", "k": 5}, rt,
                                  caller_id=None)
-        assert [m["digest"] for m in out["matches"]] == [D1]
-        assert out["matches"][0]["bonded"] is True
+        bonded = {m["digest"]: m["bonded"] for m in out["matches"]}
+        assert bonded == {D1: True, D2: False}
+
+    def test_rating_for_survives_a_failing_provider(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+
+        def boom(digest):
+            raise RuntimeError("no close yet")
+        rt.tool_store.rating_provider = boom
+        assert rating_for(rt, D1) is None
 
 
 # ---------------------------------------------------------------------------
@@ -523,20 +504,19 @@ class TestWsSurface:
         srv = _bridge(rt)
         r = await srv._handle_message({"type": "set_tool_run_optin", "msg_id": "1",
                                        "digest": rec.digest, "allowed": True}, _sess())
-        assert r["ok"] and r["result"] == {"digest": rec.digest, "allowed": True,
-                                           "runnable": True, "reason": "bonded"}
+        assert r["ok"] and r["result"] == {"digest": rec.digest, "allowed": True}
         r = await srv._handle_message({"type": "list_tool_run_optins", "msg_id": "2"},
                                       _sess())
         assert [o["digest"] for o in r["result"]["optins"]] == [rec.digest]
         assert r["result"]["optins"][0]["name"] == "net_tool"
-        rt.tool_bond_client = FakeClient({rec.digest: _st()},
-                                         ratings={rec.digest: _rating(harm=0.25)})
+        rt.tool_bond_client = FakeClient({rec.digest: _st()})
+        _ratings(rt, {rec.digest: _rating(malware=0.25)})
         r = await srv._handle_message({"type": "tool_bond_status", "msg_id": "3",
                                        "digest": rec.digest}, _sess())
         assert r["result"]["status"]["bonded"] is True
-        assert r["result"]["harm"] == 0.25 and r["result"]["harm_mass"] == "300"
+        assert r["result"]["rating"]["malware"] == 0.25
         assert r["result"]["optin"] is True and r["result"]["network_tool"] is True
-        assert r["result"]["runnable"] is True
+        assert "runnable" not in r["result"]
         r = await srv._handle_message({"type": "tool_bond_status", "msg_id": "3b",
                                        "digests": [rec.digest, "ab" * 32]}, _sess())
         views = r["result"]["statuses"]
@@ -574,20 +554,6 @@ class TestWsSurface:
                                       _sess())
         row = next(t for t in r["result"]["tools"] if t["digest"] == new)
         assert row["novelty"] == NOVEL
-
-
-def test_trust_label_is_zero_until_reviews_clear_a_tool():
-    from types import SimpleNamespace
-    from atn.tool_security import REVIEWED, ZERO_TRUST, trust_for_digest
-    store = SimpleNamespace(security_standing_provider=None)
-    rt = SimpleNamespace(tool_store=store, _config=None)
-    assert trust_for_digest(rt, "ab" * 32) == ("strict", ZERO_TRUST)
-
-    def boom(digest):
-        raise RuntimeError("chain down")
-    store.security_standing_provider = boom
-    assert trust_for_digest(rt, "ab" * 32)[1] == ZERO_TRUST
-    assert REVIEWED.startswith("cleared")
 
 
 async def test_publish_after_registration_reauthors_without_a_redo(tmp_path):

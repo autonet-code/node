@@ -4,8 +4,8 @@ and 11).
 
 Pinned here:
 - an AUTHORED tool runs with the scrubbed environment (no daemon secret, only
-  declared env names) and the keystore / data dir deny paths, including under
-  ATN_AUTHORED_TOOLS_BARE=1 for the env;
+  declared env names). There are no deny paths since the tool guard left
+  (Decision 2026-11-09);
 - a connection whose client PID is a tracked tool / shell run, or a
   descendant of one, is refused by ws_auth.local_peer_denied; an untracked
   local client is still accepted;
@@ -20,6 +20,7 @@ import json
 import socket
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -91,35 +92,18 @@ async def test_authored_tool_gets_no_daemon_secrets(tmp_path, monkeypatch):
     assert out["result"] == {"secret": None, "owner": None, "declared": "ok"}
 
 
-@pytest.mark.asyncio
-async def test_bare_mode_still_scrubs_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("ATN_TEST_SECRET", "hunter2")
-    monkeypatch.setenv("ATN_AUTHORED_TOOLS_BARE", "1")
+def test_a_tool_runs_as_a_plain_interpreter_on_its_own_code(tmp_path):
+    """No guard wrapper (Decision 2026-11-09): argv is the interpreter and
+    the script, the tool's code root leads PYTHONPATH, and no policy rides
+    in the environment."""
     rt = _runtime(tmp_path)
-    rec = await _authored(rt, _ENV_CODE)
-    out = await rt.tool_store.call(rec, {}, caller_id="child")
-    assert out["result"]["secret"] is None
-
-
-@pytest.mark.asyncio
-async def test_authored_tool_cannot_read_data_dir_or_keystore(tmp_path):
-    rt = _runtime(tmp_path)
-    planted = Path(rt._config.data_dir) / "private" / "planted.txt"
-    planted.parent.mkdir(parents=True, exist_ok=True)
-    planted.write_text("daemon secret")
-    code = (
-        "import sys, json\n"
-        "json.load(sys.stdin)\n"
-        f"print(open({str(planted)!r}).read())\n"
-    )
-    rec = await _authored(rt, code)
-    out = await rt.tool_store.call(rec, {}, caller_id="child")
-    assert "error" in out and "may not access" in out["error"], out
-
-    argv, env, _ = rt.tool_store._exec_spec(rec, Path("x.py"))
-    policy = json.loads(env["ATN_TOOL_POLICY"])
-    from atn._vendor.kevin import keystore
-    assert str(Path(keystore.KEYSTORE_DIR).resolve()) in policy["deny_paths"]
+    rec = SimpleNamespace(digest="ab" * 32, origin="authored",
+                          manifest={"capabilities": {}})
+    argv, env, cwd = rt.tool_store._exec_spec(rec, Path("x.py"),
+                                              code_root=tmp_path / "code")
+    assert argv == [sys.executable, "x.py"]
+    assert env["PYTHONPATH"] == str(tmp_path / "code")
+    assert "ATN_TOOL_POLICY" not in env and cwd is None
 
 
 # ---------------------------------------------------------------------------

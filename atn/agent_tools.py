@@ -740,7 +740,7 @@ _TOOLS: list[ToolDefinition] = [
                 "connector_id": {"type": "string", "description": "MCP connector backing this tool (attested); the tool name must match a connector operation."},
                 "provider": {"type": "string", "description": "External provider identity for attested tools (e.g. 'google')."},
                 "dependencies": {"type": "array", "items": {"type": "string"}, "description": "Digests of published tools this tool calls at runtime (pinned only). Declaration = the runtime allowlist; nested calls run under the ORIGINAL caller's authority. Composite tools use the line-framed sandbox protocol (see docs/tool_substrate.md)."},
-                "capabilities": {"type": "object", "description": "What the code needs from the host, deny-by-default: {net: bool, fs: bool, spawn: bool, env: [VAR,...], secrets: [SERVICE,...]}. On adopting daemons this IS the sandbox policy — undeclared use hard-fails, so declare honestly. `secrets` names the vault services the code reads at runtime: the daemon binds ONLY those to the tool's own process (clamped by the calling agent's allowance — declaring does not grant), and the tool reads each value from ATN_TOOL_SECRETS via its own broker session. Omit if the tool only reads stdin and writes stdout."},
+                "capabilities": {"type": "object", "description": "What the code needs from the host: {net: bool, fs: bool, spawn: bool, env: [VAR,...], secrets: [SERVICE,...]}. Part of the claim reviewers check against the code, so declare honestly. `env` names the daemon variables the tool's process gets (it gets no others). `secrets` names the vault services the code reads at runtime: the daemon binds ONLY those to the tool's own process (clamped by the calling agent's allowance — declaring does not grant), and the tool reads each value from ATN_TOOL_SECRETS via its own broker session. Omit if the tool only reads stdin and writes stdout."},
                 "version_of": {"type": "string", "description": "Digest of YOUR OWN earlier tool this revises (artifact lineage; the successor carries its predecessor's rating until its own reviews settle). Another author's tool is refused: publish a new tool with its own novelty claim instead."},
                 "novelty": _NOVELTY_SCHEMA,
             },
@@ -775,15 +775,15 @@ _TOOLS: list[ToolDefinition] = [
         name="adopt_tool",
         description=(
             "Install a tool published on the network (find digests with "
-            "probe_tools) so you can run it. This installs FOREIGN CODE, and "
-            "a tool nobody has reviewed comes with ZERO TRUST: look at what "
-            "it does first (vet_tool shows its code; run it in a sandbox and "
-            "watch what it calls). It installs at once, with any dependencies "
-            "it declares, for you and your lineage, and runs contained "
-            "(strict until reviews clear it). Its ORIGINAL author keeps "
-            "earning from your use. A tool that replaces core built-ins "
-            "(it would see every command and file you touch) still needs "
-            "the owner's approval in the app."
+            "probe_tools) so you can run it. This installs ANOTHER "
+            "HOUSEHOLD'S CODE, and nothing contains it when it runs: read "
+            "its rating (the reply carries it, as search does) and its code "
+            "first (vet_tool shows it, or check it out with `path`), and "
+            "try it in a sandbox of your own before real work. It installs "
+            "at once, with any dependencies it declares, for you and your "
+            "lineage. A tool that replaces core built-ins (it would see "
+            "every command and file you touch) still needs the owner's "
+            "approval in the app."
         ),
         input_schema={
             "type": "object",
@@ -3232,8 +3232,8 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
         proposal = await store.propose_adoption(caller, digest, reason=reason)
     except Exception as exc:
         return {"error": str(exc)}
-    # No owner approval (Decision 2026-11-02): the agent installs, the trust
-    # label is the warning. Core replacements stay the owner's call.
+    # No owner approval (Decision 2026-11-02): the agent installs, its
+    # rating comes back with it. Core replacements stay the owner's call.
     if proposal.get("error") or proposal.get("status") != "pending":
         return proposal
     if proposal.get("core_replacement"):
@@ -3244,9 +3244,8 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
         result = await runtime.tool_store.approve_adoption(proposal["digest"])
     except Exception as exc:
         return {"error": str(exc)}
-    from .tool_security import trust_for_digest
-    _tier, trust = trust_for_digest(runtime, proposal["digest"])
-    result = {**result, "trust": trust}
+    from .tool_security import rating_for
+    result = {**result, "rating": rating_for(runtime, proposal["digest"])}
     if dest is not None and not result.get("error") and result.get("origin") == "adopted":
         return _checked_out(runtime, proposal["digest"], dest, result)
     return result
@@ -3254,8 +3253,7 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
 
 def _already_adopted(runtime: Runtime, record: Any, caller: str) -> dict[str, Any]:
     """The adopt reply for a tool already installed on this daemon."""
-    from .tool_security import trust_for_digest
-    _tier, trust = trust_for_digest(runtime, record.digest)
+    from .tool_security import rating_for
     if record.local_author == caller:
         note = "you adopted this tool already"
     else:
@@ -3265,7 +3263,8 @@ def _already_adopted(runtime: Runtime, record: Any, caller: str) -> dict[str, An
                 "(attest_tools)")
     return {"digest": record.digest, "name": record.name, "origin": "adopted",
             "author": record.author, "adopted_for": record.local_author,
-            "already_installed": True, "trust": trust, "note": note}
+            "already_installed": True,
+            "rating": rating_for(runtime, record.digest), "note": note}
 
 
 def _checked_out(runtime: Runtime, digest: str, dest, result: dict[str, Any]) -> dict[str, Any]:

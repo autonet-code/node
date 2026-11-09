@@ -598,9 +598,8 @@ class TestAdoption:
     async def _adopter(self, tmp_path, source_blobs):
         rt = _make_runtime(tmp_path / "adopter_daemon")
         await _register_agent(rt, "worker")
-        # Run gate: network tools run only while bonded. These tests are
-        # about containment, so the fake chain says bonded; the gate has
-        # its own tests.
+        # No run gate since Decision 2026-11-09; the fake chain says bonded
+        # so nothing here depends on that.
         from atn.runtime.tool_bond import ToolBondGate
         rt.tool_bond_gate = ToolBondGate(rt, checker=lambda d: True)
 
@@ -616,12 +615,12 @@ class TestAdoption:
         store = rt.tool_store
 
         # The agent installs it itself (Decision 2026-11-02): no owner
-        # approval, and the reply says the tool comes with zero trust.
+        # approval; the reply carries the tool's rating, no trust label.
         approved = await execute_tool(
             "adopt_tool", {"digest": digest, "reason": "need echo for X"},
             rt, caller_id="worker")
         assert approved["origin"] == "adopted"
-        assert approved["trust"].startswith("zero trust")
+        assert approved["rating"] is None and "trust" not in approved
         done = store.list_adoption_proposals("approved")
         assert len(done) == 1 and done[0]["proposed_by"] == "worker"
         # The author daemon has no owner wallet, so the tool's author is a
@@ -638,9 +637,8 @@ class TestAdoption:
         assert store.allowed("worker", record)
 
         result = await store.call(record, {"x": "hi"}, caller_id="worker")
-        assert result["result"] == {"echo": "hi"}
-        # Unreviewed foreign code runs strict (Decision 2026-10-27).
-        assert result["containment"]["tier"] == "strict"
+        # No containment (Decision 2026-11-09): just the result.
+        assert result == {"result": {"echo": "hi"}}
 
     @pytest.mark.asyncio
     async def test_reason_optional_and_reject_flow(self, tmp_path):
@@ -677,26 +675,9 @@ class TestAdoption:
         assert store.set_published(digest, True) is False
 
     @pytest.mark.asyncio
-    async def test_undeclared_network_hard_fails(self, tmp_path):
-        evil = (
-            "import sys, json, socket\n"
-            "json.load(sys.stdin)\n"
-            "s = socket.socket()\n"
-            "print(json.dumps({'ok': True}))\n"
-        )
-        _, digest, blobs = await self._publish_on_author_daemon(
-            tmp_path, code=evil)
-        rt = await self._adopter(tmp_path, blobs)
-        store = rt.tool_store
-        await store.propose_adoption("worker", digest, reason="r")
-        await store.approve_adoption(digest)
-        record = store.get(digest)
-        result = await store.call(record, {"x": "1"}, caller_id="worker")
-        assert "error" in result
-        assert "undeclared capability: net" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_declared_network_is_allowed(self, tmp_path):
+    async def test_undeclared_network_is_not_contained(self, tmp_path):
+        """No audit hook (Decision 2026-11-09): the declaration is a claim
+        reviewers check, not a sandbox."""
         code = (
             "import sys, json, socket\n"
             "json.load(sys.stdin)\n"
@@ -704,17 +685,14 @@ class TestAdoption:
             "print(json.dumps({'made_socket': True}))\n"
         )
         _, digest, blobs = await self._publish_on_author_daemon(
-            tmp_path, code=code, capabilities={"net": True})
+            tmp_path, code=code)
         rt = await self._adopter(tmp_path, blobs)
         store = rt.tool_store
         await store.propose_adoption("worker", digest, reason="r")
         await store.approve_adoption(digest)
         record = store.get(digest)
-        # Declared capabilities apply once the network reviewed it safe.
-        store.security_standing_provider = lambda d: {"harm_sum": 0, "harm_mass": 100, "supply": 1000}
         result = await store.call(record, {"x": "1"}, caller_id="worker")
-        assert result["result"] == {"made_socket": True}
-        assert result["containment"]["tier"] == "declared"
+        assert result == {"result": {"made_socket": True}}
 
     @pytest.mark.asyncio
     async def test_env_scrubbed_for_adopted_code(self, tmp_path,
@@ -734,8 +712,7 @@ class TestAdoption:
         await store.approve_adoption(digest)
         record = store.get(digest)
         result = await store.call(record, {"x": "1"}, caller_id="worker")
-        # Secrets never reach foreign code; the policy var is popped
-        # before the tool runs.
+        # The daemon's environment never reaches tool code.
         assert result["result"] == {"secret": None, "policy": None}
 
     @pytest.mark.asyncio
@@ -753,8 +730,6 @@ class TestAdoption:
         await store.propose_adoption("worker", digest, reason="r")
         await store.approve_adoption(digest)
         record = store.get(digest)
-        store.security_standing_provider = lambda d: {
-            "harm_sum": 0, "harm_mass": 100, "supply": 1000}
         result = await store.call(record, {"x": "1"}, caller_id="worker")
         assert result["result"] == {"tok": "tok123"}
 
@@ -849,7 +824,9 @@ class TestAdoption:
         assert store.get(digest) is None
 
     @pytest.mark.asyncio
-    async def test_approve_rechecks_standing_from_fresh_state(self, tmp_path):
+    async def test_a_malware_rating_never_refuses_an_install(self, tmp_path):
+        """Disqualified means unpaid, nothing else (Decision 2026-11-09):
+        what to adopt is the household's call."""
         _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
         rt = await self._adopter(tmp_path, blobs)
         store = rt.tool_store
@@ -857,11 +834,9 @@ class TestAdoption:
         prov = store.list_adoption_proposals()[0]["provenance"]
         # The dead vetting carry-over fields are gone from provenance.
         assert not {"greenlit", "busted", "vets"} & set(prov)
-        # Harm reviews settle after the proposal was written.
-        store.security_standing_provider = lambda d: {"harm_sum": 90 * 500, "harm_mass": 500, "supply": 10_000}
+        store.rating_provider = lambda d: {"malware": 1.0, "mass": 0.5}
         out = await store.approve_adoption(digest)
-        assert "denied by the network" in out["error"]
-        assert store.get(digest) is None
+        assert out["origin"] == "adopted"
 
     # ---- composites bring their dependencies (#37) ------------------
 
@@ -932,10 +907,11 @@ class TestAdoption:
         rt = await self._adopter(tmp_path, blobs)
         store = rt.tool_store
         await store.propose_adoption("worker", comp, reason="r")
-        store.security_standing_provider = (
-            lambda d: {"harm_sum": 90 * 500, "harm_mass": 500, "supply": 10_000} if d == dep else None)
+        real = store._verify_manifest_sig
+        store._verify_manifest_sig = (
+            lambda p: False if p.get("name") == "net_dep" else real(p))
         out = await store.approve_adoption(comp)
-        assert "net_dep" in out["error"] and "denied by the network" in out["error"]
+        assert "net_dep" in out["error"] and "re-attribution" in out["error"]
         assert store.get(dep) is None and store.get(comp) is None
         assert store.list_adoption_proposals("pending")[0]["digest"] == comp
 
@@ -1008,8 +984,7 @@ class TestAdoptionAwaitingCode:
         assert record.origin == "adopted" and record.local_author == "worker"
         assert store.list_adoption_proposals()[0]["status"] == "approved"
         result = await store.call(record, {"x": "hi"}, caller_id="worker")
-        assert result["result"] == {"echo": "hi"}
-        assert result["containment"]["tier"] == "strict"
+        assert result == {"result": {"echo": "hi"}}
         assert [e.data["status"] for e in events] == ["installed"]
         assert events[0].data["digest"] == digest
 
@@ -1080,10 +1055,10 @@ class TestAdoptionAwaitingCode:
         await store.propose_adoption("worker", digest, reason="r")
         await store.approve_adoption(digest)
         await store.stop_adoption_retries()
-        store.security_standing_provider = lambda d: {"harm_sum": 90 * 500, "harm_mass": 500, "supply": 10_000}
+        store._verify_manifest_sig = lambda p: False
         holder["online"] = True
         out = await store.retry_adoption(digest)
-        assert "denied by the network" in out["error"]
+        assert "re-attribution" in out["error"]
         assert store.get(digest) is None
         assert store.list_adoption_proposals()[0]["status"] == "failed"
         assert [e.data["status"] for e in events] == ["failed"]

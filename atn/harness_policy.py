@@ -11,7 +11,7 @@ compete ("the headroom is policy"), so they now live in one value,
 ``HarnessPolicy``, which a distro manifest carries in its config blob.
 
 What stays OUT of the policy (the safety kernel, never distro-settable):
-budget gate + usage recorder, tool dispatch and its containment, the
+budget gate + usage recorder, tool dispatch, the
 governance heartbeat, history storage, the
 per-run plan tool's validation, orphan/history repair.
 

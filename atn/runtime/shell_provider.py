@@ -11,12 +11,11 @@ digest) -> distro manifest -> dependency digests -> the record whose
 substrate tool instead of its own component, which is what the distro DAG,
 adoption credit and mint fan-out were built for.
 
-WHY IT WAS OFF (2026-07-29), AND WHAT CHANGED. Containment for this tool
-class still does not exist: ``tool_guard.py``'s audit hook falls through for
-a tool that legitimately needs net + fs + spawn, and a substituted ``bash``
-or ``read_file`` sees every command string and every file body the agent
-touches (credentials included), while needing no evasion to exfiltrate. That
-analysis stands. What changed is the deciding factor: the owner decided
+WHY IT WAS OFF (2026-07-29), AND WHAT CHANGED. Nothing contains this tool
+class: a substituted ``bash`` or ``read_file`` sees every command string and
+every file body the agent touches (credentials included), while needing no
+evasion to exfiltrate. That analysis stands (and since 2026-11-09 the daemon
+contains no tool at all). What changed is the deciding factor: the owner decided
 (2026-10-12) that every part of the harness should be swappable through the
 tool library, with the market selecting the best, and that the residual risk
 is carried by STAKE and EVIDENCE instead of being avoided by a release-only
@@ -40,16 +39,11 @@ ALL of which must hold for a swap to happen:
 A provider must also be SEALED (no declared dependencies), so every call goes
 through the one path where evidence capture works.
 
-EVIDENCE. Every swapped call writes a trace (tool digest, input, output,
-timestamps, and what the guard observed: file paths opened, network
-destinations, spawn argv), signs it with the agent key, stores it in the blob
-store, records its digest on the tool record (``last_evidence_digest``) and in
-``evidence_index.jsonl``, and logs it. That digest is the ``evidenceCid`` an
-accuser passes to ``ToolBond.accuse``. Honest limits: the guard sees only
-what the provider's own Python process does through audited calls. A spawned
-child (the bash the provider runs) is visible only as its argv; its own file
-and network activity, native-code bypasses, and anything a provider does
-outside the sealed call are NOT captured.
+EVIDENCE. Every swapped call writes a record (tool digest, input, output,
+timestamps), signs it with the agent key, stores it in the blob store,
+records its digest on the tool record (``last_evidence_digest``) and in
+``evidence_index.jsonl``, and logs it. A reviewer can cite it as evidence.
+What the provider does while it runs is not observed.
 
 Any refused gate falls back to the BUILT-IN, never to an error: the built-in
 is the trusted default at every step. ``SHELL_SWAP_ENABLED`` stays as the
@@ -63,7 +57,6 @@ import json
 import logging
 import os
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -163,13 +156,6 @@ async def dispatch_shell(runtime: Any, agent_id: str, name: str,
     # Gate (b): bonded on ToolBond (fail closed).
     from .tool_bond import gate_for
     bonded, reason = await gate_for(runtime).is_bonded(record.digest)
-    if bonded:
-        # ToolStore.call's run gate for network tools; refuse here so the
-        # swap falls back to the built-in instead of surfacing its error.
-        from ..tool_security import run_clearance
-        bonded, why = await run_clearance(runtime, record)
-        if not bonded:
-            reason = why
     await note_swap_state(runtime, agent_id, _bond_row(record, bonded, reason))
     if not bonded:
         log.debug("core provider %s for %r refused for agent %s (%s); "
@@ -177,20 +163,16 @@ async def dispatch_shell(runtime: Any, agent_id: str, name: str,
                   agent_id, reason)
         return None
     store = runtime.tool_store
-    trace_dir = Path(store._dir) / "evidence" / "tmp"
-    trace_path = trace_dir / f"{uuid.uuid4().hex}.jsonl"
     started = time.time()
     try:
-        trace_dir.mkdir(parents=True, exist_ok=True)
         out = await store.call(
-            record, {"tool": name, "args": tool_input}, caller_id=agent_id,
-            trace_path=str(trace_path))
+            record, {"tool": name, "args": tool_input}, caller_id=agent_id)
     except Exception as exc:  # noqa: BLE001
         out = {"error": f"core provider {record.digest[:16]} failed: {exc}"}
     ended = time.time()
     try:
         capture_evidence(runtime, record, agent_id, name, tool_input, out,
-                         trace_path, started, ended)
+                         started, ended)
     except Exception:  # noqa: BLE001 — evidence must not break the call
         log.warning("core provider evidence capture failed", exc_info=True)
     if "error" in out:
@@ -339,11 +321,6 @@ async def swap_status(runtime: Any, agent_id: str) -> list[dict[str, Any]]:
                     continue
                 record = runtime.tool_store.resolve(r["tool_digest"])
                 bonded, reason = await gate.is_bonded(r["tool_digest"])
-                if bonded and record is not None:
-                    from ..tool_security import run_clearance
-                    bonded, why = await run_clearance(runtime, record)
-                    if not bonded:
-                        reason = why
                 rows[i] = _bond_row(record, bonded, reason)
         for r in rows:
             await note_swap_state(runtime, agent_id, r)
@@ -368,34 +345,8 @@ async def swap_status(runtime: Any, agent_id: str) -> list[dict[str, Any]]:
 
 EVIDENCE_KIND = "core_replacement_trace"
 CAPTURE_LIMITS = (
-    "Observed via the tool guard's Python audit hook in the provider process: "
-    "file opens (outside the interpreter tree), socket destinations "
-    "(getaddrinfo/connect/sendto), and spawn argv. NOT observed: activity of "
-    "spawned child processes beyond their argv, native-code bypasses of the "
-    "audit hook, anything outside this call. Capped at 5000 observations."
-)
-
-
-def _read_trace(path: Path) -> tuple[list[dict], bool]:
-    obs: list[dict] = []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obs.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        return [], False
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-    return obs, len(obs) >= 5000
+    "The call's input and output only. The daemon observes nothing the "
+    "provider does while it runs (no audit hook, Decision 2026-11-09).")
 
 
 def canonical_evidence_bytes(body: dict[str, Any]) -> bytes:
@@ -427,17 +378,16 @@ def _sign(runtime: Any, agent_id: str, body: dict[str, Any]) -> tuple[str, str]:
 
 
 def capture_evidence(runtime: Any, record: Any, agent_id: str, name: str,
-                     tool_input: dict, out: dict, trace_path: Path,
+                     tool_input: dict, out: dict,
                      started: float, ended: float) -> str:
-    """Build, sign and blob-store the evidence trace. Returns its digest."""
-    observations, truncated = _read_trace(Path(trace_path))
+    """Build, sign and blob-store the evidence record. Returns its digest."""
     try:
         output_text = json.dumps(out, default=str)
     except (TypeError, ValueError):
         output_text = str(out)
     body = {
         "kind": EVIDENCE_KIND,
-        "version": 1,
+        "version": 2,
         "tool_digest": record.digest,
         "tool_name": record.name,
         "tool_author": record.author,
@@ -448,8 +398,6 @@ def capture_evidence(runtime: Any, record: Any, agent_id: str, name: str,
         "output_truncated": len(output_text) > _EVIDENCE_OUTPUT_CAP,
         "started_ts": round(started, 3),
         "ended_ts": round(ended, 3),
-        "observations": observations,
-        "observations_truncated": truncated,
         "capture_limits": CAPTURE_LIMITS,
     }
     signer, sig = _sign(runtime, agent_id, body)
@@ -471,13 +419,13 @@ def capture_evidence(runtime: Any, record: Any, agent_id: str, name: str,
                 "ts": int(ended), "tool_digest": record.digest,
                 "tool_name": record.name, "replaces": name,
                 "agent_id": agent_id, "evidence_digest": digest,
-                "signed": bool(sig), "observations": len(observations),
+                "signed": bool(sig),
             }) + "\n")
     except OSError:
         log.debug("evidence index append failed", exc_info=True)
-    log.info("core-replacement evidence %s (tool %s, %s, agent %s, %d "
-             "observations, %s)", digest, record.digest[:16], name, agent_id,
-             len(observations), "signed" if sig else "UNSIGNED")
+    log.info("core-replacement evidence %s (tool %s, %s, agent %s, %s)",
+             digest, record.digest[:16], name, agent_id,
+             "signed" if sig else "UNSIGNED")
     return digest
 
 

@@ -224,22 +224,6 @@ class SecurityMonitor:
         sw = self._sweeper
         return sw is not None and sw.is_alive() and not self._stop.is_set()
 
-    async def report_scope_violation(
-        self, src_agent: str, names: list[str], destination: str,
-    ) -> None:
-        """Fire the OUT-OF-NETWORK-SCOPE alarm: a secret-holding tool tried to
-        reach a destination outside the authorized hosts of the secret(s) it was
-        bound (``atn/tool_guard.py``'s egress check).
-
-        The second of the two alarm triggers, alongside the transcript scan.
-        Same durable names-only record and same SECURITY_ALARM event, so a scope
-        violation lands in the Secrets tab next to a leak. ``destination`` is a
-        hostname or literal address, already plaintext in the keystore's host
-        sidecar, so it travels in its own field; the secret VALUE never does.
-        """
-        dest = str(destination or "").strip()[:200]
-        await self._fire_alarm(src_agent, list(names), destination=dest or None)
-
     def _rebuild_scan_lists(self) -> None:
         """Rebuild the derived (value/path) scan lists. Caller holds the lock."""
         values: list[tuple[str, str, str, int]] = []

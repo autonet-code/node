@@ -65,7 +65,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .federated_reconcile import VOICE_EPSILON
 
-from .containment import mint_gate_from_writes, params_from_writes, review_params_from_writes
+from .mint_params import mint_gate_from_writes, review_params_from_writes
 
 logger = logging.getLogger(__name__)
 
@@ -1512,10 +1512,6 @@ def read_voice_state(
         # those households' mint and their drift weight.
         "sanctions": sanctions,
         "sanctioned_households": houses,
-        # Containment thresholds in force at the snapshot: the close
-        # mints nothing for a tool they deny (Decision 2026-10-27).
-        "containment_params": params_from_writes(
-            _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id),
         "mint_gate": list(mint_gate_from_writes(
             _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id)),
         # Tool review rounds (Decision 2026-11-07): carried-round decay and

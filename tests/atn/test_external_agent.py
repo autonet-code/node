@@ -346,7 +346,7 @@ async def test_a_tool_one_session_adopted_serves_every_external_session(tmp_path
     again = await execute_tool("adopt_tool", {"digest": digest}, rt, caller_id="cc-b")
     assert "error" not in again, again
     assert again["already_installed"] is True and again["adopted_for"] == "cc-a"
-    assert again["trust"].startswith("zero trust")
+    assert "trust" not in again and "rating" in again
     assert store.get(digest).local_author == "cc-a"
     mine = await execute_tool("adopt_tool", {"digest": digest}, rt, caller_id="cc-a")
     assert mine["already_installed"] is True and "already" in mine["note"]

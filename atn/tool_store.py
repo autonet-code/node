@@ -72,30 +72,6 @@ def _is_address(value: str) -> bool:
     return True
 
 
-def _authorized_hosts_for(services) -> set[str]:
-    """Union of ``authorized_hosts`` across ``services`` (keystore sidecar).
-
-    Fail-OPEN by omission, deliberately: a service with no configured hosts
-    contributes nothing, and an empty union means the guard leaves net
-    unrestricted. Configuring hosts is how an owner NARROWS a tool; absence is
-    not a claim that the tool may go nowhere, it is the absence of a claim.
-    Any keystore fault yields an empty set (same outcome: no narrowing).
-    """
-    try:
-        from atn._vendor.kevin import keystore as _ks
-    except Exception:  # noqa: BLE001
-        return set()
-    out: set[str] = set()
-    for svc in services or ():
-        try:
-            for h in _ks.get_authorized_hosts(svc) or ():
-                if isinstance(h, str) and h.strip():
-                    out.add(h.strip().lower())
-        except Exception:  # noqa: BLE001 — one bad service must not blind the rest
-            log.debug("authorized_hosts lookup failed for %s", svc, exc_info=True)
-    return out
-
-
 @dataclass
 class ToolRecord:
     """One registered tool: manifest digest + daemon-local state.
@@ -129,10 +105,8 @@ class ToolRecord:
     # lineage while manifest.author (the original 0x) keeps earning.
     local_author: str = ""
     registered_ts: int = 0
-    # "authored" (default) | "adopted". Adopted records
-    # carry foreign code: they execute ONLY under the capability guard
-    # (atn/tool_guard.py — scrubbed env, sandbox cwd, deny-by-default
-    # audit hook) and can never be re-published by the adopter.
+    # "authored" (default) | "adopted". Adopted records carry another
+    # household's code and can never be re-published by the adopter.
     origin: str = "authored"
     # Core-replacement acknowledgment (Decision 2026-10-12). True only when
     # the OWNER approved this adoption with the explicit core_replacement
@@ -185,34 +159,6 @@ class ToolRecord:
         }
 
 
-# The containment tier of the network tool being executed (None = own tool)
-# and its trace file, for the exec paths below call() (incl. composites).
-import contextvars as _contextvars
-_CONTAINMENT_TIER: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
-    "atn_containment_tier", default=None)
-_TRACE_PATH: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
-    "atn_tool_trace_path", default=None)
-
-
-def _denials_from_trace(trace_path: str | None) -> list[dict[str, Any]]:
-    """The refusals tool_guard recorded in a run's trace."""
-    if not trace_path:
-        return []
-    out: list[dict[str, Any]] = []
-    try:
-        with open(trace_path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                if rec.get("kind") == "denied":
-                    out.append({"reason": rec.get("reason", "")})
-    except OSError:
-        return []
-    return out[:50]
-
-
 # Code seeding (#46). A tool's code lives only with its author and the
 # daemons that adopted it, like a torrent. An approval made while none of
 # them is online is kept as approved_pending and retried: after
@@ -258,9 +204,10 @@ class ToolStore:
         # digest-verified (content addressing IS the auth) and cached
         # into the local blob store.
         self.blob_fetcher: Any = None
-        # digest -> {harm_sum, harm_mass, supply} at the pinned snapshot, for
-        # consensus containment tiers (wired by the autonet service).
-        self.security_standing_provider: Any = None
+        # digest -> the tool's rating as of the latest close (plain means,
+        # federated_reconcile.tool_rating) or None; wired by the autonet
+        # service, read by search and the adopt replies.
+        self.rating_provider: Any = None
         # Optional sanction lookup (callable: address -> entry | None, may
         # block on a chain read): an agent may not propose adopting a tool
         # whose author's household the DAO has sanctioned; the owner sees
@@ -950,7 +897,6 @@ class ToolStore:
         caller_id: str | None = None,
         via: str = "",
         _depth: int = 0,
-        trace_path: str | None = None,
     ) -> dict[str, Any]:
         """Execute a registered tool. Scoping is the CALLER's job
         (``ToolRegistry.call_tool``) — this only dispatches.
@@ -960,63 +906,12 @@ class ToolStore:
         mechanical receipts mint nothing). ``_depth`` is the composition
         nesting counter (``_COMPOSITE_MAX_DEPTH`` guard).
 
-        Run gate (Decision 2026-10-13): network tools (adopted, authored
-        elsewhere) run only while bonded on ToolBond. Containment follows
-        the network's settled judgement of the exact digest (Decision
-        2026-10-27, ``tool_security.containment_tier``): denied tools never
-        run, strict ones get no net/fs/spawn, declared ones get their
-        manifest's capabilities. Every network-tool run is traced; access
-        the sandbox refused comes back in the result and raises an alarm.
-        Every execution path (agents, composite deps, service sales,
-        evidence replay, core swaps) comes through here. Own tools are not
-        gated.
+        There is no run gate and no containment (Decision 2026-11-09): a
+        tool runs in its own subprocess with a scrubbed environment and only
+        the secrets it declares (``_exec_spec``). Every execution path
+        (agents, composite deps, service sales, evidence replay, core swaps)
+        comes through here.
         """
-        from .tool_security import (
-            CONTAINMENT_DENIED, containment_tier, is_network_tool, run_clearance)
-        tier = None
-        own_trace = None
-        if is_network_tool(record):
-            cleared, why = await run_clearance(self._runtime, record)
-            if not cleared:
-                return {"error": f"Tool {record.name!r} "
-                                 f"({record.digest[:16]}) is not cleared to "
-                                 f"run on this node: {why}",
-                        "run_gate": why}
-            tier, tier_why = containment_tier(self._runtime, record)
-            if tier == CONTAINMENT_DENIED:
-                return {"error": f"Tool {record.name!r} ({record.digest[:16]}) "
-                                 f"is denied by the network: {tier_why}",
-                        "run_gate": f"denied: {tier_why}"}
-            if not trace_path:
-                import tempfile
-                fd, own_trace = tempfile.mkstemp(prefix="tooltrace-", suffix=".jsonl")
-                os.close(fd)
-                trace_path = own_trace
-        tier_token = _CONTAINMENT_TIER.set(tier)
-        trace_token = _TRACE_PATH.set(trace_path if tier is not None else None)
-        try:
-            result = await self._dispatch(record, arguments, caller_id=caller_id,
-                                          via=via, _depth=_depth,
-                                          trace_path=trace_path)
-        finally:
-            _CONTAINMENT_TIER.reset(tier_token)
-            _TRACE_PATH.reset(trace_token)
-        if tier is not None:
-            denied = _denials_from_trace(trace_path)
-            if own_trace:
-                try:
-                    os.unlink(own_trace)
-                except OSError:
-                    pass
-            result = {**result, "containment": {"tier": tier, "reason": tier_why,
-                                                 "denied": denied}}
-            if denied:
-                await self._alarm_on_contained_access(record, denied, caller_id)
-        return result
-
-    async def _dispatch(self, record: ToolRecord, arguments: dict[str, Any], *,
-                        caller_id: str | None, via: str, _depth: int,
-                        trace_path: str | None) -> dict[str, Any]:
         manifest = record.manifest
         if manifest.get("code_digest"):
             deps = manifest.get("dependencies") or []
@@ -1027,8 +922,7 @@ class ToolStore:
             else:
                 # Sealed path — byte-for-byte legacy contract.
                 result = await self._call_pinned(
-                    record, arguments, caller_id=caller_id,
-                    trace_path=trace_path)
+                    record, arguments, caller_id=caller_id)
         elif manifest.get("connector_id"):
             result = await self._call_connector(record, arguments)
         else:
@@ -1123,119 +1017,38 @@ class ToolStore:
     def _exec_spec(
         self, record: ToolRecord, script: Path,
         secrets: frozenset[str] | None = None,
-        trace_path: str | None = None,
         code_root: Path | None = None,
     ) -> tuple[list[str], dict[str, str] | None, str | None]:
         """(argv, env, cwd) for a pinned tool subprocess.
 
-        ``code_root`` is the tool's own extracted code: readable, first on
-        ``sys.path``, and the only code it can reach.
+        Not containment (Decision 2026-11-09: the framework rates tools, it
+        does not try to make running them safe). The daemon only gives a
+        tool nothing it did not ask for:
 
-        ADOPTED tools run fully contained (docs/tool_substrate.md — Adoption):
-
-          - argv wraps the script in atn/tool_guard.py, whose audit
-            hook hard-fails undeclared net/fs/spawn use;
           - env is scrubbed to the minimum Python needs plus ONLY the
-            variables the capability manifest declares — secrets in
-            the daemon's environment never reach foreign code;
-          - cwd is a per-tool sandbox directory under the tool store.
-
-        AUTHORED tools run under the same environment and path containment
-        (findings 10/11, docs_from_code/runtime_and_agents.md section 7). The
-        author is a model, so register_tool is a general code-execution
-        primitive: inheriting the daemon environment handed it provider keys
-        and BROKER_OWNER_SECRET, and no deny paths left the keystore and data
-        dir readable. They now get the scrubbed env (PATH = the interpreter
-        dir, TEMP/TMP = a per-tool sandbox, PYTHONIOENCODING, the Windows
-        runtime vars, plus ONLY the manifest's declared ``capabilities.env``
-        names and ATN_TOOL_SECRETS / ATN_TOOL_POLICY) and the same
-        ``deny_paths``. Two differences from adopted tools remain: undeclared
-        net/fs/spawn keep the permissive default (an authored tool that
-        declares nothing may still use them), and cwd stays the daemon's.
-        A tool that needs a daemon variable (PATH included) declares it in
-        ``capabilities.env``.
-
-        ``ATN_AUTHORED_TOOLS_BARE=1`` drops the audit hook only: no
-        tool_guard wrapper, so no capability checks, no ``deny_paths`` and no
-        destination check. The environment is still scrubbed and the PID is
-        still tracked for the owner-listener gate. It is an escape hatch for
-        a tool that breaks under the hook, not a recommended posture.
-
-        ``secrets`` is the RESOLVED tool-secret binding (L_agent ∩
-        declared, docs/tool_secret_binding.md). It is advertised to the
-        subprocess as ATN_TOOL_SECRETS — NAMES ONLY, never values. The
-        tool reads each value from its own broker session, which is
-        bound to its PID after spawn. Advertising the names is not a
-        grant: the broker authorizes from the session, not this env var.
+            variables the manifest declares in ``capabilities.env``: the
+            daemon's own environment (provider keys, BROKER_OWNER_SECRET)
+            never reaches tool code;
+          - ``secrets`` is the RESOLVED tool-secret binding (L_agent ∩
+            declared, docs/tool_secret_binding.md), advertised as
+            ATN_TOOL_SECRETS — NAMES ONLY, never values. The tool reads each
+            value from its own broker session, bound to its PID after
+            spawn; advertising the names is not a grant;
+          - ``code_root`` (the tool's own extracted code) goes first on
+            PYTHONPATH, so a codebase imports its own modules;
+          - an adopted tool runs in a per-tool directory under the tool
+            store; an authored one in the daemon's.
         """
         import sys
         secret_names = ",".join(sorted(secrets or ()))
-        guard = Path(__file__).with_name("tool_guard.py")
         caps = record.manifest.get("capabilities") or {}
         sandbox = self._dir / "sandbox" / record.digest[:16]
         sandbox.mkdir(parents=True, exist_ok=True)
-
-        if record.origin != "adopted":
-            env = self._contained_env(caps, sandbox, secret_names)
-            if os.environ.get("ATN_AUTHORED_TOOLS_BARE") == "1":
-                return [sys.executable, str(script)], env, None
-
-            # The policy is the author's own declaration; absent capabilities
-            # keep the historical permissive posture (net/fs/spawn allowed) so
-            # existing tools keep working. deny_paths applies regardless.
-            declared_any = any(k in caps for k in ("net", "fs", "spawn"))
-            policy: dict[str, Any] = {
-                "net": bool(caps.get("net")) if declared_any else True,
-                "fs": bool(caps.get("fs")) if declared_any else True,
-                "spawn": bool(caps.get("spawn")) if declared_any else True,
-                "deny_paths": self._foreign_deny_paths(),
-            }
-            if secret_names:
-                hosts = _authorized_hosts_for(secrets or ())
-                if hosts:
-                    policy["hosts"] = sorted(hosts)
-            if trace_path:
-                policy["trace_path"] = str(trace_path)
-            if code_root is not None:
-                policy["code_root"] = str(code_root)
-            env["ATN_TOOL_POLICY"] = json.dumps(policy)
-            return ([sys.executable, str(guard), str(script)], env, None)
-
-        # Consensus containment (Decision 2026-10-27): a strict-tier tool
-        # gets nothing beyond its sandbox, whatever its manifest declares.
-        from .tool_security import CONTAINMENT_STRICT
-        if _CONTAINMENT_TIER.get() in (None, CONTAINMENT_STRICT):
-            caps = {}
-        if not trace_path:
-            trace_path = _TRACE_PATH.get()
-
         env = self._contained_env(caps, sandbox, secret_names)
-        policy = {
-            "net": bool(caps.get("net")),
-            "fs": bool(caps.get("fs")),
-            "spawn": bool(caps.get("spawn")),
-            # Foreign code never reads the daemon's data or the vault, even
-            # with fs declared.
-            "deny_paths": self._foreign_deny_paths(),
-        }
-        if secret_names:
-            # docs/tool_secret_binding.md (change 2): a tool holding a
-            # credential AND unrestricted egress is the shape worth narrowing.
-            # The destinations come from each bound secret's authorized_hosts
-            # — the field that until now was written and displayed but
-            # consulted by nothing. An empty union leaves net unrestricted
-            # (no hosts configured => no claim about where it may go).
-            hosts = _authorized_hosts_for(secrets or ())
-            if hosts:
-                policy["hosts"] = sorted(hosts)
-        if trace_path:
-            # Evidence capture (Decision 2026-10-12): the guard appends one
-            # JSON line per observed open / socket / spawn audit event.
-            policy["trace_path"] = str(trace_path)
         if code_root is not None:
-            policy["code_root"] = str(code_root)
-        env["ATN_TOOL_POLICY"] = json.dumps(policy)
-        return ([sys.executable, str(guard), str(script)], env, str(sandbox))
+            env["PYTHONPATH"] = str(code_root)
+        cwd = str(sandbox) if record.origin == "adopted" else None
+        return [sys.executable, str(script)], env, cwd
 
     @staticmethod
     def _contained_env(caps: dict[str, Any], sandbox: Path,
@@ -1300,77 +1113,9 @@ class ToolStore:
                       exc_info=True)
             return None, frozenset()
 
-    def _foreign_deny_paths(self) -> list[str]:
-        """The daemon's data dir and the vault: never readable by a network
-        tool. (The tool's own sandbox is under the tools dir, so the tools
-        dir itself stays reachable.)"""
-        out: list[str] = []
-        cfg = getattr(self._runtime, "_config", None)
-        data_dir = getattr(cfg, "data_dir", None)
-        try:
-            from ._vendor.kevin import keystore as _ks
-            out.append(str(Path(_ks.KEYSTORE_DIR).resolve()))
-        except Exception:  # noqa: BLE001 — optional vendored dep
-            pass
-        if data_dir is not None:
-            tools = self._dir.resolve()
-            for child in Path(data_dir).resolve().iterdir() if Path(data_dir).exists() else []:
-                c = child.resolve()
-                if c != tools and tools not in c.parents and c not in tools.parents:
-                    out.append(str(c))
-        return out
-
-    async def _alarm_on_contained_access(self, record: ToolRecord,
-                                         denied: list[dict[str, Any]],
-                                         caller_id: str | None) -> None:
-        """A network tool tried something its containment refused: log it
-        and raise the security alarm. Best-effort, never raises."""
-        log.warning("network tool %s (%s) attempted refused access: %s",
-                    record.name, record.digest[:16], denied[:5])
-        monitor = getattr(self._runtime, "security_monitor", None)
-        if monitor is None:
-            return
-        try:
-            dest = "; ".join(str(d.get("reason", ""))[:80] for d in denied[:3])
-            await monitor.report_scope_violation(
-                caller_id or "<unknown>", [f"tool:{record.digest[:16]}"], dest)
-        except Exception:  # noqa: BLE001 — alarm must not break the call path
-            log.debug("contained-access alarm failed", exc_info=True)
-
-    async def _alarm_on_scope_violation(
-        self, err_text: str, services: "frozenset[str]", caller_id: str,
-    ) -> None:
-        """Turn tool_guard's egress denial into a real security alarm.
-
-        The guard raises inside the tool subprocess, so without this the
-        violation only ever reaches the caller as an error frame. This is the
-        second of the two alarm triggers (the first being the transcript scan
-        in SecurityMonitor), so an out-of-scope use lands in the Secrets tab's
-        alarm list alongside a leak.
-
-        Best-effort and never raises: a failure here must not mask the tool's
-        own error.
-        """
-        if not services or not err_text:
-            return
-        marker = "destination not authorized:"
-        idx = err_text.find(marker)
-        if idx < 0:
-            return
-        dest = err_text[idx + len(marker):].strip().split()[0].strip("'\"")
-        monitor = getattr(self._runtime, "security_monitor", None)
-        if monitor is None:
-            return
-        try:
-            await monitor.report_scope_violation(
-                caller_id or "<unknown>", sorted(services), dest)
-        except Exception:  # noqa: BLE001 — alarm must not break the call path
-            log.debug("scope-violation alarm failed", exc_info=True)
-
     async def _call_pinned(self, record: ToolRecord,
                            arguments: dict[str, Any],
-                           *, caller_id: str | None = None,
-                           trace_path: str | None = None) -> dict[str, Any]:
+                           *, caller_id: str | None = None) -> dict[str, Any]:
         """Run the pinned code blob as a subprocess: JSON args on stdin,
         JSON result on stdout. The blob is materialized to a cache file
         named by its digest, so what runs is exactly what was judged.
@@ -1385,7 +1130,6 @@ class ToolStore:
 
         session, services = self._tool_secret_session(record, caller_id)
         argv, env, cwd = self._exec_spec(record, script, services,
-                                         trace_path=trace_path,
                                          code_root=code_root)
         from . import contained_pids
         tracked_pid: int | None = None
@@ -1428,8 +1172,6 @@ class ToolStore:
         out_text = stdout.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
             err_text = stderr.decode("utf-8", errors="replace").strip()
-            await self._alarm_on_scope_violation(
-                err_text, services, caller_id or "")
             return {"error": f"tool exited {proc.returncode}: {err_text[:2000]}"}
         try:
             return {"result": json.loads(out_text)}
@@ -1563,8 +1305,6 @@ class ToolStore:
             if proc.returncode != 0:
                 err = (await proc.stderr.read()).decode(
                     "utf-8", errors="replace").strip()
-                await self._alarm_on_scope_violation(
-                    err, services, caller_id or "")
                 return {"error": f"tool exited {proc.returncode}: {err[:2000]}"}
             out_text = "\n".join(leftover).strip()
             if not out_text:
@@ -2296,7 +2036,8 @@ class ToolStore:
     ) -> tuple[dict[str, Any] | None, str | None]:
         """The install-time checks one adopted tool must pass, against a
         freshly fetched manifest: resolvable, pinned, code fetchable,
-        signature not wrong, not denied by the network.
+        signature not wrong. Ratings never refuse an install (Decision
+        2026-11-09): what to adopt is the household's call.
         Returns ``(payload, None)`` or ``(None, reason)``."""
         payload = await self.fetch_payload(digest)
         from nodes.common.library.tool_manifest import (
@@ -2340,17 +2081,6 @@ class ToolStore:
             return None, ("manifest signature does not recover to its "
                           "claimed author — refusing to install "
                           "(re-attribution attempt)")
-        # Denied by the network (Decision 2026-10-27): never installed.
-        from .tool_security import CONTAINMENT_DENIED, tier_for_standing, containment_params
-        provider = getattr(self, "security_standing_provider", None)
-        if provider is not None:
-            try:
-                tier, why = tier_for_standing(provider(digest),
-                                              containment_params(self._runtime))
-            except Exception:  # noqa: BLE001 — unknown standing installs strict
-                tier, why = None, ""
-            if tier == CONTAINMENT_DENIED:
-                return None, f"denied by the network: {why} — refusing to install"
         return payload, None
 
     def _defer_for_code(
@@ -2455,7 +2185,7 @@ class ToolStore:
     async def retry_adoption(self, digest: str) -> dict[str, Any]:
         """One background attempt for an approved_pending adoption. It
         runs the owner's approval path unchanged (same verification,
-        digest pinning, containment) and reports the outcome as a
+        digest pinning) and reports the outcome as a
         TOOL_ADOPTION event."""
         async with self._adoption_lock():
             proposal = self._proposals.get(digest)
@@ -2880,9 +2610,7 @@ class ToolStore:
         ``con_evidence`` — ``{"args_json", "expected_digest" |
         "expected_error", "actual_digest"?}``. The tool runs through the
         SAME execution path as a normal call (``self.call`` → pinned
-        subprocess), so an ADOPTED tool replays under its capability
-        guard exactly as it would in production — the guard's own
-        hard-fail IS reproducible evidence.
+        subprocess), so it replays exactly as it runs in production.
 
         Returns ``{"confirmed": bool, "kind", "manifest_digest",
         "observed_digest"?, "observed_error"?, "expected"..., "note"}``.
@@ -2926,8 +2654,8 @@ class ToolStore:
                     "error": "evidence must state expected_error or "
                              "expected_digest to be checkable"}
 
-        # Replay through the ordinary call path (guard applies for adopted
-        # code). caller_id=None runs as owner-sanctioned local verification;
+        # Replay through the ordinary call path. caller_id=None runs as
+        # owner-sanctioned local verification;
         # scoping is the CON reader's concern, not the replay's.
         result = await self.call(record, arguments, caller_id=None)
 

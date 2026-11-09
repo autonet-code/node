@@ -45,7 +45,7 @@ def make_handler(store: Path, token: str):
         def do_POST(self):  # noqa: N802
             if urlparse(self.path).path == "/beacon":
                 # The red-team canary's exfiltration target: no auth, logged
-                # only, so a leak past containment shows up here.
+                # only, so a leak shows up here.
                 n = min(int(self.headers.get("Content-Length") or 0), 8192)
                 body = self.rfile.read(n).decode("utf-8", errors="replace") if n else ""
                 with lock:

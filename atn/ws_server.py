@@ -1761,17 +1761,16 @@ class WebSocketBridge:
                         "error": "adoption approval is owner-only and not "
                                  "available to a scoped session"}
 
-        # Run gate for network tools: an adopted tool runs only while
-        # bonded (there is no vetted flag since staked reviews, decision
-        # 10). The opt-in list is the owner's per-tool note, owner-only like
-        # adoption approval; the view carries the ToolBond rating numbers.
+        # The owner's per-tool notes (owner-only like adoption approval)
+        # and each tool's bond with its rating as of the latest close. No
+        # run gate (Decision 2026-11-09): nothing here decides what runs.
         if msg_type in ("list_tool_run_optins", "set_tool_run_optin",
                         "tool_bond_status"):
             if session.scope_ids is not None:
                 return {"msg_id": msg_id, "ok": False,
                         "error": "tool run opt-in is owner-only and not "
                                  "available to a scoped session"}
-            from .tool_security import run_clearance, run_optins
+            from .tool_security import rating_for, run_optins
             optins = run_optins(self.runtime.tool_store)
             if msg_type == "list_tool_run_optins":
                 return {"msg_id": msg_id, "ok": True,
@@ -1780,19 +1779,11 @@ class WebSocketBridge:
             client = client_for(self.runtime)
 
             async def _bond_view(d: str) -> dict:
-                from nodes.common.library.charter import active_charter
-                from .tool_security import rating_view
                 rec = self.runtime.tool_store.resolve(d)
-                reader = getattr(client, "rating", None)
-                rating = (await reader(d, list(active_charter().ids))
-                          if reader is not None else None)
-                view = {"digest": d, "status": await client.status(d),
-                        **rating_view(rating),
+                return {"digest": d, "status": await client.status(d),
+                        "rating": rating_for(self.runtime, d),
                         "optin": optins.allows(d),
                         "network_tool": bool(rec is not None and rec.origin == "adopted")}
-                if rec is not None:
-                    view["runnable"], view["reason"] = await run_clearance(self.runtime, rec)
-                return view
 
             if msg_type == "tool_bond_status" and isinstance(msg.get("digests"), list):
                 # Bulk form for the Tools page: one call instead of one per card.
@@ -1823,12 +1814,9 @@ class WebSocketBridge:
                 except ValueError as exc:
                     return {"msg_id": msg_id, "ok": False, "error": str(exc)}
                 out = {"digest": digest, "allowed": allowed}
-                if record is not None:
-                    out["runnable"], out["reason"] = await run_clearance(
-                        self.runtime, record)
                 return {"msg_id": msg_id, "ok": True, "result": out}
-            # tool_bond_status: chain state + this node's run decision, plus the
-            # current minStake so a publish dialog can show the stake up front.
+            # tool_bond_status: chain state and the rating, plus the current
+            # minStake so a publish dialog can show the stake up front.
             out = await _bond_view(digest)
             min_stake = getattr(client, "min_stake", None)
             out["min_stake"] = await min_stake() if min_stake else None
@@ -1878,7 +1866,7 @@ class WebSocketBridge:
         # review batches with status and the sealed reveal (salt included),
         # so the owner can back them up; a reveal is relayable, so whoever
         # holds a copy can reveal if this daemon dies. ``tool_security_status``
-        # is one tool's bond plus its settled ToolBond rating.
+        # is one tool's bond plus its rating as of the latest close.
         if msg_type in ("review_batches", "tool_security_status"):
             if session.scope_ids is not None:
                 return {"msg_id": msg_id, "ok": False,
@@ -1893,15 +1881,11 @@ class WebSocketBridge:
             if len(d) != 64 or any(c not in "0123456789abcdef" for c in d):
                 return {"msg_id": msg_id, "ok": False,
                         "error": "digest must be a 64-hex manifest digest"}
-            from nodes.common.library.charter import active_charter
-            from .tool_security import client_for, rating_view
+            from .tool_security import client_for, rating_for as _rating
             client = client_for(self.runtime)
-            reader = getattr(client, "rating", None)
-            rating = (await reader(d, list(active_charter().ids))
-                      if reader is not None else None)
             return {"msg_id": msg_id, "ok": True,
                     "result": {"digest": d, "status": await client.status(d),
-                               "rating": rating, **rating_view(rating)}}
+                               "rating": _rating(self.runtime, d)}}
 
         if msg_type == "reject_adoption":
             digest = msg.get("digest", "")

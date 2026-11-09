@@ -1,29 +1,23 @@
-"""Tool security rail, daemon side (docs/tool_substrate.md, Decision
-2026-10-13: staked tools; docs/multi_jurisdiction.md decision 10: staked
-reviews rate them, with no verdict flag).
+"""Tool rail, daemon side: publishing with a stake, and discovery context.
 
-Three pieces live here; the chain surface is ``runtime/tool_bond.py``:
+The chain surface is ``runtime/tool_bond.py``. Two pieces live here:
 
   - PUBLISH (``publish_with_stake``): every published tool carries an ATN
     stake. Publishing requires a novelty claim in the manifest, a successor
     only by the same author, and ``ToolBondClient.register_and_bond`` signed
-    with the AUTHOR AGENT's key. No ToolBond configured = refused (fail
-    closed), except under the dev override ``ATN_TOOL_BOND_DEV_OVERRIDE=1``.
-  - RUN (``run_clearance`` + ``containment_tier``): a network tool
-    (authored elsewhere, i.e. an adopted record the owner approved for
-    that exact digest) runs only while ``isBonded``, and its sandbox
-    follows the network's settled harm for that digest (Decision
-    2026-10-27): denied, strict, or its declared capabilities. Locally authored
-    tools are not gated. Enforced in ``ToolStore.call`` (the one dispatch
-    choke point) and ahead of a core swap in
-    ``runtime/shell_provider.dispatch_shell`` so a refused swap falls back.
-    ``RunOptIns`` is kept as the owner's per-digest note list for the UI; it
-    no longer changes what runs.
-  - DISCOVERY (``annotate_probe_rows``): probe_tools drops tools that are
-    known not to be bonded and adds the bond, the ToolBond rating (per-axis
-    REP-weighted means, harm, and the REP mass behind each) plus author
-    context (REP, other tools and their harm). Context only: ranking stays
-    the close's. A chain fault marks a row unknown, never breaks probe.
+    with the author's key (the operator's, for an external agent). No
+    ToolBond configured = refused (fail closed), except under the dev
+    override ``ATN_TOOL_BOND_DEV_OVERRIDE=1``.
+  - DISCOVERY (``annotate_probe_rows``): search rows get the bond state, the
+    tool's rating (plain means as of the latest close: correctness,
+    simplicity, novelty, the malware share, the charter axes, the REP
+    behind them) and author context (REP, other tools and their malware
+    share). Context only: the order is relevance. A chain fault marks the
+    bond unknown, never breaks search.
+
+The framework rates tools; it does not try to make running them safe
+(Decision 2026-11-09). There is no run gate, no containment tier and no
+trust label: what a household runs is its own policy, read from the ratings.
 """
 from __future__ import annotations
 
@@ -36,7 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .runtime.tool_bond import (
-    DEV_OVERRIDE_ENV, ToolBondClient, _registry_seed, dev_override, gate_for,
+    DEV_OVERRIDE_ENV, ToolBondClient, _registry_seed, dev_override,
 )
 
 log = logging.getLogger(__name__)
@@ -54,13 +48,6 @@ _REP_ABI = [{
 }]
 
 
-def is_network_tool(record: Any) -> bool:
-    """Code authored elsewhere: the run gate applies. Adopted records are
-    the only foreign code a ToolStore holds (peer manifests are fetched for
-    inspection, never executed until adopted)."""
-    return str(getattr(record, "origin", "") or "") == "adopted"
-
-
 def client_for(runtime: Any) -> Any:
     """The runtime's ToolBond client (tests pre-set ``tool_bond_client``)."""
     client = getattr(runtime, "tool_bond_client", None)
@@ -68,13 +55,12 @@ def client_for(runtime: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Owner opt-in: run an unvetted (but bonded) network tool, per digest
+# The owner's per-tool notes
 # ---------------------------------------------------------------------------
 
 class RunOptIns:
-    """Per-digest list the owner sets (WS ``set_tool_run_optin``). Since
-    staked reviews replaced the vetted flag it no longer gates a run; the
-    UI keeps it as the owner's explicit trust notes. Persisted as JSON; an
+    """Per-digest list the owner sets (WS ``set_tool_run_optin``): the
+    owner's own notes on which tools they chose to run. It gates nothing. Persisted as JSON; an
     unreadable file reads as empty."""
 
     def __init__(self, path: Path) -> None:
@@ -137,146 +123,20 @@ def run_optins(tool_store: Any) -> RunOptIns:
     return optins
 
 
-async def run_clearance(runtime: Any, record: Any) -> tuple[bool, str]:
-    """May this node run ``record``? ``(ok, reason)``, never raises.
-
-    Own tools: always (not gated). Network tools: bonded on ToolBond (the
-    author's stake stands behind the code; a settled harm slashes it in
-    proportion, so a tool rated harmful loses its bond). Refusals start with
-    "not bonded"."""
-    if not is_network_tool(record):
-        return True, "locally authored"
-    digest = str(getattr(record, "digest", "") or "")
-    try:
-        bonded, why = await gate_for(runtime).is_bonded(digest)
-        if not bonded:
-            return False, f"not bonded ({why}): unstaked, unbonding or slashed"
-        return True, "bonded"
-    except Exception as exc:  # noqa: BLE001 — fail closed
-        log.warning("run clearance for %s failed: %s", digest[:16], exc)
-        return False, f"not bonded (clearance check failed: {exc})"
-
-
-# ---------------------------------------------------------------------------
-# Containment by consensus standing (Decision 2026-10-27, docs/tool_substrate.md)
-# ---------------------------------------------------------------------------
-# A network tool's sandbox follows the network's settled judgement of its
-# exact code (per digest, from the anchor-pinned ToolBond review snapshot):
-#
-#   denied    settled harm >= deny_harm, with at least trust_mass_bps of REP
-#             supply behind the harm reviews: refused at adoption and at run.
-#   declared  harm <  trust_harm with that same REP behind it: the manifest's
-#             declared net/fs/spawn.
-#   strict    anything else (new, thinly reviewed, or contested): no net, no
-#             fs outside its sandbox, no spawn, whatever the manifest says.
-#
-# Harm is ToolBond's 0..100 scale. One reviewer can never deny or free a tool
-# on its own: both ends need REP mass. Defaults are PROVISIONAL; the DAO sets
-# them (jurisdiction.<id>.containment_*), and the owner's own tools never pass
-# through here.
-from nodes.common.containment import (  # noqa: E402  (one rule, shared with the close)
-    CONTAINMENT_DECLARED, CONTAINMENT_DENIED, CONTAINMENT_STRICT,
-    CONTAINMENT_DEFAULTS as _CONTAINMENT_DEFAULTS, tier_for_standing,
-)
-
-
-def containment_params(runtime: Any) -> dict[str, float]:
-    cfg = getattr(getattr(runtime, "_config", None), "autonet", None)
-    out = dict(_CONTAINMENT_DEFAULTS)
-    for key in out:
-        val = getattr(cfg, f"containment_{key}", None) if cfg is not None else None
-        if val not in (None, ""):
-            try:
-                out[key] = float(val)
-            except (TypeError, ValueError):
-                pass
-    return out
-
-
-
-
-def containment_tier(runtime: Any, record: Any) -> tuple[str, str]:
-    """``(tier, reason)`` for running ``record`` here; never raises. Own
-    tools return ``("own", ...)`` and keep the authored path."""
-    if not is_network_tool(record):
-        return "own", "locally authored"
+def rating_for(runtime: Any, digest: str) -> Optional[dict[str, Any]]:
+    """The tool's rating as of the latest close (``tool_store.
+    rating_provider``, the anchored means), or None when unknown. Never
+    raises."""
     store = getattr(runtime, "tool_store", None)
-    provider = getattr(store, "security_standing_provider", None)
-    standing = None
-    if provider is not None:
-        try:
-            standing = provider(str(getattr(record, "digest", "") or ""))
-        except Exception as exc:  # noqa: BLE001 — unknown standing = strict
-            log.debug("security standing read failed: %s", exc)
-    return tier_for_standing(standing, containment_params(runtime))
-
-
-# What an agent is told about a network tool's trust (Decision 2026-11-02,
-# docs/tool_codebases.md): adoption needs no owner approval, so the label is
-# the warning.
-ZERO_TRUST = ("zero trust: nobody has reviewed this tool enough to clear it. "
-              "Read its code and try it in a sandbox of your own on harmless "
-              "input, watching what it reaches for (files, network, "
-              "processes), before running it on real work.")
-REVIEWED = ("cleared by reviews: reviewers holding enough REP found it "
-            "harmless as declared.")
-
-
-def trust_for_digest(runtime: Any, digest: str) -> tuple[str, str]:
-    """``(containment tier, trust label)`` for a network tool by digest;
-    never raises. Unknown standing is zero trust."""
-    store = getattr(runtime, "tool_store", None)
-    provider = getattr(store, "security_standing_provider", None)
-    standing = None
-    if provider is not None:
-        try:
-            standing = provider(str(digest))
-        except Exception as exc:  # noqa: BLE001
-            log.debug("security standing read failed: %s", exc)
-    tier = tier_for_standing(standing, containment_params(runtime))[0]
-    return tier, (REVIEWED if tier == CONTAINMENT_DECLARED else ZERO_TRUST)
-
-
-def finally_denied(runtime: Any, digest: str) -> bool:
-    """True once the network's harm verdict on ``digest`` is past appeal
-    (settled and not overruled, or its appeal window expired). Containment
-    acts on harm still under appeal; discovery waits for the final verdict
-    before hiding a tool. Unknown standing is never hidden."""
-    store = getattr(runtime, "tool_store", None)
-    provider = getattr(store, "security_standing_provider", None)
+    provider = getattr(store, "rating_provider", None)
     if provider is None:
-        return False
+        return None
     try:
-        standing = provider(str(digest), include_cooling=False)
-    except Exception as exc:  # noqa: BLE001 — unknown = shown
-        log.debug("final standing read failed: %s", exc)
-        return False
-    return tier_for_standing(standing, containment_params(runtime))[0] == "denied"
-
-
-def rating_view(rating: Optional[dict[str, Any]],
-                rep_supply: Optional[int] = None) -> dict[str, Any]:
-    """A ToolBond rating (``ToolBondClient.rating``) as display numbers:
-    per-axis mean in -1..1 and REP mass, harm mean in 0..1 and its mass,
-    and the mass as a share of REP supply when known. None values mean no
-    REP has rated that axis yet."""
-    if not rating:
-        return {"chain_rating": None, "harm": None, "harm_mass": None}
-    axes = rating.get("axes") or {}
-    harm = rating.get("harm") or {}
-
-    def share(mass: Any) -> Optional[float]:
-        if not rep_supply:
-            return None
-        return round(int(mass or 0) / int(rep_supply), 9)
-    return {
-        "chain_rating": {a: v.get("mean") for a, v in sorted(axes.items())},
-        "rating_mass": {a: str(v.get("mass", 0)) for a, v in sorted(axes.items())},
-        "rating_mass_share": ({a: share(v.get("mass")) for a, v in sorted(axes.items())}
-                              if rep_supply else None),
-        "harm": harm.get("mean"),
-        "harm_mass": str(harm.get("mass", 0)),
-    }
+        rating = provider(str(digest).lower().removeprefix("0x"))
+    except Exception as exc:  # noqa: BLE001 (the rating is context)
+        log.debug("rating read failed: %s", exc)
+        return None
+    return dict(rating) if isinstance(rating, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -466,34 +326,16 @@ async def _guarded(sem: asyncio.Semaphore, coro_fn, *args) -> Any:
             return None
 
 
-async def _bond_view(client: Any, digest: str) -> Optional[dict[str, Any]]:
-    """The bond plus the settled ToolBond rating on the active charter's
-    axes, or None when the bond read fails."""
-    st = await client.status(digest)
-    if st is None:
-        return None
-    st = dict(st)
-    reader = getattr(client, "rating", None)
-    if reader is not None:
-        from nodes.common.library.charter import active_charter
-        try:
-            st["rating"] = await reader(digest, list(active_charter().ids))
-        except Exception as exc:  # noqa: BLE001 (the rating is context)
-            log.debug("ToolBond rating read failed: %s", exc)
-            st["rating"] = None
-    return st
-
-
 async def cached_status(runtime: Any, client: Any, digest: str,
                         sem: asyncio.Semaphore) -> Optional[dict[str, Any]]:
-    """Bond + rating (``_bond_view``) with a short cache; None = unknown."""
+    """The bond (``client.status``) with a short cache; None = unknown."""
     key = str(digest).lower()
     cache = _status_cache(runtime)
     now = time.monotonic()
     hit = cache.get(key)
     if hit is not None and hit[1] > now:
         return hit[0]
-    st = await _guarded(sem, _bond_view, client, digest)
+    st = await _guarded(sem, client.status, digest)
     cache[key] = (st, now + (_STATUS_TTL_S if st is not None else _STATUS_FAULT_TTL_S))
     return st
 
@@ -527,10 +369,11 @@ def _is_address(value: str) -> bool:
 
 async def annotate_probe_rows(runtime: Any, rows: list[dict[str, Any]],
                               ) -> list[dict[str, Any]]:
-    """Add bond state, the ToolBond rating and author context to probe rows;
-    drop rows whose digest is known NOT to be bonded. Unknown (no ToolBond
-    configured, RPC fault) keeps the row with ``bonded: None``. Never
-    raises; order kept."""
+    """Add the bond state, the tool's rating and author context to search
+    rows. Every row stays: an unbonded tool shows ``bonded: false`` and a
+    tool rated malware shows its share (Decision 2026-11-09: disqualified
+    means unpaid, nothing else). A chain fault marks the bond unknown
+    (``bonded: None``). Never raises; order kept."""
     if not rows:
         return rows
     try:
@@ -539,13 +382,12 @@ async def annotate_probe_rows(runtime: Any, rows: list[dict[str, Any]],
         log.debug("probe bond annotation failed: %s", exc)
         for row in rows:
             row.setdefault("bonded", None)
-            row.setdefault("harm", None)
+            row.setdefault("rating", rating_for(runtime, row.get("digest", "")))
         return rows
 
 
-def _harm_of(st: Optional[dict[str, Any]]) -> Optional[float]:
-    harm = ((st or {}).get("rating") or {}).get("harm") or {}
-    return harm.get("mean")
+def _malware_of(rating: Optional[dict[str, Any]]) -> Optional[float]:
+    return (rating or {}).get("malware")
 
 
 async def _annotate(runtime: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -554,7 +396,7 @@ async def _annotate(runtime: Any, rows: list[dict[str, Any]]) -> list[dict[str, 
     override = dev_override()
     chain = (not override) and bool(client.available())
 
-    # Author -> tools this node can see (probe rows + the local store).
+    # Author -> tools this node can see (search rows + the local store).
     by_author: dict[str, dict[str, str]] = {}
     for row in rows:
         a = str(row.get("author") or "").lower()
@@ -568,10 +410,7 @@ async def _annotate(runtime: Any, rows: list[dict[str, Any]]) -> list[dict[str, 
 
     statuses: dict[str, Optional[dict[str, Any]]] = {}
     if chain:
-        wanted: list[str] = [r["digest"] for r in rows]
-        for tools in by_author.values():
-            wanted.extend(list(tools)[:_AUTHOR_TOOLS_MAX])
-        wanted = list(dict.fromkeys(wanted))
+        wanted = list(dict.fromkeys(r["digest"] for r in rows))
         got = await asyncio.gather(*(cached_status(runtime, client, d, sem)
                                      for d in wanted))
         statuses = dict(zip(wanted, got))
@@ -583,40 +422,27 @@ async def _annotate(runtime: Any, rows: list[dict[str, Any]]) -> list[dict[str, 
         got = await asyncio.gather(*(_guarded(sem, reader, a) for a in authors))
         rep = dict(zip(authors, got))
 
-    out: list[dict[str, Any]] = []
     for row in rows:
         digest = row["digest"]
         st = statuses.get(digest)
-        if st is not None and not st.get("bonded"):
-            continue  # unstaked / unbonding / slashed: not in the economy
-        if finally_denied(runtime, digest):
-            continue  # harmful by the network's final verdict
         if st is not None:
-            row.update({"bonded": True, "stake": str(st.get("stake", "")),
-                        **rating_view(st.get("rating"))})
+            row.update({"bonded": bool(st.get("bonded")),
+                        "stake": str(st.get("stake", ""))})
         else:
-            row.update({"bonded": True if override else None,
-                        **rating_view(None)})
-        local = getattr(getattr(runtime, "tool_store", None), "_records", {}) or {}
-        rec = local.get(digest)
-        if rec is None or getattr(rec, "origin", "") == "adopted":
-            row["containment"], row["trust"] = trust_for_digest(runtime, digest)
+            row["bonded"] = True if override else None
+        row["rating"] = rating_for(runtime, digest)
         author = str(row.get("author") or "").lower()
         others = {d: n for d, n in by_author.get(author, {}).items() if d != digest}
-        other_rows = []
-        for d, n in list(others.items())[:_AUTHOR_TOOLS_MAX]:
-            ost = statuses.get(d)
-            other_rows.append({"digest": d, "name": n,
-                               "bonded": None if ost is None else bool(ost.get("bonded")),
-                               "harm": _harm_of(ost)})
-        harms = [o["harm"] for o in other_rows if o["harm"] is not None]
+        other_rows = [{"digest": d, "name": n,
+                       "malware": _malware_of(rating_for(runtime, d))}
+                      for d, n in list(others.items())[:_AUTHOR_TOOLS_MAX]]
+        shares = [o["malware"] for o in other_rows if o["malware"] is not None]
         r = rep.get(author)
         row["author_context"] = {
             "rep": None if r is None else str(r),
             "other_tools": other_rows,
-            # The highest settled harm among the author's other tools this
-            # node can see; None = unknown or none rated yet.
-            "max_other_harm": max(harms) if harms else None,
+            # The highest malware share among the author's other tools this
+            # node has ratings for; None = none rated yet.
+            "max_other_malware": max(shares) if shares else None,
         }
-        out.append(row)
-    return out
+    return rows

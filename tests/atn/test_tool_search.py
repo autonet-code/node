@@ -1,7 +1,7 @@
 """Tool library search (atn/tool_search.py, Decision 2026-11-08): keyword +
 semantic over every manifest the daemon holds, merged by reciprocal rank
-fusion, relevance order only, metadata (ratings, harm, bond, author,
-household) on each match, keyword-only until the model is ready."""
+fusion, relevance order only, metadata (rating, bond, author, household)
+on each match, keyword-only until the model is ready."""
 from __future__ import annotations
 
 import json
@@ -20,7 +20,7 @@ from atn.tool_store import ToolRecord
 from nodes.common.library import minilm
 
 from tests.atn.test_tool_security import (
-    AUTH, FakeClient, _make_runtime, _rating, _st,
+    AUTH, FakeClient, _make_runtime, _rating, _ratings, _st,
 )
 from tests.atn.test_tool_store import _family, _register_echo
 
@@ -192,28 +192,29 @@ async def test_order_is_relevance_not_rating(tmp_path, model):
         weak: _manifest("csv_rows", "Read csv rows."),
         strong: _manifest("table_tool", "Works on a table."),
     })
-    rt.tool_bond_client = FakeClient(
-        {weak: _st(), strong: _st()},
-        ratings={weak: _rating(correctness=-0.9, harm=0.4),
-                 strong: _rating(correctness=0.95)})
+    rt.tool_bond_client = FakeClient({weak: _st(), strong: _st()})
+    _ratings(rt, {weak: _rating(correctness=-0.9, malware=0.4),
+                  strong: _rating(correctness=0.95)})
     out = await search_tools(rt, "csv rows", 5)
     assert [m["digest"] for m in out["matches"]] == [weak, strong]
     first = out["matches"][0]
-    assert first["chain_rating"]["correctness"] == -0.9
-    assert first["rating_mass"]["correctness"] == "300"
-    assert first["harm"] == 0.4 and first["harm_mass"] == "300"
+    assert first["rating"]["correctness"] == -0.9
+    assert first["rating"]["malware"] == 0.4 and first["rating"]["mass"] == 0.3
     assert first["bonded"] is True and first["stake"] == "100"
     assert "author_context" in first
-    for gone in ("rating", "axes", "mass", "review_mass"):
+    for gone in ("chain_rating", "harm", "trust", "containment", "review_mass"):
         assert gone not in first
 
 
-async def test_unbonded_tools_stay_excluded(tmp_path):
+async def test_unbonded_tools_show_with_their_bond(tmp_path):
+    """Disqualified means unpaid, nothing else (Decision 2026-11-09): an
+    unbonded tool is listed, and says so."""
     rt = _make_runtime(tmp_path)
     _with_network(rt, REMOTE)
     rt.tool_bond_client = FakeClient({R_CSV: _st(bonded=False), R_PDF: _st()})
     out = await search_tools(rt, "csv pdf", 5)
-    assert [m["digest"] for m in out["matches"]] == [R_PDF]
+    bonded = {m["digest"]: m["bonded"] for m in out["matches"]}
+    assert bonded[R_CSV] is False and bonded[R_PDF] is True
 
 
 # ---------------------------------------------------------------------------
