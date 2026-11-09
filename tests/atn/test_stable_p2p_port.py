@@ -19,3 +19,11 @@ def test_an_unreadable_file_is_replaced(tmp_path):
     (tmp_path / "p2p.port").write_text("junk")
     port = _stable_p2p_port(tmp_path, "127.0.0.1")
     assert port > 0 and (tmp_path / "p2p.port").read_text() == str(port)
+
+
+def test_the_tcp_listener_keeps_its_own_port(tmp_path):
+    ws = _stable_p2p_port(tmp_path, "127.0.0.1")
+    tcp = _stable_p2p_port(tmp_path, "127.0.0.1", "p2p.tcp_port", avoid=ws)
+    assert tcp != ws
+    assert (tmp_path / "p2p.tcp_port").read_text() == str(tcp)
+    assert _stable_p2p_port(tmp_path, "127.0.0.1", "p2p.tcp_port", avoid=ws) == tcp

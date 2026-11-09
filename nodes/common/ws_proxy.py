@@ -1,25 +1,42 @@
-"""HTTP CONNECT proxies for the libp2p WebSocket transport.
+"""Proxied and guarded dialing for the libp2p WebSocket transport (0.8.1).
 
-py-libp2p's WebSocket client honours ``HTTP_PROXY`` / ``HTTPS_PROXY`` but
-only speaks SOCKS5 to them. Machines whose only egress is an HTTP proxy
-(cloud sandboxes, corporate networks) need HTTP CONNECT: open a tunnel
-through the proxy, add TLS for ``wss``, then run the WebSocket handshake
-over that stream. ``install()`` patches the transport once; SOCKS proxy URLs
-keep the library's own path. Every WebSocket dial (direct or proxied) also
-runs in its own guarded task group (``_guarded``). See docs/p2p_networking.md.
+Machines whose only egress is a proxy (cloud sandboxes, corporate networks)
+dial WebSocket peers through it: HTTP CONNECT (``http://`` / ``https://``
+proxy URLs) or SOCKS5 (``socks5://`` / ``socks5h://``), named by
+``HTTPS_PROXY`` / ``HTTP_PROXY`` / ``ALL_PROXY`` (``NO_PROXY`` honoured).
+The tunnel carries TLS for ``wss`` and then the WebSocket handshake.
+py-libp2p's own SOCKS path waits on a task group that never ends, so both
+proxy kinds go through the code here.
+
+``install()`` patches the transport once:
+
+- every dial (direct or proxied) runs its WebSocket connection in its own
+  guarded task group (``_guarded``): py-libp2p starts each connection's
+  reader in one shared background nursery, so a rejected handshake (a
+  proxy answering 502 for a dead relay) or a reader error used to cancel
+  every connection on the node;
+- the proxy choice is made here rather than in py-libp2p's
+  ``_create_connection`` (which prints to stdout on every proxied dial);
+- the remote address of a ws connection is read from trio-websocket (the
+  library returns a placeholder), so the reach check sees a ws peer's IP.
+
+See docs/p2p_networking.md.
 """
 
 from __future__ import annotations
 
 import base64
+import ipaddress
 import logging
 import ssl
+import struct
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
 _installed = False
+_env_proxy: Any = None   # py-libp2p's get_proxy_from_environment (NO_PROXY aware)
 
 
 async def open_connect_tunnel(proxy_url: str, host: str, port: int) -> Any:
@@ -52,22 +69,106 @@ async def open_connect_tunnel(proxy_url: str, host: str, port: int) -> Any:
     return stream
 
 
+async def _read_exactly(stream: Any, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = await stream.receive_some(n - len(buf))
+        if not chunk:
+            raise OSError("SOCKS proxy closed the connection")
+        buf += chunk
+    return buf
+
+
+async def open_socks5_tunnel(proxy_url: str, host: str, port: int) -> Any:
+    """A trio stream to ``host:port`` through the SOCKS5 proxy at
+    ``proxy_url`` (RFC 1928; no auth or username/password, RFC 1929).
+    Names are sent to the proxy unresolved, so the dialer needs no DNS."""
+    import trio
+    p = urlparse(proxy_url)
+    stream = await trio.open_tcp_stream(p.hostname, p.port or 1080)
+    try:
+        methods = b"\x00\x02" if p.username else b"\x00"
+        await stream.send_all(b"\x05" + bytes([len(methods)]) + methods)
+        ver, method = await _read_exactly(stream, 2)
+        if ver != 5 or method == 0xFF:
+            raise OSError("SOCKS proxy accepts none of our auth methods")
+        if method == 2:
+            user = unquote(p.username or "").encode()
+            pw = unquote(p.password or "").encode()
+            await stream.send_all(b"\x01" + bytes([len(user)]) + user + bytes([len(pw)]) + pw)
+            _, status = await _read_exactly(stream, 2)
+            if status != 0:
+                raise OSError("SOCKS proxy refused our credentials")
+        try:
+            ip = ipaddress.ip_address(host)
+            addr = (b"\x01" if ip.version == 4 else b"\x04") + ip.packed
+        except ValueError:
+            name = host.encode("idna")
+            addr = b"\x03" + bytes([len(name)]) + name
+        await stream.send_all(b"\x05\x01\x00" + addr + struct.pack(">H", port))
+        ver, rep, _, atyp = await _read_exactly(stream, 4)
+        if rep != 0:
+            raise OSError(f"SOCKS proxy refused CONNECT {host}:{port} (code {rep})")
+        skip = {1: 4, 4: 16}.get(atyp)
+        if skip is None:
+            skip = (await _read_exactly(stream, 1))[0]
+        await _read_exactly(stream, skip + 2)
+        return stream
+    except BaseException:
+        await stream.aclose()
+        raise
+
+
+async def open_tunnel(proxy_url: str, host: str, port: int) -> Any:
+    scheme = urlparse(proxy_url).scheme.lower()
+    if scheme in ("http", "https"):
+        return await open_connect_tunnel(proxy_url, host, port)
+    if scheme in ("socks5", "socks5h", "socks"):
+        return await open_socks5_tunnel(proxy_url, host, port)
+    raise OSError(f"unsupported proxy scheme {scheme!r} in {proxy_url}")
+
+
+def proxy_for(url: str) -> Optional[str]:
+    """The proxy a dial to ``url`` goes through (environment, NO_PROXY)."""
+    if _env_proxy is None:
+        return None
+    import os
+    try:
+        found = _env_proxy(url)
+        if found:
+            return found
+        # A machine whose only way out is a proxy tunnels every dial, so a
+        # ws:// dial with only HTTPS_PROXY (or ALL_PROXY) set uses it too.
+        from libp2p.transport.websocket import proxy_env
+        parsed = urlparse(url)
+        if proxy_env._should_bypass_proxy(parsed.hostname, parsed.port):
+            return None
+        for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+            if os.environ.get(name):
+                return os.environ[name]
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def install() -> None:
-    """Teach the WebSocket transport to dial through HTTP(S) CONNECT proxies."""
-    global _installed
+    """Patch the WebSocket transport (see the module docstring)."""
+    global _installed, _env_proxy
     if _installed:
         return
     try:
         from libp2p.transport.websocket import transport as wst
-    except Exception:  # noqa: BLE001 — no websocket transport, nothing to do
+        from libp2p.transport.websocket import proxy_env
+    except Exception:  # noqa: BLE001 - no websocket transport, nothing to do
         return
-    original = wst.WebsocketTransport._create_proxy_connection
     _install_remote_address()
+    _env_proxy = proxy_env.get_proxy_from_environment
+    # py-libp2p's _create_connection asks this and prints the answer; we
+    # choose the proxy in _create_direct_connection instead.
+    proxy_env.get_proxy_from_environment = lambda url: None
 
-    async def _create_proxy_connection(self: Any, proto_info: Any, proxy_url: str,
-                                       ssl_context: Optional[ssl.SSLContext]) -> Any:
-        if urlparse(proxy_url).scheme not in ("http", "https"):
-            return await original(self, proto_info, proxy_url, ssl_context)
+    async def _open(self: Any, proto_info: Any, ssl_context: Optional[ssl.SSLContext],
+                    proxy_url: Optional[str]) -> Any:
         import trio
         from trio_websocket import wrap_client_stream
         from libp2p.utils.multiaddr_utils import extract_host_from_multiaddr
@@ -75,46 +176,48 @@ def install() -> None:
         if isinstance(host, tuple):
             host = host[0]
         port = int(proto_info.rest_multiaddr.value_for_protocol("tcp") or "80")
+        if self._background_nursery is None:
+            raise wst.OpenConnectionError(
+                "No background nursery available for the WebSocket transport")
         with trio.fail_after(self._config.handshake_timeout):
-            stream = await open_connect_tunnel(proxy_url, host, port)
-            if proto_info.is_wss:
-                stream = trio.SSLStream(stream, ssl_context or ssl.create_default_context(),
-                                        server_hostname=host)
-                await stream.do_handshake()
-            if self._background_nursery is None:
-                raise wst.OpenConnectionError(
-                    "No background nursery available for the WebSocket transport")
-            ws = await self._background_nursery.start(_guarded(
-                lambda n: wrap_client_stream(
-                    n, stream, host, "/", message_queue_size=1024,
-                    max_message_size=self._config.max_message_size)))
-        logger.info("WebSocket dial to %s:%s through HTTP proxy %s",
-                    host, port, urlparse(proxy_url).hostname)
+            if proxy_url:
+                stream: Any = await open_tunnel(proxy_url, host, port)
+            else:
+                stream = await trio.open_tcp_stream(host, port)
+            try:
+                if proto_info.is_wss:
+                    stream = trio.SSLStream(stream, ssl_context or ssl.create_default_context(),
+                                            server_hostname=host, https_compatible=True)
+                    await stream.do_handshake()
+                host_header = host if port in (80, 443) else f"{host}:{port}"
+                ws = await self._background_nursery.start(_guarded(
+                    lambda n: wrap_client_stream(
+                        n, stream, host_header, "/", message_queue_size=1024,
+                        max_message_size=self._config.max_message_size)))
+            except BaseException:
+                with trio.CancelScope(shield=True):
+                    await trio.aclose_forcefully(stream)
+                raise
+        if proxy_url:
+            logger.info("WebSocket dial to %s:%s through proxy %s",
+                        host, port, urlparse(proxy_url).hostname)
         return wst.P2PWebSocketConnection(
             ws, None, is_secure=proto_info.is_wss,
             max_buffered_amount=self._config.max_buffered_amount)
 
+    async def _create_proxy_connection(self: Any, proto_info: Any, proxy_url: str,
+                                       ssl_context: Optional[ssl.SSLContext]) -> Any:
+        return await _open(self, proto_info, ssl_context, proxy_url)
+
     async def _create_direct_connection(self: Any, proto_info: Any,
                                         ssl_context: Optional[ssl.SSLContext]) -> Any:
-        import trio
-        from trio_websocket import connect_websocket_url
         from libp2p.utils.multiaddr_utils import extract_host_from_multiaddr, format_host_for_url
         host = extract_host_from_multiaddr(proto_info.rest_multiaddr) or "localhost"
         if isinstance(host, tuple):
             host = host[0]
         port = int(proto_info.rest_multiaddr.value_for_protocol("tcp") or "80")
         url = f"{'wss' if proto_info.is_wss else 'ws'}://{format_host_for_url(host)}:{port}/"
-        if self._background_nursery is None:
-            raise wst.OpenConnectionError(
-                "No background nursery available for the WebSocket transport")
-        with trio.fail_after(self._config.handshake_timeout):
-            ws = await self._background_nursery.start(_guarded(
-                lambda n: connect_websocket_url(
-                    n, url, ssl_context=ssl_context, message_queue_size=1024,
-                    max_message_size=self._config.max_message_size)))
-        return wst.P2PWebSocketConnection(
-            ws, None, is_secure=proto_info.is_wss,
-            max_buffered_amount=self._config.max_buffered_amount)
+        return await _open(self, proto_info, ssl_context, proxy_for(url))
 
     wst.WebsocketTransport._create_proxy_connection = _create_proxy_connection
     wst.WebsocketTransport._create_direct_connection = _create_direct_connection

@@ -62,7 +62,7 @@ dependencies = [
     # blob_resolver.py). multiaddr ships with libp2p. trio is the required
     # async runtime for the libp2p host. miniupnpc maps the listen port on
     # home routers (UPnP, on by default) so NAT'd daemons become reachable.
-    "libp2p>=0.6.0,<0.7",
+    "libp2p==0.8.1",
     "trio>=0.22.0",
     "miniupnpc>=2.0",
     # numpy is imported at module level by the artifact index and the tool

@@ -114,7 +114,11 @@ class TrainingConfig:
 @dataclass
 class P2PConfig:
     """P2P networking configuration."""
-    listen_port: int = 0           # 0 = random port
+    # The WebSocket listener's port (0 = random; a daemon keeps one in
+    # <data>/p2p.port); TCP sits on tcp_port (0 = listen_port + 1, a
+    # daemon keeps one in <data>/p2p.tcp_port).
+    listen_port: int = 0
+    tcp_port: int = 0
     listen_host: str = "0.0.0.0"
     bootstrap_peers: list = field(default_factory=list)  # multiaddr strings
     # Addresses peers should dial us on, replacing the listen addresses we
@@ -124,11 +128,17 @@ class P2PConfig:
     # Seconds between re-reads of the Registry seed list
     # (jurisdiction.<id>.bootstrap) on a running daemon; 0 = read at join only.
     seed_refresh_interval: int = 300
-    # "tcp" or "ws": one transport per network (py-libp2p runs one per host).
-    # "ws" lets relays sit behind an HTTPS proxy and HTTPS-only machines
-    # dial out through HTTP_PROXY / HTTPS_PROXY (nodes/common/ws_proxy.py).
-    # Default "ws": the format Registry seeds use (werule validates /ws|wss).
-    transport: str = "ws"
+    # "tcp+ws" (default): listen on both, dial whichever a peer offers (TCP
+    # preferred; hole punching is TCP only). "ws" or "tcp" run one. A
+    # machine whose egress is an HTTP(S)/SOCKS proxy runs ws only and dials
+    # through it (nodes/common/ws_proxy.py). Registry seeds stay /ws or /wss
+    # (werule validates them), so every daemon keeps a ws listener.
+    transport: str = "tcp+ws"
+    # Mesh (docs/p2p_networking.md): dial towards target_peers from the DHT,
+    # capability gossip and the peer cache; prune above max_peers.
+    target_peers: int = 8
+    max_peers: int = 48
+    dht: bool = True
     enable_quic: bool = False
     # Without announce_addrs: map the listen port on the home router (UPnP)
     # and announce our public address once a peer confirms it can connect.
@@ -297,7 +307,8 @@ def _apply_env_overrides(raw: dict) -> dict:
         AUTONET_NUM_SAMPLES     -> training.num_samples
         AUTONET_IMAGE_SIZE      -> model.image_size
         AUTONET_ARCHITECTURE    -> model.architecture
-        AUTONET_P2P_PORT        -> p2p.listen_port
+        AUTONET_P2P_PORT        -> p2p.listen_port (WebSocket)
+        AUTONET_P2P_TCP_PORT    -> p2p.tcp_port
         AUTONET_P2P_HOST        -> p2p.listen_host
         AUTONET_P2P_BOOTSTRAP   -> p2p.bootstrap_peers (comma list)
         AUTONET_P2P_ANNOUNCE    -> p2p.announce_addrs (comma list)
@@ -319,6 +330,7 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_DATA_DIR": ("data_dir", str),
         "AUTONET_LOG_LEVEL": ("log_level", str),
         "AUTONET_P2P_PORT": ("p2p.listen_port", int),
+        "AUTONET_P2P_TCP_PORT": ("p2p.tcp_port", int),
         "AUTONET_P2P_HOST": ("p2p.listen_host", str),
         "AUTONET_P2P_TRANSPORT": ("p2p.transport", str),
         "AUTONET_P2P_BOOTSTRAP": ("p2p.bootstrap_peers", _csv_list),

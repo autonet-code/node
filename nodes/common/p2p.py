@@ -1,25 +1,31 @@
 """
-P2P Communication Layer for Autonet
+P2P Communication Layer for Autonet (py-libp2p 0.8.1).
 
-Wraps py-libp2p to provide:
-- Node discovery via Kademlia DHT
-- QUIC transport (preferred) with TCP fallback
-- NAT traversal via UPnP
-- Latency-aware peer selection
-- Weight delta transfer between solver/aggregator
-- Activation relay for pipeline-parallel inference
-- Guild-local gossip via GossipSub
-- Cross-guild inference routing
-- Node capability advertisement via DHT
+The network is a mesh (docs/p2p_networking.md):
 
+- every host listens on TCP and WebSocket at once and dials whichever a
+  peer offers (TCP preferred; ws/wss for proxied machines and relays
+  behind an HTTPS proxy such as Cloudflare);
+- relays run circuit relay v2 (hop, with reservations); a NAT'd daemon
+  reserves a slot on the relays it is connected to and advertises
+  ``/p2p-circuit`` addresses, so anyone can reach it through a relay;
+- DCUtR upgrades a relayed connection to a direct TCP one by hole punching;
+- a Kademlia DHT on every daemon finds peers and blob providers: whoever
+  holds a blob a tool needs announces it (``provide``) and fetchers dial
+  the providers they find, directly or through a circuit;
+- a peer cache in the data dir lets a restart rejoin with every seed down;
+  the mesh loop dials DHT-found and capability peers up to a target count
+  and the connection manager prunes above a cap.
+
+Gossip (GossipSub), capability advertisement, service calls, batch
+catch-up, blob offers and the reach check ride on the same connections.
 Uses trio as the async runtime (required by py-libp2p).
 
 Usage:
-    from nodes.common.p2p import AutonetHost, NodeCapability
-    host = AutonetHost(node_id="solver-0", config=p2p_config)
+    from nodes.common.p2p import AutonetHost
+    host = AutonetHost(node_id="daemon", listen_port=4001)
     async with host.run():
-        await host.send_weight_delta(peer_id, delta_bytes)
-        await host.publish_guild_message(guild_id, message)
+        await host.publish_topic(topic, data)
 """
 
 import hashlib
@@ -30,6 +36,8 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+
+from . import p2p_mesh
 
 try:
     import trio
@@ -44,7 +52,7 @@ try:
     from libp2p.host.ping import PingService
     from libp2p.pubsub.gossipsub import GossipSub
     from libp2p.pubsub.pubsub import Pubsub
-    from libp2p.tools.async_service.trio_service import background_trio_service
+    from libp2p.tools.anyio_service import TrioManager, background_trio_service
 
     _P2P_AVAILABLE = True
 except ImportError:
@@ -152,11 +160,10 @@ WEIGHTS_PROTOCOL = TProtocol("/autonet/weights/1.0.0")
 ACTIVATIONS_PROTOCOL = TProtocol("/autonet/activations/1.0.0")
 CAPABILITY_PROTOCOL = TProtocol("/autonet/capability/1.0.0")
 BLOB_PROTOCOL = TProtocol("/autonet/blob/1.0.0")
-# A blob request frame is "<hash>" or "<hash>|<hops>": how many times the
-# serving peer may forward the request to its own peers on a miss, so a
-# NAT'd daemon can reach a blob held only by another NAT'd daemon through
-# a reachable peer both are connected to. A bare hash allows one hop.
-BLOB_RELAY_MAX_HOPS = 1
+# A blob request frame is "<hash>" (a "|<hops>" suffix from older daemons is
+# ignored). A peer answers from what it holds and never forwards: a fetcher
+# finds the holders through the DHT (``provide`` / ``find_providers``) and
+# dials them, directly or through a relay circuit.
 EMBEDDING_PROTOCOL = TProtocol("/autonet/embeddings/1.0.0")
 INFERENCE_REQUEST_PROTOCOL = TProtocol("/rpb/inference/1.0.0")
 # Robot poll rail (docs/robots.md, 2026-10-25): polls, link pushes and
@@ -185,6 +192,8 @@ BATCHES_PROTOCOL = TProtocol("/autonet/batches/1.0.0")
 # computed it. Everyone else answers {"kept": 0}.
 BLOB_OFFER_PROTOCOL = TProtocol("/autonet/blob-offer/1.0.0")
 BLOB_OFFER_MAX_CIDS = 16
+# Peers that speak one of these are Autonet peers worth a mesh dial.
+KAD_OR_AUTONET_PROTOCOLS = {"/ipfs/kad/1.0.0", str(BLOB_PROTOCOL), str(SERVICE_PROTOCOL)}
 GUILD_GOSSIP_TOPIC_PREFIX = "/autonet/guild/"
 PROVIDER_REGISTRY_TOPIC = "/rpb/provider-registry/"
 
@@ -459,17 +468,56 @@ def resolve_dns_multiaddr(addr: str) -> str:
     return "/".join(parts)
 
 
+TRANSPORTS = ("tcp", "ws", "tcp+ws")
+
+# Circuit relay v2 limits on a relay (hop): a reservation lasts an hour and
+# is refreshed; a relayed connection may carry 1 GiB for two hours, after
+# which the mesh loop redials (and DCUtR has long since made it direct).
+RELAY_RESERVATION_TTL = 3600
+RELAY_CIRCUIT_DURATION = 2 * 3600
+RELAY_CIRCUIT_BYTES = 1 << 30
+RELAY_MAX_RESERVATIONS = 1024
+RELAY_MAX_CIRCUITS_PER_PEER = 64
+# How long a dial waits on the direct addresses before it also tries the
+# peer's circuit addresses (both race; the first connection wins).
+CIRCUIT_DIAL_DELAY = 2.0
+
+
+class _ConnNotifee:
+    """Swarm notifee: hands every new connection to the host (DHT feed,
+    pubsub nudge, peer cache). Implements py-libp2p's INotifee shape."""
+
+    def __init__(self, host: "AutonetHost"):
+        self._host = host
+
+    async def opened_stream(self, network, stream) -> None:
+        pass
+
+    async def closed_stream(self, network, stream) -> None:
+        pass
+
+    async def connected(self, network, conn) -> None:
+        self._host._on_connected(conn)
+
+    async def disconnected(self, network, conn) -> None:
+        pass
+
+    async def listen(self, network, multiaddr) -> None:
+        pass
+
+    async def listen_close(self, network, multiaddr) -> None:
+        pass
+
+
 class AutonetHost:
     """
     Main P2P host for Autonet nodes.
 
-    Wraps a libp2p host and provides high-level P2P operations:
-    - Discovery via Kademlia DHT and bootstrap peers
-    - Latency-aware peer selection
-    - Weight delta transfer (solver → aggregator)
-    - Activation relay (inference pipeline)
-    - Guild gossip (GossipSub)
-    - Node capability advertisement
+    Wraps a py-libp2p 0.8.1 host and runs the mesh around it: TCP and
+    WebSocket listeners, circuit relay v2 (hop on relays, reservations on
+    NAT'd daemons), DCUtR hole punching, a Kademlia DHT for peer and blob
+    provider discovery, the peer cache, the mesh dialer and the connection
+    cap. See docs/p2p_networking.md.
 
     P2P dependencies (libp2p, trio) ship with the core install.
     """
@@ -488,12 +536,29 @@ class AutonetHost:
         auto_reach: bool = False,
         reach_interval: float = 300.0,
         key_seed: Optional[bytes] = None,
-        transport: str = "tcp",
+        transport: str = "tcp+ws",
         seed_source: Optional[Callable[[], Optional[List[str]]]] = None,
         seed_refresh_interval: float = 300.0,
+        tcp_port: int = 0,
+        relay_hop: bool = False,
+        enable_dht: bool = True,
+        peer_cache_path: Optional[str] = None,
+        target_peers: int = 8,
+        max_peers: int = 48,
+        mesh_interval: float = 15.0,
+        provide_interval: float = 1800.0,
+        max_reservations: int = 2,
+        advertise_listen_addrs: bool = True,
     ):
         self.node_id = node_id
+        self.logger = logging.getLogger(f"P2P[{node_id}]")
+        # ``listen_port`` is the port of the WebSocket listener (of the TCP
+        # one with transport "tcp"): the port Registry seeds and the data
+        # dir's p2p.port have always named. With both transports TCP sits on
+        # ``tcp_port`` (0 = listen_port + 1 when listen_port is set, else
+        # random).
         self._listen_port = listen_port
+        self._tcp_port = tcp_port
         self._listen_host = listen_host
         self._bootstrap_peers = bootstrap_peers or []
         self._announce_addrs = announce_addrs or []
@@ -506,15 +571,26 @@ class AutonetHost:
         # A 32-byte ed25519 seed gives a stable peer id across restarts (a
         # seed node's bootstrap address embeds it); None = a fresh id.
         self._key_seed = key_seed
-        # "tcp" or "ws". py-libp2p runs ONE transport per host, picked from
-        # its listen address, so every node of a network must share it. "ws"
-        # lets a relay sit behind an HTTPS proxy (wss on 443) and lets
-        # HTTPS-only machines dial out (docs/p2p_networking.md).
-        if transport not in ("tcp", "ws"):
+        # "tcp+ws" (default): listen on both, dial whichever a peer offers.
+        # A machine whose only egress is an HTTP(S)/SOCKS proxy cannot dial
+        # TCP, so it runs WebSocket only and dials through the proxy
+        # (nodes/common/ws_proxy.py). "both" is an alias of "tcp+ws".
+        transport = "tcp+ws" if transport in ("both", "ws+tcp") else transport
+        if transport not in TRANSPORTS:
             raise ValueError(f"unknown p2p transport {transport!r}")
+        self._proxy = p2p_mesh.proxy_from_env()
+        if self._proxy and "tcp" in transport:
+            if transport == "tcp":
+                self.logger.warning("egress proxy set but transport is tcp: "
+                                    "TCP dials will not go through it")
+            else:
+                transport = "ws"
+                self.logger.info("egress proxy set: WebSocket only, dialled "
+                                 "through the proxy")
         self._transport = transport
-        if transport == "ws":
-            # HTTP CONNECT proxies (HTTPS-only egress) for the ws dialer.
+        if "ws" in transport:
+            # HTTP CONNECT and SOCKS5 proxies for the ws dialer, and the
+            # per-connection task groups (ws_proxy._guarded).
             from .ws_proxy import install as _install_ws_proxy
             _install_ws_proxy()
         self._bootstrap_redial_interval = bootstrap_redial_interval
@@ -524,19 +600,33 @@ class AutonetHost:
         # dialled without a restart. None or <= 0 = the list given here.
         self._seed_source = seed_source
         self._seed_refresh_interval = seed_refresh_interval
-        # While no peer is connected the seeds are redialled at once and
-        # then with backoff from this interval up to ``_alone_max_backoff``.
+        # While no peer is connected the seeds (and cached peers) are
+        # redialled at once and then with backoff from this interval up to
+        # ``_alone_max_backoff``.
         self._alone_check_interval = 5.0
         self._alone_max_backoff = 120.0
         self._enable_quic = enable_quic
         self._enable_upnp = enable_upnp
+        # Mesh (docs/p2p_networking.md, "Mesh").
+        self._relay_hop = relay_hop
+        self._enable_dht = enable_dht
+        self._peer_cache = p2p_mesh.PeerCache(peer_cache_path)
+        self._target_peers = max(1, int(target_peers))
+        self._max_peers = max(self._target_peers, int(max_peers))
+        self._mesh_interval = mesh_interval
+        self._provide_interval = provide_interval
+        self._max_reservations = max(0, int(max_reservations))
+        # False advertises circuit (and announced) addresses only: a test
+        # and harness knob that makes a loopback host behave as NAT'd.
+        self._advertise_listen_addrs = advertise_listen_addrs
+        # New connections are not pruned for this long (seconds).
+        self.prune_grace = 30.0
 
         # Handlers registered by user code
         self._weight_handler: Optional[Callable] = None
         self._activation_handler: Optional[Callable] = None
         self._guild_handlers: Dict[str, Callable] = {}
         self._blob_handler: Optional[Callable] = None       # async (hash: str) -> Optional[bytes]
-        self._blob_relay_sink: Optional[Callable] = None    # (hash, bytes) -> None, caches relayed blobs
         self._blob_relay_timeout = 5.0
         self._embedding_handler: Optional[Callable] = None  # async (peer_id, metadata, tensor_bytes)
         self._service_handler: Optional[Callable] = None    # async (msg: dict) -> dict, in trio
@@ -554,6 +644,17 @@ class AutonetHost:
         self._guild_subscriptions: Dict[str, Any] = {}
         self._known_capabilities: Dict[str, NodeCapability] = {}
         self._guilds: Dict[str, GuildMembership] = {}
+        self._circuit_protocol: Any = None
+        self._circuit: Any = None          # CircuitV2Transport (dials circuits)
+        self._dcutr: Any = None
+        self._dht: Any = None
+        self._dht_mode = ""
+        self._reservations: Dict[str, float] = {}   # relay peer id -> expiry
+        self._provided: Set[str] = set()            # blob cids we provide
+        self._provided_at: Dict[str, float] = {}
+        self._dial_failures: Dict[str, Tuple[int, float]] = {}  # pid -> (n, retry_at)
+        self._seed_ids: Set[str] = set()
+        self.last_fetch_source = ""
         # Generic topic gossip (Phase 10.2). Reader tasks for arbitrary
         # gossipsub topics live in the host's main nursery; cross-thread
         # callers schedule publishes via the captured trio token.
@@ -570,9 +671,24 @@ class AutonetHost:
         self._capability = capability or NodeCapability(
             peer_id="", node_id=node_id
         )
+        if relay_hop and "relay" not in self._capability.roles:
+            self._capability.roles.append("relay")
 
         self._running = False
-        self.logger = logging.getLogger(f"P2P[{node_id}]")
+
+    # =========================================================================
+    # Lifecycle
+    # =========================================================================
+
+    def _listen_multiaddrs(self) -> List[Multiaddr]:
+        h = self._listen_host
+        if self._transport == "tcp":
+            return [Multiaddr(f"/ip4/{h}/tcp/{self._listen_port}")]
+        ws = Multiaddr(f"/ip4/{h}/tcp/{self._listen_port}/ws")
+        if self._transport == "ws":
+            return [ws]
+        tcp = self._tcp_port or (self._listen_port + 1 if self._listen_port else 0)
+        return [Multiaddr(f"/ip4/{h}/tcp/{tcp}"), ws]
 
     @asynccontextmanager
     async def run(self):
@@ -582,46 +698,55 @@ class AutonetHost:
         Usage:
             async with host.run():
                 # host is now listening and discoverable
-                await host.send_weight_delta(...)
+                await host.publish_topic(...)
         """
-        suffix = "/ws" if self._transport == "ws" else ""
-        listen_addrs = [
-            Multiaddr(f"/ip4/{self._listen_host}/tcp/{self._listen_port}{suffix}")
-        ]
-        # py-libp2p's TCP transport dials only /ip4 and /ip6 (its bootstrap
-        # resolves /dnsaddr only), so /dns4 tunnel hostnames resolve here.
-        # The configured names are kept and resolved again on every redial.
-        bootstrap = [self._resolve(a) for a in self._bootstrap_peers]
+        from libp2p.network.config import ConnectionConfig, RetryConfig
 
+        listen_addrs = self._listen_multiaddrs()
         key_pair = None
         if self._key_seed is not None:
             from libp2p.crypto.ed25519 import create_new_key_pair
             key_pair = create_new_key_pair(self._key_seed)
+        # The connection manager: prune above ``max_peers`` (seeds and
+        # relays are protected); our mesh loop does the dialling, so the
+        # library's auto-connector is stopped once the swarm runs.
+        conn_cfg = ConnectionConfig(
+            max_connections=self._max_peers * 2 + 8,
+            min_connections=0,
+            low_watermark=0,
+            high_watermark=self._max_peers,
+            dial_timeout=8.0,
+            grace_period=self.prune_grace,
+        )
         self._host = new_host(
             key_pair=key_pair,
             listen_addrs=listen_addrs,
             enable_quic=self._enable_quic,
-            # UPnP is handled in _auto_reach_loop: py-libp2p's own mapping
-            # reads get_addrs, which we replace with the announce addrs.
+            # UPnP is handled in _auto_reach_loop.
             enable_upnp=False,
-            bootstrap=bootstrap if bootstrap else None,
+            connection_config=conn_cfg,
         )
+        # Identify, signed peer records, DHT provider records and the relay
+        # all read get_addrs. py-libp2p's addrs_factory cannot carry circuit
+        # addresses (it strips everything from the first /p2p/ on), so the
+        # host instance gets ours.
+        self._host.get_addrs = self._get_addrs
+        swarm = self._host.get_network()
+        # One quick retry per address: a peer that is down should not hold
+        # a dial for half a minute before its circuit is tried.
+        swarm.retry_config = RetryConfig(max_retries=1, initial_delay=0.2, max_delay=1.0)
+        self._install_dial_fallback(swarm)
+        swarm.register_notifee(_ConnNotifee(self))
 
         async with self._host.run(listen_addrs=listen_addrs):
             self._running = True
+            try:
+                await swarm.auto_connector.stop()
+            except Exception:  # noqa: BLE001 - absent in a future version
+                pass
             peer_id = str(self._host.get_id())
             if self._announce_addrs:
                 self._announce_resolved = self._resolve_announce_addrs()
-            if self._announce_addrs or self._auto_reach or self._enable_upnp:
-                p2p_part = Multiaddr(f"/p2p/{peer_id}")
-                listen = self._host.get_addrs
-                # Identify, the signed peer record and our capability all
-                # read get_addrs, so replacing it on the host instance is
-                # enough; the listen socket is unchanged.
-                self._host.get_addrs = lambda: (
-                    [a.encapsulate(p2p_part) for a in self._announce_resolved]
-                    or listen()
-                )
             addrs = self._host.get_addrs()
 
             # Update our capability with actual peer ID and addresses
@@ -643,22 +768,26 @@ class AutonetHost:
             # background tasks (topic readers, etc.) can run for the
             # lifetime of the host. Cross-thread callers schedule
             # publishes via the captured token.
-            import trio
             self._trio_token = trio.lowlevel.current_trio_token()
             try:
                 async with trio.open_nursery() as nursery:
                     self._nursery = nursery
+                    await self._start_mesh_services()
                     refresh = (self._seed_source is not None
                                and self._seed_refresh_interval > 0)
+                    if self._bootstrap_peers:
+                        nursery.start_soon(self._dial_seeds, list(self._bootstrap_peers))
                     if ((self._bootstrap_peers or self._announce_addrs or refresh)
                             and self._bootstrap_redial_interval > 0):
                         nursery.start_soon(self._maintain_addrs)
                     if refresh:
                         nursery.start_soon(self._refresh_seeds_loop)
-                    if self._bootstrap_peers or refresh:
+                    if self._bootstrap_peers or refresh or len(self._peer_cache):
                         nursery.start_soon(self._redial_when_alone)
                     if not self._announce_addrs and (self._auto_reach or self._enable_upnp):
                         nursery.start_soon(self._auto_reach_loop)
+                    if self._mesh_interval > 0:
+                        nursery.start_soon(self._mesh_loop)
                     self._ready_event.set()
                     try:
                         yield self
@@ -666,18 +795,142 @@ class AutonetHost:
                         # Cancel background tasks (topic readers).
                         nursery.cancel_scope.cancel()
             finally:
+                self._peer_cache.save()
                 self._ready_event.clear()
                 self._nursery = None
                 self._trio_token = None
                 self._running = False
                 self.logger.info("P2P host shutting down")
 
+    async def _start_service(self, service: Any) -> Any:
+        """Run a py-libp2p Service for the host's lifetime."""
+        manager = TrioManager(service)
+        service._manager = manager
+        self._nursery.start_soon(manager.run)
+        await manager.wait_started()
+        return manager
+
+    async def _start_mesh_services(self) -> None:
+        """Circuit relay v2, DCUtR and the DHT."""
+        from libp2p.relay.circuit_v2.config import RelayConfig, RelayRole
+        from libp2p.relay.circuit_v2.protocol import CircuitV2Protocol
+        from libp2p.relay.circuit_v2.resources import RelayLimits
+        from libp2p.relay.circuit_v2.transport import CircuitV2Transport
+
+        limits = RelayLimits(
+            duration=RELAY_CIRCUIT_DURATION, data=RELAY_CIRCUIT_BYTES,
+            max_circuit_conns=RELAY_MAX_CIRCUITS_PER_PEER,
+            max_reservations=RELAY_MAX_RESERVATIONS,
+            reservation_ttl=RELAY_RESERVATION_TTL)
+        self._circuit_protocol = CircuitV2Protocol(
+            self._host, limits=limits, allow_hop=self._relay_hop)
+        await self._start_service(self._circuit_protocol)
+        # STOP only: we reserve on relays ourselves (_maintain_reservations),
+        # not on every relay a dial happens to cross.
+        self._circuit = CircuitV2Transport(
+            self._host, self._circuit_protocol,
+            RelayConfig(roles=RelayRole.STOP, limits=limits))
+        if "tcp" in self._transport and not self._relay_hop:
+            # Hole punching is TCP only (WebSocket cannot be punched).
+            from libp2p.relay.circuit_v2.dcutr import DCUtRProtocol
+            self._dcutr = DCUtRProtocol(self._host)
+            await self._start_service(self._dcutr)
+        if self._enable_dht:
+            from libp2p.kad_dht.kad_dht import DHTMode, KadDHT
+            mode = DHTMode.SERVER if self._dht_should_serve() else DHTMode.CLIENT
+            # Subnet diversity off: NAT'd daemons share their relay's IP in
+            # the circuit addresses they advertise.
+            self._dht = KadDHT(self._host, mode, enable_random_walk=False,
+                               max_peers_per_subnet=0)
+            self._dht_mode = mode.value
+            await self._start_service(self._dht)
+
+    # =========================================================================
+    # Addresses
+    # =========================================================================
+
+    def _get_addrs(self) -> List[Multiaddr]:
+        """``_advertised_addrs`` with our ``/p2p/<peer id>`` appended."""
+        own = f"/p2p/{self._host.get_id()}"
+        out = []
+        for a in self._advertised_addrs():
+            s_ = str(a)
+            try:
+                out.append(Multiaddr(s_ if s_.endswith(own) else s_ + own))
+            except Exception:
+                continue
+        return out
+
+    def _advertised_addrs(self, candidates: Optional[List[Multiaddr]] = None) -> List[Multiaddr]:
+        """What identify, signed peer records, DHT provider records and our
+        capability carry: announced addresses
+        (configured, or confirmed by the reach check) else our listen
+        addresses with wildcards expanded, then a ``/p2p-circuit`` address
+        per relay we hold a reservation on. Observed addresses are not
+        advertised: behind NAT they name the wrong port."""
+        out: List[str] = []
+        if self._announce_resolved:
+            out.extend(str(a) for a in self._announce_resolved)
+        elif self._advertise_listen_addrs and self._host is not None:
+            listen = [str(a) for a in self._host.get_transport_addrs()]
+            # TCP first: DCUtR binds its hole-punch dials to the first one.
+            listen.sort(key=p2p_mesh.is_ws)
+            for a in listen:
+                out.extend(p2p_mesh.expand_wildcard(a))
+        out.extend(self._circuit_addr_strs())
+        result, seen = [], set()
+        for a in out:
+            if a in seen:
+                continue
+            seen.add(a)
+            try:
+                result.append(Multiaddr(a))
+            except Exception:
+                continue
+        return result
+
+    def _circuit_addr_strs(self) -> List[str]:
+        """``<relay addr>/p2p/<relay>/p2p-circuit`` for every live
+        reservation, the relay's most dialable address first."""
+        if self._host is None:
+            return []
+        now = time.time()
+        out = []
+        for rid, expires in list(self._reservations.items()):
+            if expires <= now:
+                continue
+            addr = self._relay_dial_addr(rid)
+            if addr:
+                out.append(f"{addr}/p2p/{rid}/p2p-circuit")
+        return out
+
+    def _relay_dial_addr(self, relay_id: str) -> str:
+        """The address others should dial a relay on: the seed address we
+        were given for it, else the best one it advertised (public before
+        private, never loopback unless that is all it has)."""
+        for seed in self._bootstrap_peers:
+            if seed.endswith(f"/p2p/{relay_id}"):
+                return seed.split("/p2p/")[0]
+        try:
+            addrs = [str(a).split("/p2p/")[0]
+                     for a in self._host.get_peerstore().addrs(PeerID.from_base58(relay_id))
+                     if not p2p_mesh.is_circuit(a)]
+        except Exception:
+            return ""
+
+        def rank(a: str) -> tuple:
+            ip = p2p_mesh.addr_ip(a)
+            return (p2p_mesh.is_loopback_addr(a), not _is_public_ip(ip) if ip else False,
+                    p2p_mesh.is_ws(a))
+        addrs.sort(key=rank)
+        return addrs[0] if addrs else ""
+
     def _resolve(self, addr: str) -> str:
-        """TCP dials only IPs, so names resolve here. The ws transport keeps
-        names: TLS (SNI) and the HTTP Host header must carry them (an HTTPS
-        proxy in front of a relay routes on them), and behind an HTTP proxy
-        the proxy resolves them."""
-        return addr if self._transport == "ws" else resolve_dns_multiaddr(addr)
+        """TCP dials only IPs, so names in TCP addresses resolve here.
+        WebSocket addresses keep their names: TLS (SNI) and the HTTP Host
+        header must carry them (an HTTPS proxy in front of a relay routes on
+        them), and behind an HTTP proxy the proxy resolves them."""
+        return addr if p2p_mesh.is_ws(addr) else resolve_dns_multiaddr(addr)
 
     def _resolve_announce_addrs(self) -> List[Multiaddr]:
         """The announce addresses with DNS names resolved, /p2p stripped."""
@@ -690,17 +943,413 @@ class AutonetHost:
                 self.logger.warning(f"Ignoring bad announce address {addr}: {e}")
         return announce
 
+    async def _addrs_changed(self) -> None:
+        """Our advertised addresses changed: refresh the capability, tell
+        connected peers (identify push) and re-provide what we hold so the
+        provider records carry the new addresses."""
+        self._capability.listen_addrs = self.addrs
+        try:
+            await self._host._push_identify_to_all_peers()
+        except Exception as e:  # noqa: BLE001 - best effort
+            self.logger.debug("identify push failed: %s", e)
+        await self.advertise_capability()
+        if self._provided and self._nursery is not None:
+            self._nursery.start_soon(self._reprovide, True)
+
+    # =========================================================================
+    # Dialling: direct addresses first, circuit addresses in the race
+    # =========================================================================
+
+    def _install_dial_fallback(self, swarm: Any) -> None:
+        """Every dial (host.connect, new_stream, the DHT, gossip) reaches a
+        peer through a relay circuit when its direct addresses fail.
+
+        py-libp2p's Swarm.dial_peer skips /p2p-circuit addresses, so the
+        swarm instance gets a dial_peer that races the original (direct)
+        dial against the peer's circuit addresses, the circuit starting
+        ``CIRCUIT_DIAL_DELAY`` later or as soon as the direct dial fails."""
+        original = swarm.dial_peer
+        in_flight: Dict[str, Any] = {}
+
+        async def dial_peer(peer_id: Any) -> List[Any]:
+            live = [c for c in swarm.get_connections(peer_id) if not c.is_closed]
+            if live:
+                return live
+            key = str(peer_id)
+            if key in in_flight:   # one dial per peer: join the running one
+                await in_flight[key].wait()
+                live = [c for c in swarm.get_connections(peer_id) if not c.is_closed]
+                if live:
+                    return live
+            done = in_flight[key] = trio.Event()
+            try:
+                return await _dial(peer_id)
+            finally:
+                in_flight.pop(key, None)
+                done.set()
+
+        async def _dial(peer_id: Any) -> List[Any]:
+            try:
+                known = list(self._host.get_peerstore().addrs(peer_id))
+            except Exception:
+                known = []
+            circuits = [a for a in known if p2p_mesh.is_circuit(a)
+                        and not str(a).startswith(f"/p2p/{peer_id}")]
+            if not circuits or self._circuit is None:
+                return await original(peer_id)
+            if not any(not p2p_mesh.is_circuit(a) for a in known):
+                return [await self._dial_circuits(peer_id, circuits)]
+            result: List[Any] = []
+            errors: List[BaseException] = []
+            direct_failed = trio.Event()
+            async with trio.open_nursery() as n:
+                async def go_direct():
+                    try:
+                        result.extend(await original(peer_id))
+                        n.cancel_scope.cancel()
+                    except Exception as e:
+                        errors.append(e)
+                        direct_failed.set()
+
+                async def go_circuit():
+                    with trio.move_on_after(CIRCUIT_DIAL_DELAY):
+                        await direct_failed.wait()
+                    try:
+                        result.append(await self._dial_circuits(peer_id, circuits))
+                        n.cancel_scope.cancel()
+                    except Exception as e:
+                        errors.append(e)
+                n.start_soon(go_direct)
+                n.start_soon(go_circuit)
+            if result:
+                return result
+            from libp2p.network.exceptions import SwarmException
+            raise SwarmException(f"unable to connect to {peer_id}: "
+                                 + "; ".join(str(e) for e in errors))
+
+        swarm.dial_peer = dial_peer
+
+    async def _dial_circuits(self, peer_id: Any, circuits: List[Any]) -> Any:
+        """A connection to ``peer_id`` through one of its relays (relays we
+        are connected to first)."""
+        connected = set(self.get_connected_peers())
+
+        def relay_of(a: Any) -> str:
+            return str(a).split("/p2p-circuit")[0].rsplit("/p2p/", 1)[-1]
+        ordered = sorted(circuits, key=lambda a: relay_of(a) not in connected)
+        last: Optional[BaseException] = None
+        for addr in ordered:
+            maddr = addr if isinstance(addr, Multiaddr) else Multiaddr(str(addr))
+            if not str(maddr).endswith(f"/p2p/{peer_id}"):
+                maddr = maddr.encapsulate(Multiaddr(f"/p2p/{peer_id}"))
+            try:
+                with trio.fail_after(20):
+                    conn = await self._circuit.dial(maddr)
+                self.logger.debug("connected to %s through relay %s",
+                                  str(peer_id)[:16], relay_of(addr)[:16])
+                return conn
+            except Exception as e:  # noqa: BLE001 - try the next relay
+                last = e
+        raise ConnectionError(f"no relay circuit to {str(peer_id)[:16]}: {last}")
+
+    def connection_kinds(self) -> Dict[str, List[str]]:
+        """peer id -> the kind of each connection to it ("direct" or
+        "relayed"), for status pages and the NAT harness."""
+        out: Dict[str, List[str]] = {}
+        if self._host is None:
+            return out
+        for pid, conns in self._host.get_network().get_connections_map().items():
+            kinds = []
+            for c in conns:
+                try:
+                    addrs = [str(a) for a in c.get_transport_addresses()]
+                except Exception:
+                    addrs = []
+                kinds.append("relayed" if addrs and all(p2p_mesh.is_circuit(a) for a in addrs)
+                             else "direct")
+            out[str(pid)] = kinds
+        return out
+
+    def direct_peers(self) -> List[str]:
+        return [p for p, kinds in self.connection_kinds().items() if "direct" in kinds]
+
+    # =========================================================================
+    # Connections: DHT feed, peer cache, relay reservations, the mesh loop
+    # =========================================================================
+
+    def _on_connected(self, conn: Any) -> None:
+        """A new connection (either direction): after identify has run,
+        feed the peer to the DHT and nudge pubsub."""
+        nursery = self._nursery
+        if nursery is None:
+            return
+        try:
+            pid = conn.muxed_conn.peer_id
+        except Exception:
+            return
+        nursery.start_soon(self._after_connect, pid)
+
+    async def _after_connect(self, pid: Any) -> None:
+        await trio.sleep(1.5)  # identify fills the peerstore protocols
+        if pid not in self._host.get_connected_peers():
+            return
+        await self._dht_add(pid)
+        await self._nudge_pubsub_peer(pid)
+        if self._max_reservations and not self._relay_hop and self._is_relay(pid):
+            await self._maintain_reservations()
+
+    def _peer_protocols(self, pid: Any) -> List[str]:
+        try:
+            return [str(p) for p in (self._host.get_peerstore().get_protocols(pid) or [])]
+        except Exception:
+            return []
+
+    def _is_relay(self, pid: Any) -> bool:
+        if p2p_mesh.HOP_PROTOCOL in self._peer_protocols(pid):
+            return True
+        cap = self._known_capabilities.get(str(pid))
+        return bool(cap and "relay" in (cap.roles or []))
+
+    async def _dht_add(self, pid: Any) -> None:
+        if self._dht is None:
+            return
+        try:
+            if p2p_mesh.KAD_PROTOCOL in self._peer_protocols(pid):
+                await self._dht.add_peer(pid)
+        except Exception as e:  # noqa: BLE001 - routing table refused it
+            self.logger.debug("dht add_peer %s: %s", str(pid)[:16], e)
+
+    def _dht_should_serve(self) -> bool:
+        """DHT server mode when peers can reach us: a relay, an announced
+        or confirmed public address, a live relay reservation (reachable
+        through the circuit) or a direct link to another daemon (it can
+        query us over it). Client mode otherwise."""
+        if self._relay_hop or self._announce_resolved:
+            return True
+        if any(exp > time.time() for exp in self._reservations.values()):
+            return True
+        if self._host is not None:
+            relays = {str(p) for p in self._host.get_connected_peers() if self._is_relay(p)}
+            if any(p not in relays for p in self.direct_peers()):
+                return True
+        return False
+
+    async def _update_dht_mode(self) -> None:
+        if self._dht is None:
+            return
+        from libp2p.kad_dht.kad_dht import DHTMode
+        want = DHTMode.SERVER if self._dht_should_serve() else DHTMode.CLIENT
+        if want.value != self._dht_mode:
+            await self._dht.switch_mode(want)
+            self._dht_mode = want.value
+            self.logger.info("DHT mode: %s", want.value.lower())
+            # Peers learn we (no longer) speak the DHT protocol from identify.
+            try:
+                await self._host._push_identify_to_all_peers()
+            except Exception:  # noqa: BLE001
+                pass
+            if want == DHTMode.SERVER:
+                for pid in self._host.get_connected_peers():
+                    await self._dht_add(pid)
+
+    @property
+    def dht_mode(self) -> str:
+        return self._dht_mode.lower()
+
+    async def _maintain_reservations(self) -> None:
+        """Hold a circuit relay v2 reservation on up to ``max_reservations``
+        connected relays, refreshed before they expire; reservations on
+        relays we lost are dropped. A change of the set changes our
+        advertised circuit addresses."""
+        if self._circuit is None or self._relay_hop or not self._max_reservations:
+            return
+        from libp2p.relay.circuit_v2.protocol import PROTOCOL_ID as HOP
+        now = time.time()
+        before = sorted(rid for rid, exp in self._reservations.items() if exp > now)
+        connected = {str(p): p for p in self._host.get_connected_peers()}
+        for rid in list(self._reservations):
+            if rid not in connected or self._reservations[rid] <= now:
+                self._reservations.pop(rid, None)
+        relays = [p for s, p in connected.items() if self._is_relay(p)]
+        relays.sort(key=lambda p: str(p) not in self._seed_ids)
+        for pid in relays:
+            rid = str(pid)
+            held = self._reservations.get(rid, 0)
+            if held - now > RELAY_RESERVATION_TTL / 4:
+                continue
+            if rid not in self._reservations and len(self._reservations) >= self._max_reservations:
+                continue
+            try:
+                with trio.fail_after(15):
+                    stream = await self._host.new_stream(pid, [HOP])
+                    ok = await self._circuit._make_reservation(stream, pid)
+                    await stream.close()
+            except Exception as e:  # noqa: BLE001
+                self.logger.debug("reservation on %s failed: %s", rid[:16], e)
+                ok = False
+            if ok:
+                expires = float(self._circuit._reservations.get(pid) or 0)
+                self._reservations[rid] = expires or now + RELAY_RESERVATION_TTL
+                self._protect(pid, "relay")
+        after = sorted(rid for rid, exp in self._reservations.items() if exp > now)
+        if after != before:
+            self.logger.info("relay reservations: %s", [r[:16] for r in after] or "none")
+            await self._update_dht_mode()
+            await self._addrs_changed()
+
+    @property
+    def reservations(self) -> List[str]:
+        now = time.time()
+        return [rid for rid, exp in self._reservations.items() if exp > now]
+
+    def _protect(self, pid: Any, tag: str) -> None:
+        try:
+            self._host.get_network().protect(pid, f"autonet-{tag}")
+        except Exception:
+            pass
+
+    async def _mesh_loop(self) -> None:
+        """Every ``mesh_interval``: keep relay reservations, feed the DHT,
+        remember connected peers, dial towards ``target_peers`` from
+        capability gossip, the DHT and the peer cache, and re-provide."""
+        rounds = 0
+        while True:
+            await trio.sleep(self._mesh_interval if rounds else 2.0)
+            rounds += 1
+            try:
+                await self._mesh_round(walk=(rounds % 4 == 1))
+            except trio.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 - next round tries again
+                self.logger.debug("mesh round failed: %s", e)
+
+    async def _mesh_round(self, walk: bool = False) -> None:
+        await self._maintain_reservations()
+        connected = self._host.get_connected_peers()
+        for pid in connected:
+            await self._dht_add(pid)
+            try:
+                addrs = [str(a) for a in self._host.get_peerstore().addrs(pid)]
+            except Exception:
+                addrs = []
+            self._peer_cache.note(str(pid), addrs)
+        self._peer_cache.save()
+        await self._update_dht_mode()
+        if walk and self._dht is not None and self._dht.get_routing_table_size():
+            # A lookup for a random key: the replies name peers (with their
+            # addresses, circuit ones included) we did not know.
+            import secrets
+            with trio.move_on_after(20):
+                try:
+                    await self._dht.peer_routing.find_closest_peers_network(
+                        secrets.token_bytes(32))
+                except Exception as e:  # noqa: BLE001
+                    self.logger.debug("dht walk failed: %s", e)
+        n_connected = len(self._host.get_connected_peers())
+        if n_connected < self._target_peers:
+            await self._dial_candidates(self._target_peers - n_connected)
+        elif n_connected > self._max_peers:
+            # py-libp2p prunes only when a connection is added; once the
+            # grace period of the newest ones is over, prune here.
+            try:
+                await self._host.get_network().connection_pruner.maybe_prune_connections()
+            except Exception as e:  # noqa: BLE001
+                self.logger.debug("prune failed: %s", e)
+        if self._provide_interval > 0:
+            await self._reprovide(False)
+
+    def _mesh_candidates(self) -> List[Tuple[str, List[str]]]:
+        """Peers worth dialling, as (peer id, addresses): capability gossip,
+        the DHT routing table, the peerstore, then the peer cache."""
+        own = self.peer_id
+        connected = set(self.get_connected_peers())
+        out: Dict[str, List[str]] = {}
+
+        def add(pid: str, addrs: List[str]) -> None:
+            if pid and pid != own and pid not in connected and pid not in out:
+                out[pid] = [a.split(f"/p2p/{pid}")[0] if a.endswith(f"/p2p/{pid}") else a
+                            for a in addrs]
+        for cap in list(self._known_capabilities.values()):
+            add(cap.peer_id, list(cap.listen_addrs or []))
+        if self._dht is not None:
+            try:
+                for info in self._dht.routing_table.get_peer_infos():
+                    add(str(info.peer_id), [str(a) for a in info.addrs])
+            except Exception:
+                pass
+        try:
+            ps = self._host.get_peerstore()
+            for pid in ps.peers_with_addrs():
+                if KAD_OR_AUTONET_PROTOCOLS.intersection(self._peer_protocols(pid)):
+                    add(str(pid), [str(a) for a in ps.addrs(pid)])
+        except Exception:
+            pass
+        for pid, addrs in self._peer_cache.entries():
+            add(pid, addrs)
+        return list(out.items())
+
+    async def _dial_candidates(self, want: int) -> int:
+        """Dial up to ``want`` new peers concurrently; failures back off
+        (30 s doubling to 30 min per peer)."""
+        now = time.time()
+        picks = []
+        for pid, addrs in self._mesh_candidates():
+            fails, retry_at = self._dial_failures.get(pid, (0, 0.0))
+            if retry_at > now:
+                continue
+            picks.append((pid, addrs))
+            if len(picks) >= want:
+                break
+        if not picks:
+            return 0
+        made = [0]
+
+        async def one(pid: str, addrs: List[str]) -> None:
+            try:
+                peer = PeerID.from_base58(pid)
+                maddrs = []
+                for a in addrs:
+                    try:
+                        maddrs.append(Multiaddr(a))
+                    except Exception:
+                        pass
+                if maddrs:
+                    self._host.get_peerstore().add_addrs(peer, maddrs, 3600)
+                with trio.fail_after(30):
+                    await self._host.connect(PeerInfo(peer, []))
+                made[0] += 1
+                self._dial_failures.pop(pid, None)
+                await self._nudge_pubsub_peer(peer)
+            except Exception as e:  # noqa: BLE001
+                fails = self._dial_failures.get(pid, (0, 0.0))[0] + 1
+                self._dial_failures[pid] = (fails, time.time() + min(30 * 2 ** (fails - 1), 1800))
+                self.logger.debug("mesh dial %s failed: %s", pid[:16], e)
+        async with trio.open_nursery() as n:
+            for pid, addrs in picks:
+                n.start_soon(one, pid, addrs)
+        if made[0]:
+            self.logger.info("mesh: dialled %d new peer(s); %d connected",
+                             made[0], len(self.get_connected_peers()))
+        return made[0]
+
+    @property
+    def peer_cache(self) -> "p2p_mesh.PeerCache":
+        return self._peer_cache
+
+    # =========================================================================
+    # Seeds
+    # =========================================================================
+
     async def _maintain_addrs(self) -> None:
         """Track address changes, every ``bootstrap_redial_interval``.
 
         Announce names are resolved again; if the result changed (a
         dynamic-DNS or tunnel name now points elsewhere) we advertise the
         new address at once. Bootstrap peers we are not connected to are
-        redialled at their freshly resolved address: py-libp2p dials them
-        once at start, so a daemon that started first, lost its link, or
-        whose bootstrap peer moved would otherwise stay cut off.
+        redialled at their freshly resolved address, so a daemon that
+        started first, lost its link, or whose bootstrap peer moved would
+        not stay cut off.
         """
-        import trio
         while True:
             await trio.sleep(self._bootstrap_redial_interval)
             if self._announce_addrs:
@@ -708,19 +1357,22 @@ class AutonetHost:
                 if fresh and [str(a) for a in fresh] != [str(a) for a in self._announce_resolved]:
                     self.logger.info(f"Announce address changed to {[str(a) for a in fresh]}")
                     self._announce_resolved = fresh
-                    self._capability.listen_addrs = self.addrs
-                    await self.advertise_capability()
+                    await self._addrs_changed()
             await self._dial_seeds(list(self._bootstrap_peers))
 
     async def _dial_seeds(self, addrs: List[str]) -> None:
         """Dial the seeds in ``addrs`` we are not connected to, each at its
-        freshly resolved address."""
-        import trio
+        freshly resolved address, concurrently. Seeds are protected from
+        connection pruning."""
         connected = set(self.get_connected_peers())
-        for addr in addrs:
+
+        async def one(addr: str) -> None:
             pid = addr.split("/p2p/")[-1] if "/p2p/" in addr else ""
-            if not pid or pid == self.peer_id or pid in connected:
-                continue
+            if not pid or pid == self.peer_id:
+                return
+            self._seed_ids.add(pid)
+            if pid in connected:
+                return
             addr = await trio.to_thread.run_sync(self._resolve, addr)
             # Drop cached addresses so a peer that moved is dialled
             # only at its current address, not the stale one first.
@@ -728,8 +1380,12 @@ class AutonetHost:
                 self._host.get_peerstore().clear_addrs(PeerID.from_base58(pid))
             except Exception:
                 pass
-            with trio.move_on_after(10):
-                await self.connect_to_peer(addr)
+            with trio.move_on_after(15):
+                if await self.connect_to_peer(addr):
+                    self._protect(PeerID.from_base58(pid), "seed")
+        async with trio.open_nursery() as n:
+            for addr in addrs:
+                n.start_soon(one, addr)
 
     async def refresh_seeds(self) -> List[str]:
         """Re-read the seed list from ``seed_source`` and dial the new ones.
@@ -738,7 +1394,6 @@ class AutonetHost:
         must not cut itself off because the RPC hiccuped or the key was
         cleared. Returns the seeds that were added.
         """
-        import trio
         if self._seed_source is None:
             return []
         try:
@@ -759,70 +1414,112 @@ class AutonetHost:
 
     async def _refresh_seeds_loop(self) -> None:
         """Re-read the seed list every ``seed_refresh_interval``."""
-        import trio
         while True:
             await trio.sleep(self._seed_refresh_interval)
             await self.refresh_seeds()
 
     async def _redial_when_alone(self) -> None:
-        """Redial the seeds as soon as no peer is connected.
+        """Redial the seeds and the cached peers as soon as no peer is
+        connected.
 
         The redial in _maintain_addrs waits its interval (or is off); a
         daemon whose last link dropped should not sit cut off that long.
-        Repeated failures back off so dead seeds are not hammered.
+        The peer cache is what lets a restart rejoin when every seed is
+        down. Repeated failures back off so dead peers are not hammered.
         """
-        import trio
         backoff = self._alone_check_interval
         while True:
-            if self.get_connected_peers() or not self._bootstrap_peers:
+            if self.get_connected_peers() or not (self._bootstrap_peers or len(self._peer_cache)):
                 backoff = self._alone_check_interval
                 await trio.sleep(self._alone_check_interval)
                 continue
-            await self._dial_seeds(list(self._bootstrap_peers))
+            async with trio.open_nursery() as n:
+                n.start_soon(self._dial_seeds, list(self._bootstrap_peers))
+                n.start_soon(self._dial_cached_peers)
             if self.get_connected_peers():
                 continue
             await trio.sleep(backoff)
             backoff = min(backoff * 2, self._alone_max_backoff)
 
-    def _listen_port_actual(self) -> int:
+    async def _dial_cached_peers(self, limit: int = 16) -> int:
+        """Dial the newest cached peers (circuit addresses included)."""
+        entries = [(pid, addrs) for pid, addrs in self._peer_cache.entries()
+                   if pid != self.peer_id][:limit]
+        made = [0]
+
+        async def one(pid: str, addrs: List[str]) -> None:
+            try:
+                peer = PeerID.from_base58(pid)
+                self._host.get_peerstore().add_addrs(
+                    peer, [Multiaddr(a) for a in addrs], 3600)
+                with trio.fail_after(20):
+                    await self._host.connect(PeerInfo(peer, []))
+                made[0] += 1
+                await self._nudge_pubsub_peer(peer)
+            except Exception as e:  # noqa: BLE001
+                self.logger.debug("cached peer %s unreachable: %s", pid[:16], e)
+        async with trio.open_nursery() as n:
+            for pid, addrs in entries:
+                n.start_soon(one, pid, addrs)
+        if made[0]:
+            self.logger.info("rejoined through %d cached peer(s)", made[0])
+        return made[0]
+
+    # =========================================================================
+    # Reachability: UPnP and the reach check
+    # =========================================================================
+
+    def _listen_ports(self) -> Dict[str, int]:
+        """{"tcp": port, "ws": port} actually bound."""
+        out: Dict[str, int] = {}
         for addr in self._host.get_transport_addrs():
             port = addr.value_for_protocol("tcp")
             if port:
-                return int(port)
-        return 0
+                out["ws" if p2p_mesh.is_ws(addr) else "tcp"] = int(port)
+        return out
 
-    async def _set_auto_announce(self, addr: Optional[str]) -> None:
-        """Announce ``addr`` (or go back to the listen addrs on None) and
-        tell peers if that changed."""
-        fresh = [Multiaddr(addr)] if addr else []
+    def _listen_port_actual(self) -> int:
+        ports = self._listen_ports()
+        return ports.get("tcp") or ports.get("ws") or 0
+
+    async def _set_auto_announce(self, addrs: Optional[List[str]]) -> None:
+        """Announce ``addrs`` (or go back to the listen addrs on None/[])
+        and tell peers if that changed."""
+        if isinstance(addrs, str):
+            addrs = [addrs]
+        fresh = [Multiaddr(a) for a in (addrs or [])]
         if [str(a) for a in fresh] == [str(a) for a in self._announce_resolved]:
             return
         self.logger.info(
-            f"Reachable at {addr}" if addr else "No longer reachable; announcing listen addrs"
+            f"Reachable at {[str(a) for a in fresh]}" if fresh
+            else "No longer reachable; announcing listen addrs"
         )
         self._announce_resolved = fresh
-        self._capability.listen_addrs = self.addrs
-        await self.advertise_capability()
+        await self._update_dht_mode()
+        await self._addrs_changed()
 
     async def _auto_reach_loop(self) -> None:
-        """Find and confirm our public address, every ``reach_interval``.
+        """Find and confirm our public addresses, every ``reach_interval``.
 
-        With UPnP on, the router maps our listen port and reports its
+        With UPnP on, the router maps our listen ports and reports its
         public IP. Either way a connected peer is asked what IP it sees
-        us on and whether it can connect to us there; we announce
-        ``/ip4/<ip>/tcp/<port>`` only when it can. Repeating the check
-        catches a changed public IP. A daemon nobody can reach keeps
-        working NAT'd (dialling out).
+        us on and whether it can connect to us there, once per listen port;
+        we announce ``/ip4/<ip>/tcp/<port>`` (and ``.../ws`` for the
+        WebSocket port) only for the ports it can reach. Repeating the
+        check catches a changed public IP. A daemon nobody can reach keeps
+        working NAT'd: it dials out and is reachable through its relays.
         """
-        import trio
-        port = self._listen_port_actual()
+        ports = self._listen_ports()
         upnp = None
-        if self._enable_upnp and port:
+        if self._enable_upnp and ports:
             try:
                 from libp2p.discovery.upnp.upnp import UpnpManager
                 upnp = UpnpManager()
-                if not (await upnp.discover() and await upnp.add_port_mapping(port, "TCP")):
+                if not await upnp.discover():
                     upnp = None
+                else:
+                    for p in ports.values():
+                        await upnp.add_port_mapping(p, "TCP")
             except Exception as e:  # miniupnpc missing or the router said no
                 self.logger.info(f"UPnP unavailable: {e}")
                 upnp = None
@@ -830,31 +1527,39 @@ class AutonetHost:
             while True:
                 if upnp is not None:
                     # Leases expire and routers reboot: renew each round.
-                    await upnp.add_port_mapping(port, "TCP")
-                peers = self._host.get_connected_peers()
-                verdict = None
+                    for p in ports.values():
+                        await upnp.add_port_mapping(p, "TCP")
+                peers = [p for p in self._host.get_connected_peers()
+                         if str(p) in self.direct_peers()]
+                verdicts: Dict[str, Dict] = {}
                 for pid in peers[:3]:
-                    with trio.move_on_after(15):
-                        verdict = await self.check_reachability(pid, port)
-                    if verdict is not None:
+                    for kind, port in ports.items():
+                        if kind in verdicts:
+                            continue
+                        with trio.move_on_after(15):
+                            v = await self.check_reachability(pid, port)
+                            if v is not None:
+                                verdicts[kind] = v
+                    if len(verdicts) == len(ports):
                         break
-                if verdict is None:
+                if not verdicts:
                     await trio.sleep(2.0)  # no peer answered yet; retry soon
                     continue
-                ip = verdict.get("ip") or ""
-                if verdict.get("reachable") and _is_public_ip(ip):
-                    proto = "ip6" if ":" in ip else "ip4"
-                    # Same transport as the listener: a ws network can't
-                    # dial a bare tcp address.
-                    suffix = "/ws" if self._transport == "ws" else ""
-                    await self._set_auto_announce(f"/{proto}/{ip}/tcp/{port}{suffix}")
-                else:
-                    await self._set_auto_announce(None)
+                announce = []
+                for kind in ("tcp", "ws"):
+                    v = verdicts.get(kind)
+                    ip = (v or {}).get("ip") or ""
+                    if v and v.get("reachable") and _is_public_ip(ip):
+                        proto = "ip6" if ":" in ip else "ip4"
+                        suffix = "/ws" if kind == "ws" else ""
+                        announce.append(f"/{proto}/{ip}/tcp/{ports[kind]}{suffix}")
+                await self._set_auto_announce(announce)
                 await trio.sleep(self._reach_interval)
         finally:
             if upnp is not None:
                 with trio.CancelScope(shield=True), trio.move_on_after(3):
-                    await upnp.remove_port_mapping(port, "TCP")
+                    for p in ports.values():
+                        await upnp.remove_port_mapping(p, "TCP")
 
     async def check_reachability(self, peer_id: Any, port: int) -> Optional[Dict]:
         """Ask ``peer_id`` whether it can connect to us on ``port``.
@@ -871,7 +1576,8 @@ class AutonetHost:
 
     async def _handle_reach_stream(self, stream):
         """Tell the requester its observed IP and whether we can connect
-        to it on the port it named. We dial only that observed IP."""
+        to it on the port it named. We dial only that observed IP, and
+        never answer over a relayed connection (we would see the relay)."""
         try:
             req = json.loads((await _read_frame_no_close(stream)).decode("utf-8"))
             port = int(req.get("port", 0))
@@ -977,6 +1683,9 @@ class AutonetHost:
         try:
             maddr = Multiaddr(multiaddr_str)
             info = info_from_p2p_addr(maddr)
+            # An explicit address is a fresh reason to dial: py-libp2p
+            # refuses a peer for a minute after all its addresses failed.
+            self._forget_dial_failure(info.peer_id)
             await self._host.connect(info)
             self.logger.info(f"Connected to {str(info.peer_id)[:16]}...")
             # Nudge pubsub to register the peer immediately. Workaround
@@ -987,6 +1696,12 @@ class AutonetHost:
         except Exception as e:
             self.logger.warning(f"Failed to connect to {multiaddr_str}: {e}")
             return False
+
+    def _forget_dial_failure(self, peer_id: Any) -> None:
+        try:
+            self._host.get_network()._negative_peer_cache.evict(str(peer_id))
+        except Exception:
+            pass
 
     async def connect_to_info(self, peer_info: PeerInfo) -> bool:
         """Connect to a peer by PeerInfo."""
@@ -1179,6 +1894,10 @@ class AutonetHost:
             degree_low=4,
             degree_high=12,
             heartbeat_interval=1,
+            # py-libp2p 0.8.1 rate-limits each SENDING peer per topic; a
+            # relay forwards every daemon's batches, so 10/s would drop
+            # gossip as soon as a few dozen daemons publish together.
+            max_messages_per_topic_per_second=500.0,
         )
         self._pubsub = Pubsub(
             host=self._host,
@@ -1196,13 +1915,8 @@ class AutonetHost:
         # lifetimes are bounded by the host (cancelled when the host
         # nursery is cancelled).
         if self._nursery is not None:
-            from libp2p.tools.async_service.trio_service import TrioManager
-            self._pubsub_manager = TrioManager(self._pubsub)
-            self._gossipsub_manager = TrioManager(self._gossipsub)
-            self._nursery.start_soon(self._pubsub_manager.run)
-            self._nursery.start_soon(self._gossipsub_manager.run)
-            await self._pubsub_manager.wait_started()
-            await self._gossipsub_manager.wait_started()
+            self._pubsub_manager = await self._start_service(self._pubsub)
+            self._gossipsub_manager = await self._start_service(self._gossipsub)
             # Pubsub-peer reconciliation. PubsubNotifee.connected
             # delivery can lag (or fail) on real networks; periodically
             # check that every connected peer is registered with
@@ -1585,35 +2299,32 @@ class AutonetHost:
         """Set handler for blob requests: async handler(content_hash: str) -> Optional[bytes]"""
         self._blob_handler = handler
 
-    def set_blob_relay_sink(self, sink: Callable):
-        """Set where blobs fetched on a peer's behalf are cached: sink(content_hash, data)"""
-        self._blob_relay_sink = sink
-
     async def fetch_blob(
         self,
         target_peer_id: PeerID,
         content_hash: str,
         timeout: float = 30.0,
-        hops: int = BLOB_RELAY_MAX_HOPS,
+        hops: int = 0,
     ) -> Optional[bytes]:
         """
-        Request a blob from a peer by content hash.
-
-        ``hops`` is how many times the peer may forward the request on a
-        miss (see ``BLOB_RELAY_MAX_HOPS``).
+        Request a blob from a peer by content hash (dialling it, directly
+        or through a relay circuit, if not connected). ``hops`` is accepted
+        for older callers and ignored: peers never forward.
 
         Returns the blob bytes if found and integrity-verified, None otherwise.
         """
         if not self._host:
             return None
+        if isinstance(target_peer_id, str):
+            try:
+                target_peer_id = PeerID.from_base58(target_peer_id)
+            except Exception:
+                return None
         try:
-            stream = await self._host.new_stream(target_peer_id, [BLOB_PROTOCOL])
-            # Write request: hash as UTF-8 (no stream close — waiting for response)
-            request = content_hash if hops == BLOB_RELAY_MAX_HOPS else f"{content_hash}|{hops}"
-            await _write_frame_no_close(stream, request.encode("utf-8"))
-            # Read response with timeout
-            data = b""
-            with trio.move_on_after(timeout):
+            with trio.fail_after(timeout):
+                stream = await self._host.new_stream(target_peer_id, [BLOB_PROTOCOL])
+                # Write request: hash as UTF-8 (no stream close: waiting for response)
+                await _write_frame_no_close(stream, content_hash.encode("utf-8"))
                 data = await _read_frame_no_close(stream, MAX_BLOB_FRAME_BYTES)
             await stream.close()
 
@@ -1630,7 +2341,9 @@ class AutonetHost:
                     f"expected {content_hash[:16]}, got {actual_hash[:16]}"
                 )
             return None
-        except Exception as e:
+        except trio.Cancelled:
+            raise
+        except BaseException as e:
             self.logger.debug(
                 f"Failed to fetch blob {content_hash[:16]} "
                 f"from {str(target_peer_id)[:16]}: {e}"
@@ -1638,14 +2351,11 @@ class AutonetHost:
             return None
 
     async def _handle_blob_stream(self, stream):
-        """Handle incoming blob request: read content hash, write blob bytes."""
+        """Handle incoming blob request: read content hash, write blob bytes
+        (an empty frame on a miss). Never forwarded."""
         try:
             hash_bytes = await _read_frame_no_close(stream)
-            content_hash, _, hops_str = hash_bytes.decode("utf-8").strip().partition("|")
-            try:
-                hops = min(int(hops_str), BLOB_RELAY_MAX_HOPS) if hops_str else BLOB_RELAY_MAX_HOPS
-            except ValueError:
-                hops = 0
+            content_hash = hash_bytes.decode("utf-8").strip().partition("|")[0]
 
             blob_data: Optional[bytes] = None
             if self._blob_handler:
@@ -1654,20 +2364,6 @@ class AutonetHost:
                 except Exception as e:
                     self.logger.debug(f"Blob handler error for {content_hash[:16]}: {e}")
 
-            if blob_data is None and hops > 0:
-                requester = stream.muxed_conn.peer_id
-                others = [p for p in self._host.get_connected_peers() if p != requester]
-                blob_data = await self.fetch_blob_from_peers(
-                    others, content_hash,
-                    timeout_per_peer=self._blob_relay_timeout, hops=hops - 1,
-                )
-                if blob_data is not None and self._blob_relay_sink:
-                    try:
-                        self._blob_relay_sink(content_hash, blob_data)
-                    except Exception as e:
-                        self.logger.debug(f"Blob relay sink error for {content_hash[:16]}: {e}")
-
-            # Respond with blob data, or empty frame if not found
             response = blob_data if blob_data is not None else b""
             await _write_framed(stream, response)
 
@@ -1683,52 +2379,207 @@ class AutonetHost:
         content_hash: str,
         timeout_per_peer: float = 10.0,
     ) -> Optional[bytes]:
-        """
-        Try to fetch a blob from any connected peer.
-
-        Tries peers concurrently and returns the first successful response.
-        """
-        if not self._host:
-            return None
-        return await self.fetch_blob_from_peers(
-            self._host.get_connected_peers(), content_hash,
-            timeout_per_peer=timeout_per_peer,
-        )
+        """Fetch a blob from the network: its DHT providers and our
+        connected peers, concurrently (see ``fetch_blob_from_network``)."""
+        return await self.fetch_blob_from_network(
+            content_hash, timeout_per_peer=timeout_per_peer)
 
     async def fetch_blob_from_peers(
         self,
         peer_ids: List[Any],
         content_hash: str,
         timeout_per_peer: float = 10.0,
-        hops: int = BLOB_RELAY_MAX_HOPS,
+        hops: int = 0,
     ) -> Optional[bytes]:
         """Ask the given peers (PeerIDs or base58 strings) concurrently;
         the first integrity-verified answer wins and cancels the rest."""
         if not self._host or not peer_ids:
             return None
-        from libp2p.peer.id import ID as _PeerID
-
         result: List[Optional[bytes]] = [None]
 
         async def try_peer(pid, cancel_scope):
             with trio.move_on_after(timeout_per_peer):
-                data = await self.fetch_blob(
-                    pid, content_hash, timeout=timeout_per_peer, hops=hops,
-                )
+                data = await self.fetch_blob(pid, content_hash, timeout=timeout_per_peer)
                 if data is not None and result[0] is None:
                     result[0] = data
                     cancel_scope.cancel()
 
+        own = self.peer_id
         async with trio.open_nursery() as nursery:
+            seen = set()
             for pid in peer_ids:
                 if isinstance(pid, str):
                     try:
-                        pid = _PeerID.from_base58(pid)
+                        pid = PeerID.from_base58(pid)
                     except Exception:
                         continue
+                if str(pid) == own or str(pid) in seen:
+                    continue
+                seen.add(str(pid))
                 nursery.start_soon(try_peer, pid, nursery.cancel_scope)
 
         return result[0]
+
+    async def find_blob_providers(self, content_hash: str, timeout: float = 20.0) -> List[Any]:
+        """Peers the DHT names as holders of ``content_hash`` (PeerInfo,
+        deduplicated, ourselves left out). Their addresses, circuit ones
+        included, go into the peerstore so a dial can reach them."""
+        if self._dht is None:
+            return []
+        infos: List[Any] = []
+        try:
+            with trio.fail_after(timeout):
+                infos = await self._dht.find_providers(content_hash)
+        except trio.Cancelled:
+            raise
+        except BaseException as e:
+            self.logger.debug("find_providers %s: %s", content_hash[:16], e)
+            return []
+        own, out, seen = self.peer_id, [], set()
+        for info in infos or []:
+            pid = str(info.peer_id)
+            if pid == own or pid in seen:
+                continue
+            seen.add(pid)
+            if info.addrs:
+                try:
+                    self._host.get_peerstore().add_addrs(info.peer_id, list(info.addrs), 3600)
+                except Exception:
+                    pass
+            out.append(info)
+        return out
+
+    async def fetch_blob_from_network(
+        self,
+        content_hash: str,
+        peer_ids: Optional[List[Any]] = None,
+        timeout_per_peer: float = 10.0,
+        timeout: float = 45.0,
+    ) -> Optional[bytes]:
+        """Fetch a blob wherever it is: ask the connected peers (and any
+        ``peer_ids`` given) at once, and meanwhile look its providers up in
+        the DHT and ask them (dialled directly or through a relay circuit).
+        The first answer whose sha256 matches wins. Returns None when
+        nobody reachable holds it within ``timeout``."""
+        if not self._host:
+            return None
+        result: List[Optional[bytes]] = [None]
+        asked: Set[str] = set()
+        self.last_fetch_source = ""
+
+        async def ask(peers: List[Any], scope, source: str) -> None:
+            fresh = [p for p in peers if str(p) not in asked]
+            asked.update(str(p) for p in fresh)
+            data = await self.fetch_blob_from_peers(
+                fresh, content_hash, timeout_per_peer=timeout_per_peer)
+            if data is not None and result[0] is None:
+                result[0] = data
+                self.last_fetch_source = source
+                scope.cancel()
+
+        async def via_dht(scope) -> None:
+            providers = await self.find_blob_providers(content_hash)
+            if providers:
+                self.logger.debug("blob %s: %d provider(s) in the DHT",
+                                  content_hash[:16], len(providers))
+                await ask([p.peer_id for p in providers], scope, "dht")
+
+        with trio.move_on_after(timeout):
+            async with trio.open_nursery() as n:
+                near = list(self._host.get_connected_peers()) + list(peer_ids or [])
+                n.start_soon(ask, near, n.cancel_scope, "neighbour")
+                n.start_soon(via_dht, n.cancel_scope)
+        return result[0]
+
+    # =========================================================================
+    # Providing blobs (DHT provider records)
+    # =========================================================================
+
+    async def provide_blob(self, content_hash: str, timeout: float = 30.0) -> bool:
+        """Announce in the DHT that we hold ``content_hash`` and keep
+        re-announcing it (``provide_interval``). True when at least one
+        DHT peer took the record (False with no DHT peers yet: the next
+        mesh round retries)."""
+        content_hash = str(content_hash).strip().lower()
+        if len(content_hash) != 64:
+            return False
+        self._provided.add(content_hash)
+        if self._dht is None:
+            return False
+        ok = False
+        try:
+            with trio.fail_after(timeout):
+                ok = bool(await self._dht.provide(content_hash))
+        except trio.Cancelled:
+            raise
+        except BaseException as e:
+            self.logger.debug("provide %s: %s", content_hash[:16], e)
+        if ok:
+            self._provided_at[content_hash] = time.time()
+        return ok
+
+    async def provide_blobs(self, cids: List[str], timeout: float = 30.0) -> int:
+        """``provide_blob`` for each, concurrently; returns how many took."""
+        done = [0]
+
+        async def one(cid: str) -> None:
+            if await self.provide_blob(cid, timeout=timeout):
+                done[0] += 1
+        async with trio.open_nursery() as n:
+            for cid in dict.fromkeys(c for c in cids if c):
+                n.start_soon(one, cid)
+        return done[0]
+
+    def provide_blobs_blocking(self, cids: List[str], timeout: float = 20.0) -> int:
+        """From any thread but the host's: provide and wait (at most
+        ``timeout``). Used before a tool's registration event is sent, so
+        peers that react to it can already find its blobs. 0 when the host
+        is not running (the blobs are provided once it is)."""
+        token = self._trio_token
+        cids = [str(c).lower() for c in cids if c]
+        if token is None or not cids:
+            self._provided.update(cids)
+            return 0
+
+        async def _do():
+            with trio.move_on_after(timeout):
+                return await self.provide_blobs(cids, timeout=timeout)
+            return 0
+        try:
+            return int(trio.from_thread.run(_do, trio_token=token) or 0)
+        except Exception as e:  # noqa: BLE001 - registration goes on regardless
+            self.logger.debug("provide_blobs_blocking failed: %s", e)
+            return 0
+
+    def provide_blobs_threadsafe(self, cids: List[str]) -> None:
+        """Queue ``provide_blobs`` from any thread without waiting."""
+        token, nursery = self._trio_token, self._nursery
+        cids = [str(c).lower() for c in cids if c]
+        if not cids:
+            return
+        if token is None or nursery is None:
+            self._provided.update(cids)
+            return
+        try:
+            token.run_sync_soon(nursery.start_soon, self.provide_blobs, cids)
+        except Exception as e:  # noqa: BLE001
+            self.logger.debug("provide_blobs_threadsafe failed: %s", e)
+
+    @property
+    def provided_blobs(self) -> List[str]:
+        return sorted(self._provided)
+
+    async def _reprovide(self, force: bool = False) -> None:
+        """Re-announce provided blobs whose record is older than
+        ``provide_interval`` (all of them on ``force``, e.g. after our
+        addresses changed), and the ones never announced yet."""
+        if self._dht is None or not self._provided:
+            return
+        now = time.time()
+        due = [c for c in self._provided
+               if force or now - self._provided_at.get(c, 0) >= self._provide_interval]
+        if due:
+            await self.provide_blobs(due[:256])
 
     # =========================================================================
     # RPB Inference Protocol (/rpb/inference/1.0.0)
@@ -1942,6 +2793,43 @@ class AutonetHost:
             raise TimeoutError("the stream closed without a reply")
         return json.loads(raw.decode("utf-8"))
 
+    async def reach_peer(self, peer_id: str, timeout: float = 15.0) -> bool:
+        """Connect to ``peer_id`` if we are not: at the addresses we know
+        (capability gossip, the peerstore), else at the ones the DHT finds
+        for it; directly or through one of its relays."""
+        if peer_id in self.get_connected_peers():
+            return True
+        if not self._host:
+            return False
+        try:
+            pid = PeerID.from_base58(peer_id)
+        except Exception:
+            return False
+        cap = self._known_capabilities.get(peer_id)
+        known = []
+        for a in list(cap.listen_addrs if cap else []):
+            try:
+                known.append(Multiaddr(a.split(f"/p2p/{peer_id}")[0]))
+            except Exception:
+                pass
+        with trio.move_on_after(timeout):
+            try:
+                if known:
+                    self._host.get_peerstore().add_addrs(pid, known, 3600)
+                try:
+                    have = bool(self._host.get_peerstore().addrs(pid))
+                except Exception:
+                    have = False
+                if not have and self._dht is not None:
+                    info = await self._dht.find_peer(pid)
+                    if info is not None and info.addrs:
+                        self._host.get_peerstore().add_addrs(pid, list(info.addrs), 3600)
+                await self._host.connect(PeerInfo(pid, []))
+                await self._nudge_pubsub_peer(pid)
+            except Exception as e:  # noqa: BLE001
+                self.logger.debug("could not reach %s: %s", peer_id[:16], e)
+        return peer_id in self.get_connected_peers()
+
     def _relay_candidates(self, target: str) -> List[str]:
         """Connected peers other than the target, relays first."""
         def is_relay(pid: str) -> bool:
@@ -1967,6 +2855,8 @@ class AutonetHost:
         was delivered) and ``TimeoutError`` if it was delivered but no
         reply came within ``timeout``."""
         target = str(target_peer_id)
+        if target not in self.get_connected_peers():
+            await self.reach_peer(target, timeout=connect_timeout)
         if target in self.get_connected_peers():
             try:
                 return await self._service_exchange(
@@ -2122,10 +3012,12 @@ class AutonetHost:
                         continue
                     # Direct only: the offerer said it holds the blob.
                     blob = await self.fetch_blob(
-                        offerer, cid, timeout=self._blob_relay_timeout * 4, hops=0)
+                        offerer, cid, timeout=self._blob_relay_timeout * 4)
                     if blob is not None:
                         put(blob)
                         kept += 1
+                        # A kept blob is announced like any other we hold.
+                        self.provide_blobs_threadsafe([cid])
         except Exception as e:
             self.logger.debug("blob offer failed: %s", e)
         try:
@@ -2140,6 +3032,7 @@ class AutonetHost:
         relays kept (0 when they already had them)."""
         if not self._host or not cids:
             return 0
+        self.provide_blobs_threadsafe(list(cids))
         relays = self.connected_relays()
         frame = json.dumps({"cids": list(cids)[:BLOB_OFFER_MAX_CIDS]}).encode("utf-8")
         kept = [0]
@@ -2475,4 +3368,11 @@ class AutonetHost:
             "known_capabilities": len(self._known_capabilities),
             "guilds": list(self._guilds.keys()),
             "running": self._running,
+            "transport": self._transport,
+            "connections": self.connection_kinds() if self._host else {},
+            "reservations": self.reservations,
+            "dht_mode": self.dht_mode,
+            "dht_peers": (self._dht.get_routing_table_size() if self._dht else 0),
+            "provided_blobs": len(self._provided),
+            "peer_cache": len(self._peer_cache),
         }

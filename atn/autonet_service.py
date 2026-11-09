@@ -49,12 +49,15 @@ def _charter_axes() -> list[dict[str, str]]:
         return []
 
 
-def _stable_p2p_port(data_dir, host: str = "0.0.0.0") -> int:
-    """The p2p port saved in ``<data_dir>/p2p.port``; on first use a free
-    port is picked and saved. 0 (random) when neither works."""
+def _stable_p2p_port(data_dir, host: str = "0.0.0.0", name: str = "p2p.port",
+                     avoid: int = 0) -> int:
+    """The p2p port saved in ``<data_dir>/<name>`` (``p2p.port``: the
+    WebSocket listener, ``p2p.tcp_port``: the TCP one); on first use a free
+    port (other than ``avoid``) is picked and saved. 0 (random) when
+    neither works."""
     import socket
     from pathlib import Path as _Path
-    path = _Path(data_dir) / "p2p.port"
+    path = _Path(data_dir) / name
     try:
         port = int(path.read_text(encoding="utf-8").strip())
         if 0 < port < 65536:
@@ -62,9 +65,12 @@ def _stable_p2p_port(data_dir, host: str = "0.0.0.0") -> int:
     except Exception:  # noqa: BLE001 (missing or unreadable: pick one)
         pass
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, 0))
-            port = s.getsockname()[1]
+        for _ in range(5):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, 0))
+                port = s.getsockname()[1]
+            if port != avoid:
+                break
         path.write_text(str(port), encoding="utf-8")
         return port
     except Exception:  # noqa: BLE001
@@ -507,11 +513,17 @@ class AutonetBridge:
             cfg = None
 
         listen_port = cfg.p2p.listen_port if cfg else 0
+        tcp_port = cfg.p2p.tcp_port if cfg else 0
         listen_host = cfg.p2p.listen_host if cfg else "0.0.0.0"
         if not listen_port and self._data_dir:
             # Keep one port across restarts: the daemon's address can be a
             # Registry seed, and a new random port each start made it stale.
             listen_port = _stable_p2p_port(self._data_dir, listen_host)
+        if not tcp_port and self._data_dir:
+            # The TCP listener (hole punching binds its dials to it) keeps
+            # its port too; a port forward or UPnP mapping names it.
+            tcp_port = _stable_p2p_port(self._data_dir, listen_host,
+                                        "p2p.tcp_port", avoid=listen_port)
         # Phase 12: a fresh install with no user-configured bootstrap
         # falls back to community-published bootstrap peers, so daemons
         # can join without manual multiaddr configuration.
@@ -542,10 +554,19 @@ class AutonetBridge:
             except Exception as exc:  # noqa: BLE001
                 log.warning("p2p.key unreadable (%s); using a fresh peer id", exc)
 
+        peer_cache = None
+        if self._data_dir:
+            from pathlib import Path as _Path
+            peer_cache = str(_Path(self._data_dir) / "p2p_peers.json")
         host = AutonetHost(
             node_id=node_id,
             key_seed=key_seed,
             listen_port=listen_port,
+            tcp_port=tcp_port,
+            peer_cache_path=peer_cache,
+            target_peers=cfg.p2p.target_peers if cfg else 8,
+            max_peers=cfg.p2p.max_peers if cfg else 48,
+            enable_dht=cfg.p2p.dht if cfg else True,
             listen_host=listen_host,
             bootstrap_peers=bootstrap,
             capability=cap,
@@ -554,7 +575,7 @@ class AutonetBridge:
             enable_upnp=cfg.p2p.enable_upnp if cfg else True,
             auto_reach=cfg.p2p.auto_reach if cfg else True,
             reach_interval=cfg.p2p.reach_interval if cfg else 300,
-            transport=cfg.p2p.transport if cfg else "ws",
+            transport=cfg.p2p.transport if cfg else "tcp+ws",
             seed_source=seed_source,
             seed_refresh_interval=cfg.p2p.seed_refresh_interval if cfg else 300,
         )

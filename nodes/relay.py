@@ -3,13 +3,17 @@
 A seed and meeting point for daemons, light enough for a small server:
 
   - a stable bootstrap address (its peer id persists in ``<data>/relay.key``);
+  - a circuit relay (libp2p circuit relay v2, hop with reservations): NAT'd
+    daemons reserve a slot and advertise ``/p2p-circuit`` addresses through
+    it, so any peer can reach them; DCUtR then upgrades most of those
+    connections to direct ones by hole punching;
+  - a DHT server (Kademlia) that daemons find peers and blob providers in;
   - a gossip relay: it subscribes to each served jurisdiction's event topic,
     so the gossipsub mesh forwards events between peers that are not
-    connected to each other (NAT'd daemons dial out to the relay);
-  - a blob relay: requests it cannot answer are forwarded one hop and the
-    blobs it relays are cached on disk; after each close daemons offer it
-    the epoch's state blobs (payload, carry-over, agent mints), which it
-    fetches and keeps (issue #44);
+    connected to each other;
+  - a blob keeper: after each close daemons offer it the epoch's state
+    blobs (payload, carry-over, agent mints), which it fetches, keeps on
+    disk and provides in the DHT (issue #44);
   - a batch log: the event batches it relays are kept for a while and
     served to daemons catching up on an epoch (``/autonet/batches/1.0.0``,
     issue #41);
@@ -22,7 +26,12 @@ A seed and meeting point for daemons, light enough for a small server:
 No close, no chain, no agents, no model.
 
 Run:
-    atn relay --port 4001 --announce /dns4/hub.example.org/tcp/4001
+    atn relay --port 4001 --tcp-port 4002         --announce /dns4/hub.example.org/tcp/443/wss,/ip4/203.0.113.7/tcp/4002
+
+``--port`` is the WebSocket port (the origin behind an HTTPS proxy such as
+Cloudflare), ``--tcp-port`` the TCP one (default ``--port`` + 1; hole
+punching needs the relay to see daemons' real addresses, so expose it
+directly when you can).
 
 (or ``python -m nodes.relay``). Without ``--jurisdiction`` it relays the
 jurisdiction this install would join (the saved selection, else the
@@ -30,7 +39,7 @@ packaged registry); pass ``--jurisdiction <chain_id>:<DAO>`` (repeatable)
 to choose.
 
 Every flag has an env twin (``AUTONET_P2P_PORT``, ``AUTONET_P2P_HOST``,
-``AUTONET_P2P_ANNOUNCE``, ``AUTONET_P2P_BOOTSTRAP``,
+``AUTONET_P2P_ANNOUNCE``, ``AUTONET_P2P_BOOTSTRAP``, ``AUTONET_P2P_TCP_PORT``,
 ``AUTONET_RELAY_JURISDICTIONS``, ``AUTONET_RELAY_DIR``,
 ``AUTONET_RELAY_SERVICE_TIMEOUT``). It prints its full
 multiaddr on start: that is the address to publish as a bootstrap seed.
@@ -75,7 +84,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     env = os.environ.get
     ap = argparse.ArgumentParser(prog="atn relay",
                                  description="Autonet relay node (networking only)")
-    ap.add_argument("--port", type=int, default=int(env("AUTONET_P2P_PORT", "4001")))
+    ap.add_argument("--port", type=int, default=int(env("AUTONET_P2P_PORT", "4001")),
+                    help="WebSocket port (behind an HTTPS proxy: its origin)")
+    ap.add_argument("--tcp-port", type=int, default=int(env("AUTONET_P2P_TCP_PORT", "0")),
+                    help="TCP port (default --port + 1)")
     ap.add_argument("--host", default=env("AUTONET_P2P_HOST", "0.0.0.0"))
     ap.add_argument("--announce", default=env("AUTONET_P2P_ANNOUNCE", ""),
                     help="comma list of public multiaddrs to advertise")
@@ -86,9 +98,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "(repeatable; env AUTONET_RELAY_JURISDICTIONS)")
     ap.add_argument("--data-dir", default=env("AUTONET_RELAY_DIR",
                                               str(Path.home() / ".autonet-relay")))
-    ap.add_argument("--transport", choices=("tcp", "ws"),
-                    default=env("AUTONET_P2P_TRANSPORT", "ws"),
-                    help="ws: serve WebSocket, e.g. behind an HTTPS proxy as wss on 443")
+    ap.add_argument("--transport", choices=("tcp+ws", "tcp", "ws"),
+                    default=env("AUTONET_P2P_TRANSPORT", "tcp+ws"),
+                    help="listeners to run (default both; ws: WebSocket only)")
     ap.add_argument("--no-upnp", action="store_true")
     ap.add_argument("--advertise-interval", type=float, default=60.0)
     ap.add_argument("--service-timeout", type=float,
@@ -119,7 +131,10 @@ async def run(args: argparse.Namespace) -> None:
     data = Path(args.data_dir).expanduser()
     host = AutonetHost(
         node_id="relay",
+        # --port is the WebSocket port (the TCP one with --transport tcp);
+        # --tcp-port the TCP one next to it, default --port + 1.
         listen_port=args.port,
+        tcp_port=args.tcp_port,
         listen_host=args.host,
         bootstrap_peers=_csv(args.bootstrap),
         announce_addrs=_csv(args.announce),
@@ -128,20 +143,27 @@ async def run(args: argparse.Namespace) -> None:
         key_seed=load_key_seed(data / "relay.key"),
         transport=args.transport,
         capability=NodeCapability(peer_id="", node_id="relay", roles=["relay"]),
+        relay_hop=True,
+        peer_cache_path=str(data / "relay_peers.json"),
+        # A relay is a meeting point, not a mesh member: it dials nobody
+        # but its seeds and holds as many connections as daemons make.
+        target_peers=1,
+        max_peers=int(os.environ.get("AUTONET_RELAY_MAX_PEERS", "2000")),
     )
     # Service requests: forwarding is built into the host (it has no service
     # handler of its own, so anything addressed to the relay itself is refused).
     host.service_relay_timeout = args.service_timeout
     async with host.run():
-        # Blobs: serve what is on disk, and keep what we relay on disk
-        # (replacing the default in-memory relay cache).
+        # Blobs: serve what is on disk, and keep the blobs daemons offer
+        # after a close (the anchored state, issue #44), so it outlives the
+        # daemons that computed it. Kept blobs are provided in the DHT.
         store = BlobStore(data_dir=str(data / "blobs"))
         server = host_blob_server(host)
         server.add_source(store.get_bytes_local)
-        host.set_blob_relay_sink(lambda _cid, blob: store.add_bytes(blob))
-        # Keep the blobs daemons offer after a close (the anchored state,
-        # issue #44), so it outlives the daemons that computed it.
         host.set_blob_offer_store(store.has, store.add_bytes)
+        kept = sorted(p.name for p in (data / "blobs").iterdir()
+                      if len(p.name) == 64) if (data / "blobs").is_dir() else []
+        host.provide_blobs_threadsafe(kept[-2000:])
 
         def keep(log: BatchLog):
             def on_batch(_topic: str, data: bytes) -> None:

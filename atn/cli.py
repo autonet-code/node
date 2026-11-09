@@ -1038,7 +1038,8 @@ def main() -> None:
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "relay":
         # Relay mode: networking only, a low-cost node that supports the
-        # network (seed, gossip and blob relay, reach checks). No close, no
+        # network (seed, circuit relay, DHT, gossip relay, state blobs, reach
+        # checks). No close, no
         # chain, no agents, no model. See docs/p2p_networking.md.
         from nodes.relay import main as _relay_main
         sys.exit(_relay_main(sys.argv[2:]))

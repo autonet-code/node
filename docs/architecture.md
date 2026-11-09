@@ -34,7 +34,7 @@ registered in the packaged jurisdiction keeps it. It:
   on the machine, snapshotted by content (`docs/tool_codebases.md`), or a
   single script;
 - gossips events over libp2p (a published tool's one `tool_registered`
-  event) and serves blobs;
+  event), serves blobs and announces the tool blobs it holds in the DHT;
 - with a registered agent or operator: runs the federated close, votes epoch elections
   and submits claims through the operator key. Without one it closes
   nothing and installs each anchor's state instead. That state is the
@@ -150,10 +150,12 @@ newest 500 per agent in `<data_dir>/activity/`). The app
 also approves the one kind of adoption an agent can't do alone: a tool that replaces core built-ins (agents install other tools themselves). It talks to the daemon's 7700 locally or 7701
 remotely. Agents don't need it.
 
-**Relay (`atn relay`).** A networking-only node: seed, gossip and blob
-relay, a short log of event batches for catch-up, the state blobs each
-anchor commits (daemons offer them after every close), reach checks. No close, chain or agents. Seeds are listed in the
-DAO Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
+**Relay (`atn relay`).** A networking-only node: seed, circuit relay v2
+(NAT'd daemons reserve on it and are reached through it), DHT server,
+gossip relay, a short log of event batches for catch-up, the state blobs
+each anchor commits (daemons offer them after every close; it provides them
+in the DHT), reach checks. No close, chain or agents. Seeds are listed in
+the DAO Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 
 **Chain.** In this repo (`contracts/core/`): `Substrate.sol` (ATN, epoch
 anchors, agent registry with owner binding, mint records, `payForService`
@@ -167,23 +169,38 @@ agent directory.
 
 ## How things connect
 
-- Daemon to daemon: libp2p gossip per jurisdiction (topic
-  `/autonet/world-events/<chain_id>:<DAO address>`), over WebSocket by
-  default (TCP by `AUTONET_P2P_TRANSPORT`; one transport per network), on a
-  port kept across restarts (`p2p.port` in the data dir) so the address can
-  be a seed. Before closing an
-  epoch, a daemon asks its peers (relays first) for that epoch's batches it
-  missed (`/autonet/batches/1.0.0`), so a late joiner or a daemon that lost
-  its peers closes the same set as everyone else. Behind NAT a daemon
-  dials out only; UPnP and a reach check make home machines reachable when
-  the router allows. Behind an HTTP proxy (cloud sandboxes) it dials `wss`
-  through CONNECT. A running daemon re-reads the Registry seed list every
-  few minutes (`p2p.seed_refresh_interval`, default 300 s) and dials new
-  seeds; with no peers it redials its seeds at once.
+- Daemon to daemon: a libp2p mesh (py-libp2p 0.8.1,
+  `docs/p2p_networking.md`). Every daemon listens on TCP and WebSocket at
+  once, on ports kept across restarts (`p2p.port` for WebSocket, the one
+  seeds name, and `p2p.tcp_port` in the data dir), and dials whichever a
+  peer offers. A NAT'd daemon reserves a slot on the relays it is connected
+  to and advertises `/p2p-circuit` addresses, so anyone reaches it through
+  a relay; DCUtR then turns those links into direct ones by TCP hole
+  punching. A DHT on every daemon finds peers and blob providers; the mesh
+  loop dials towards 8 peers from the DHT, capability gossip and a peer
+  cache in the data dir (`p2p_peers.json`, which lets a restart rejoin with
+  every seed down), and the connection manager prunes above 48. Gossip per
+  jurisdiction (topic `/autonet/world-events/<chain_id>:<DAO address>`)
+  rides those links, so it keeps flowing with every relay down. Before
+  closing an epoch, a daemon asks its peers (relays first) for that epoch's
+  batches it missed (`/autonet/batches/1.0.0`), so a late joiner or a daemon
+  that lost its peers closes the same set as everyone else. UPnP and a
+  reach check make home machines directly reachable when the router allows.
+  Behind an HTTP(S) or SOCKS proxy (cloud sandboxes) a daemon runs WebSocket
+  only and dials through the proxy; it is reached through its relays. A
+  running daemon re-reads the Registry seed list every few minutes
+  (`p2p.seed_refresh_interval`, default 300 s) and dials new seeds; with no
+  peers it redials its seeds and cached peers at once.
+- Tool code and blobs: a daemon holding a blob a tool needs announces it in
+  the DHT (on publish, before the registration event is gossiped; on adopt;
+  re-announced every 30 min). A fetch asks connected peers and the blob's
+  DHT providers at once and dials the providers directly or through a relay
+  circuit; peers never forward blob requests.
 - Buyer to service provider: libp2p `/autonet/service/1.0.0` to the
-  provider's on-chain peer id, direct or one hop through a relay (so NAT'd
-  providers can sell); the provider's wss endpoint only when libp2p cannot
-  deliver.
+  provider's on-chain peer id, dialled directly or through the provider's
+  relay circuit (so NAT'd providers can sell), else forwarded one hop by a
+  relay connected to it; the provider's wss endpoint only when libp2p
+  cannot deliver.
 - Daemon to chain: one RPC URL. Contract addresses come from the
   jurisdiction's Registry, read at each start (latest block). The close's
   parameters (REP, charter, sanctions, mint gate, review params, epoch rules) are read

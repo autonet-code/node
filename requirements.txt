@@ -25,7 +25,7 @@ onnxruntime>=1.17
 tokenizers>=0.15
 
 # P2P networking
-libp2p>=0.6.0
+libp2p==0.8.1
 trio>=0.22.0
 miniupnpc>=2.0
 
