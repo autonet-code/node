@@ -132,11 +132,12 @@ class TestHarnessDistroBootstrap:
 
         out = await execute_tool(
             "attest_tools",
-            {"judgments": [{"tool": "echo_tool", "ok": True, "score": 0.9}],
+            {"judgments": [{"tool": "echo_tool", "correctness": 0.9,
+                            "simplicity": 0.5, "novelty": 0.5, "malware": False}],
              "context": "wiring up an echo round-trip"},
             rt, caller_id="child",
         )
-        assert out == {"attested": 1, "skipped": []}
+        assert out["attested"] == 1 and out["skipped"] == []
 
         # The attestation jsonl row carries it (nothing is gossiped).
         rows = list(store._iter_attestations())
@@ -154,7 +155,8 @@ class TestHarnessDistroBootstrap:
             input_schema=SCHEMA, author="user", code=ECHO_CODE,
         )
         out = store.attest_usage(
-            "user", [{"tool": res["digest"], "ok": True}], "ctx")
+            "user", [{"tool": res["digest"], "correctness": 0.9, "simplicity": 0.5,
+                      "novelty": 0.5, "malware": False}], "ctx")
         assert out["attested"] == 1
         rows = list(store._iter_attestations())
         assert "loadout" not in rows[-1]

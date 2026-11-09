@@ -253,7 +253,7 @@ async def test():
         "list_tools", "use_tool",
         # Tool substrate (docs/tool_substrate.md)
         "register_tool", "attest_tools", "publish_tool", "vet_tool",
-        "adopt_tool", "probe_tools",
+        "adopt_tool", "probe_tools", "fetch_evidence",
         # Planning & goal tools
         "get_goals", "add_goal", "update_goal",
         "get_projects", "add_project", "update_project",
