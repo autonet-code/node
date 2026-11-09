@@ -160,7 +160,9 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   malware (the share in bps, as the close computes it), judged once its
   reviewers clear the conclusion gate. Then the author's side is not paid,
   nor that of any composite using the tool, and ToolBond slashes the bond
-  and burns the author household's REP by that share. The close commits
+  and burns the author household's REP by that share (in full when the DAO
+  rules malware; the REP burn capped at the REP that said yes). The author
+  can't withdraw the bond while a verdict is forming. The close commits
   one leaf per concluding tool with its share in the anchor's tree, from
   which ToolBond opens the verdict. Only the author can appeal, only a
   malware yes; the pay and the slash wait for the vote, and the DAO's

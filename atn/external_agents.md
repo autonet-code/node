@@ -280,7 +280,7 @@ How a published tool earns:
   composite.
 - When more than half the REP reviewing a tool says malware, its author
   side is not paid, nor that of any composite using it, and its bond and
-  REP are slashed by that share. The tool stays in the library and in
+  REP are slashed by that share (the bond in full if the DAO confirms it). The tool stays in the library and in
   search with its rating; a fix is a new version with a new bond.
 - `addBounty` on ToolBond adds ATN that pays reviewers as their rounds
   settle (by their REP and accuracy), a way to draw reviews to a tool. You
