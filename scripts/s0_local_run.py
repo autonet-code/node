@@ -28,15 +28,23 @@ library, use each other's tools, review them, and pay each other for
 services (the fees those payments burn are the volume that ends an epoch).
 The volume ramps up over the run, so epochs should get shorter. A canary
 rides along: one household publishes a tool that reads outside its
-workspace next to an honest control, and two scripted reviewers report it
-as harmful. Every agent API reply names the tools the agent adopted and
+workspace next to an honest control, and two scripted reviewers flag it
+as malware with evidence: it concludes with its author side held, its
+verdict settles after a two-minute appeal window (the bond and the
+author's REP slashed by the share of yes) and the yes reviewers claim the
+slashed bond. Every agent API reply names the tools the agent adopted and
 the household has not reviewed (``review_due``); the run logs each change.
+After the activity, payments alone keep epochs closing until the late
+tool's close is anchored and claimed (at most 15 minutes).
 
 The daemons share one search model directory (``ATN_MODEL_DIR``, S0_MODEL_DIR
 default ``<S0_DIR>/models``), fetched and verified once before they start.
 
-The collector writes ``<run>/epochs.jsonl`` (one line per anchor) and
-``<run>/status.jsonl`` (per daemon, every poll). Success, in the owner's
+The collector writes ``<run>/epochs.jsonl`` (one line per anchor and per
+close, with the close's tool mint) and ``<run>/status.jsonl`` (per daemon,
+every poll); ``CLOSE`` lines name each concluding tool's weight, score
+(V x C x S) and mint, and the end of the run reports ``MINT``, ``BOUNTY``
+and ``VERDICT`` lines. Success, in the owner's
 words: the system works, epochs move forward with durations getting shorter
 with volume of activity, and nothing gets stuck.
 
@@ -274,8 +282,10 @@ def deploy_jurisdiction(run: Path, usdc: str, owners: List[str], bootstrap: str)
         "VOTING_DELAY_SECS": str(VOTING_DELAY_SECS),
         "VOTING_PERIOD_SECS": str(VOTING_PERIOD_SECS),
         "TIMELOCK_DELAY_SECS": str(TIMELOCK_DELAY_SECS),
-        # Reviews reveal and finalize within minutes, not the default day.
+        # Reviews reveal and finalize within minutes, not the default day,
+        # and a malware verdict settles two minutes after it opens.
         "TOOLBOND_REVEAL_WINDOW_SECS": "60",
+        "TOOLBOND_APPEAL_PERIOD_SECS": "120",
         "EPOCH_TARGET_SHARE": str(EPOCH_TARGET_SHARE),
         "BOOTSTRAP": bootstrap,
         "MEMBERS": ",".join(owners),
@@ -645,6 +655,10 @@ class Activity:
         # household adopted (Decision 2026-11-09: they are shared)
         self.shared: Dict[str, Dict[str, Any]] = {}
         self.shared_checked = False
+        # tool name -> the anchor count when a close first showed it
+        # concluding; anchors seen so far (the collector keeps both).
+        self.concluded: Dict[str, int] = {}
+        self.anchors = 0
         self.counts: Dict[str, int] = {}
         self.events = open(run / "activity.jsonl", "a", encoding="utf-8")
 
@@ -1009,6 +1023,35 @@ class Activity:
                 f"{sorted(reviewers)}; epochs whose one batch revealed both sessions' "
                 f"reviews: {both}")
 
+    def report_verdicts(self) -> None:
+        """Malware verdicts on ToolBond: each tool the anchored closes
+        concluded, its malware share, and how a verdict settled (the bond
+        slashed, the author's REP burned, the reviewers' bond shares)."""
+        w3 = self.w3
+        tb = w3.eth.contract(address=w3.to_checksum_address(self.j["autonet"]["toolBond"]),
+                             abi=artifact("ToolBond.sol/ToolBond.json")["abi"])
+
+        def name(d: Any) -> str:
+            h = bytes(d).hex()
+            return (self.published.get(h) or {}).get("name") or h[:12]
+        try:
+            for e in tb.events.Concluded.get_logs(from_block=0):
+                a = e["args"]
+                log(f"VERDICT: {name(a['digest'])} concluded at anchor {a['anchorIndex']}, "
+                    f"malware share {int(a['malwareShare']) / 1e18:.3f}"
+                    f"{', appeal window open' if int(a['appealEnds']) else ''}")
+            for e in tb.events.MalwareSettled.get_logs(from_block=0):
+                a = e["args"]
+                log(f"VERDICT: {name(a['digest'])} settled malware={a['malware']}: bond "
+                    f"slashed {int(a['bondSlashed']) / 1e6:g} ATN, REP burned "
+                    f"{int(a['repBurned']) / 1e18:g}")
+            for e in tb.events.BondShareClaimed.get_logs(from_block=0):
+                a = e["args"]
+                log(f"VERDICT: {name(a['digest'])} bond share {int(a['amount']) / 1e6:g} ATN "
+                    f"to reviewer {str(a['reviewer'])[:10]} (epoch {a['epoch']})")
+        except Exception as exc:  # noqa: BLE001
+            log(f"VERDICT: read failed: {exc}")
+
     def epoch_threshold(self) -> int:
         """Fees that end an epoch now: the target share of the supply."""
         return EPOCH_TARGET_SHARE * int(self.sub.functions.atnTotalSupply().call()) // 1_000_000
@@ -1073,12 +1116,58 @@ async def activity_loop(act: Activity, minutes: float) -> None:
         await asyncio.sleep(max(0.0, TICK_SECS - (time.time() - t0)))
 
 
+async def drain(act: Activity, cap_s: float = 900.0) -> None:
+    """Payments only (no new reviews) until the late tool has concluded and
+    the anchor of that close has landed, with a minute for its claims, or
+    ``cap_s`` passes."""
+    import random
+    rng = random.Random(11)
+    start = time.time()
+    while time.time() - start < cap_s:
+        at = act.concluded.get(LATE_TOOL[0])
+        if at is not None and act.anchors > at:
+            log(f"drain: {LATE_TOOL[0]} concluded and anchored; waiting for its claims")
+            await asyncio.sleep(60)
+            return
+        try:
+            threshold = act.epoch_threshold()
+        except Exception:  # noqa: BLE001
+            threshold = 0
+        per_tick = threshold / BURN_SHARE * TICK_SECS / PHASES[-1][1] if threshold else 0
+        per_agent = int(per_tick / len(act.hs))
+        t0 = time.time()
+        if per_agent > 0:
+            await asyncio.gather(*(act.pay(h, per_agent, rng) for h in act.hs))
+        await asyncio.sleep(max(0.0, TICK_SECS - (time.time() - t0)))
+    log(f"drain: gave up after {cap_s:.0f}s; {LATE_TOOL[0]} "
+        f"{'concluded' if LATE_TOOL[0] in act.concluded else 'not concluded'}")
+
+
 # ---------------------------------------------------------------------------
 # Collector
 # ---------------------------------------------------------------------------
 
+def _tool_mint_line(names: Dict[str, Dict[str, str]], tool_mint: Dict[str, Any]) -> str:
+    """One close's concluding tools: weight, score (V x C x S), the author's
+    and the reviewers' mint, and whether a malware verdict held the author
+    side."""
+    parts = []
+    for digest, e in sorted((tool_mint or {}).items()):
+        if not isinstance(e, dict):
+            continue
+        name = (names.get(digest) or {}).get("name") or digest[:12]
+        parts.append(f"{name} w={float(e.get('weight') or 0):.4f} "
+                     f"score={float(e.get('score') or 0):.3f} "
+                     f"author={float(e.get('author_mint') or 0):.4f} "
+                     f"reviewers={float(e.get('reviewer_mint') or 0):.4f}"
+                     f"{' MALWARE(author side held)' if e.get('malware') else ''}"
+                     f"{' released' if e.get('released') else ''}")
+    return "; ".join(parts) if parts else "no tool concluded"
+
+
 async def collector(run: Path, households: List[Household], j: Dict[str, Any], w3,
-                    stop: asyncio.Event) -> None:
+                    stop: asyncio.Event, act: Optional["Activity"] = None) -> None:
+    names = act.published if act is not None else {}
     from nodes.common.voice_state import _anchor_cutoff
     sub = w3.eth.contract(address=w3.to_checksum_address(j["autonet"]["substrate"]),
                           abi=abi("Substrate"))
@@ -1096,6 +1185,7 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
     epochs = open(run / "epochs.jsonl", "a", encoding="utf-8")
     status = open(run / "status.jsonl", "a", encoding="utf-8")
     seen = 0
+    closes_seen = None
     prev_cutoff = int(sub.functions.deployedAt().call())
     while not stop.is_set():
         try:
@@ -1113,6 +1203,28 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
                     f"burned {row['burned']}")
                 prev_cutoff = cutoff
                 seen += 1
+                if act is not None:
+                    act.anchors = seen
+            # The latest close on h1: which tools concluded and what they
+            # minted (the close's tool_mint, in pool units).
+            try:
+                eg = await clients[households[0].name].call(
+                    {"type": "economy_graph", "last_n_epochs": 1}, timeout=30)
+                last = ((eg.get("result") or {}).get("last_epoch") or {})
+                if last.get("epoch_id") and last.get("epoch_id") != closes_seen:
+                    closes_seen = last["epoch_id"]
+                    epochs.write(json.dumps({"close": closes_seen,
+                                             "tool_mint": last.get("tool_mint")},
+                                            default=str) + "\n")
+                    epochs.flush()
+                    log(f"CLOSE {closes_seen}: total {float(last.get('total_mint') or 0):.6f}; "
+                        f"{_tool_mint_line(names, last.get('tool_mint') or {})}")
+                    if act is not None:
+                        for digest in last.get("tool_mint") or {}:
+                            name = (names.get(digest) or {}).get("name") or digest
+                            act.concluded.setdefault(name, seen)
+            except Exception as exc:  # noqa: BLE001
+                log(f"collector: economy_graph: {exc!r}")
             for h in households:
                 try:
                     st = await clients[h.name].call({"type": "autonet_status"}, timeout=30)
@@ -1268,8 +1380,8 @@ async def amain() -> int:
 
         # 6. Work, watched by the collector.
         stop = asyncio.Event()
-        col = asyncio.create_task(collector(run, households, j, w3, stop))
         act = Activity(run, households, j, w3)
+        col = asyncio.create_task(collector(run, households, j, w3, stop, act))
         await act.author()
         act.add_bounty()
         await act.adopt()
@@ -1299,10 +1411,13 @@ async def amain() -> int:
         sw = await act.call(h, {"type": "sweep_to_owner", "agent_ids": [h.agent_id]},
                             "sweep_to_owner")
         log(f"sweep_to_owner: {str(sw)[:300]}")
-        # Let the last epochs anchor before the collector stops: the late
-        # tool's rounds usually conclude after the activity ends.
-        await asyncio.sleep(300)
+        # The late tool's rounds conclude a few epochs after the activity
+        # ends (reveal, finalize, then the close pinned past it): keep the
+        # payments going so epochs keep closing at the floor, until its
+        # close is anchored and claimed.
+        await drain(act)
         act.report_mint()
+        act.report_verdicts()
         act.report_batches()
         act.report_shared()
         stop.set()
