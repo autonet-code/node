@@ -844,8 +844,8 @@ class WebSocketBridge:
                 usage["last_epoch"] = {
                     k: entry.get(k, 0)
                     for k in ("mint", "reviewer_mint", "author_mint",
-                              "reviewers", "score", "novelty", "malware",
-                              "weight")
+                              "reserved", "released", "reviewers", "score",
+                              "novelty", "malware", "weight")
                 }
         return {
             "digest": digest,
@@ -3093,6 +3093,32 @@ class WebSocketBridge:
                             digest, msg.get("limit"))}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        # Every household's on-chain reviews of one tool (Decision
+        # 2026-11-09), from the ToolBond logs the close's snapshot is built
+        # from: reviewer, household, the four fields, charter scores,
+        # weight, accuracy once settled and evidence_hash (pass it to
+        # fetch_evidence). Public chain data: any session may read it.
+        if msg_type == "tool_round_reviews":
+            d = str(msg.get("digest") or "").strip().lower().removeprefix("0x")
+            if len(d) != 64 or any(c not in "0123456789abcdef" for c in d):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "digest must be a 64-hex manifest digest"}
+            from .runtime.tool_bond import ToolBondClient
+            client = ToolBondClient(self.runtime)
+            if not client.available():
+                return {"msg_id": msg_id, "ok": False, "error": "no ToolBond configured"}
+            bond_addr = client._addresses()[0]
+            start = int(getattr(self.runtime._config.rpb, "deploy_block", 0) or 0) or None
+            try:
+                from nodes.common.voice_state import read_tool_round_reviews
+                reviews = await asyncio.to_thread(
+                    lambda: read_tool_round_reviews(client._w3(), bond_addr, d,
+                                                    start_block=start))
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": f"ToolBond read failed: {e}"}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"digest": d, "reviews": reviews}}
 
         if msg_type == "rpb_agent_training":
             # Substrate-native: returns mint_total (cumulative ATN pool

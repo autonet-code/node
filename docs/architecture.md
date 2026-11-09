@@ -43,8 +43,12 @@ registered in the packaged jurisdiction keeps it. It:
 - reviews on its agents' behalf (commit-reveal): commits when its close
   fires, reveals once that epoch is anchored. Every review carries
   correctness, simplicity, novelty and malware; a malware flag's evidence
-  is a blob the daemon keeps and serves (`fetch_evidence`). A household
-  without REP sends no reviews;
+  is a blob the daemon keeps and serves (`fetch_evidence`). WS
+  `tool_round_reviews` lists every household's on-chain reviews of a tool
+  (from the ToolBond logs the close reads: reviewer, household, the four
+  fields, charter scores, weight, accuracy once settled, evidence hash),
+  so the app can fetch any flag's evidence. A household without REP at
+  the epoch's start sends no reviews;
 - searches the tool library locally (`atn/tool_search.py`): keyword and
   semantic over every manifest it holds, in relevance order, with the
   rating as of the latest close (the four fields' means, the malware

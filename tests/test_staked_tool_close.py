@@ -320,6 +320,40 @@ class TestReviewSnapshotFold:
 # ---------------------------------------------------------------------------
 
 
+class TestToolRoundReviews:
+    """WS tool_round_reviews: every household's reviews of one tool, from
+    the same ToolBond logs the snapshot folds."""
+
+    def test_rows_carry_fields_axes_weight_accuracy_and_evidence(self):
+        from nodes.common.voice_state import tool_round_reviews_from_logs
+        flag = _reviewed(5, AUD_B, weight=200, index=1, c=-40, s=60, n=10, m=1,
+                         life_precious=40)
+        flag["args"]["evidenceHash"] = bytes.fromhex("ab" * 32)
+        records = [
+            _reviewed(5, AUD_A, weight=300, index=0, c=90, s=20, n=70, m=0),
+            flag,
+            _rec(6, "ReviewUnweighted", digest=D, epoch=1, reviewer=AUD_A),
+            _rec(9, "ReviewSettled", digest=D, epoch=1, reviewer=AUD_B, accuracy=E18 // 2),
+            _finalized(9, index=1),
+            _rec(10, "Reviewed", digest=bytes.fromhex("cd" * 32), epoch=1, reviewer=AUD_A,
+                 correctness=1, simplicity=1, novelty=1, malware=0, scores=b"",
+                 weight=5, evidenceHash=bytes(1) * 32),
+        ]
+        rows = tool_round_reviews_from_logs(
+            records, DIGEST, epochs=EPOCHS, axis_ids=AXES,
+            households={(1, AUD_B.lower()): "0xhouse"})
+        assert [r["reviewer"] for r in rows] == sorted([AUD_A.lower(), AUD_B.lower()])
+        b = next(r for r in rows if r["reviewer"] == AUD_B.lower())
+        assert (b["correctness"], b["simplicity"], b["novelty"], b["malware"]) == (
+            -0.4, 0.6, 0.1, True)
+        assert b["axes"] == {"life_precious": 0.4} and b["unscored_bps"] == 5000
+        assert b["weight"] == 200 and b["accuracy"] == E18 // 2
+        assert b["evidence_hash"] == "ab" * 32 and b["household"] == "0xhouse"
+        assert b["finalized"] is True
+        a = next(r for r in rows if r["reviewer"] == AUD_A.lower())
+        assert a["weight"] == 0 and a["accuracy"] is None and a["axes"] == {}
+
+
 class TestSuccessorCarry:
     PRED_RATING = {DIGEST: tool_cells(correctness=0.5)}
 

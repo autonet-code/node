@@ -615,6 +615,125 @@ def read_tool_review_snapshot(
         excluded_reviewers=excluded_reviewers)
 
 
+def tool_round_reviews_from_logs(
+    records: List[Dict[str, Any]], digest: str, *,
+    epochs: Dict[int, Dict[str, Any]], axis_ids: List[str],
+    households: Optional[Dict[Tuple[int, str], str]] = None,
+) -> List[Dict[str, Any]]:
+    """One tool's reviews from ToolBond records (``Reviewed``,
+    ``ReviewUnweighted``, ``ReviewSettled``, ``Finalized``), as the close's
+    snapshot reads them: per review its epoch, reviewer, household (the
+    owner its batch weighed, ``households``), the four fixed fields, the
+    charter axes it scored (by axis id; an unscored axis is absent and
+    counts at the epoch's ``unscored_bps``), its REP weight, its accuracy
+    once its round settled (1e18 scale, None before or when uninformative),
+    whether the round is finalized, and its ``evidence_hash`` (a malware
+    flag's evidence, readable with ``fetch_evidence``). Newest epoch first,
+    then by reviewer. Pure."""
+    from eth_utils import keccak
+
+    d = str(digest).lower().removeprefix("0x")
+    key_to_axis = {keccak(text=a).hex().lower().removeprefix("0x"): a for a in axis_ids}
+    rows: Dict[Tuple[int, str], Dict[str, Any]] = {}
+    settled: Dict[Tuple[int, str], int] = {}
+    finalized = set()
+    for r in sorted(records, key=lambda r: (int(r["block"]), int(r["index"]))):
+        a = r["args"]
+        if _hex32(a["digest"]) != d:
+            continue
+        epoch = int(a["epoch"])
+        if r["event"] == "Reviewed":
+            who = str(a["reviewer"]).lower()
+            info = epochs.get(epoch) or {}
+            keys = [str(k).lower().removeprefix("0x") for k in (info.get("axis_ids") or [])]
+            raw = bytes(a["scores"])
+            axes: Dict[str, float] = {}
+            for k, key in enumerate(keys):
+                if k >= len(raw) or _int8(raw[k]) == _NO_SCORE:
+                    continue
+                axes[key_to_axis.get(key, key)] = _int8(raw[k]) / 100.0
+            rows[(epoch, who)] = {
+                "epoch": epoch, "reviewer": who,
+                "household": (households or {}).get((epoch, who), ""),
+                "correctness": int(a["correctness"]) / 100.0,
+                "simplicity": int(a["simplicity"]) / 100.0,
+                "novelty": int(a["novelty"]) / 100.0,
+                "malware": bool(int(a["malware"])),
+                "axes": dict(sorted(axes.items())),
+                "unscored_bps": int(info.get("unscored_bps", UNSCORED_BPS_DEFAULT)),
+                "weight": int(a["weight"]),
+                "evidence_hash": _hex32(a["evidenceHash"]),
+                "block": int(r["block"]),
+            }
+        elif r["event"] == "ReviewUnweighted":
+            row = rows.get((epoch, str(a["reviewer"]).lower()))
+            if row is not None:
+                row["weight"] = 0
+        elif r["event"] == "ReviewSettled":
+            settled[(epoch, str(a["reviewer"]).lower())] = int(a["accuracy"])
+        elif r["event"] == "Finalized":
+            finalized.add(epoch)
+    out = []
+    for (epoch, who), row in rows.items():
+        acc = settled.get((epoch, who))
+        row["accuracy"] = None if acc is None or acc == _UNINFORMATIVE else acc
+        row["finalized"] = epoch in finalized
+        out.append(row)
+    return sorted(out, key=lambda r: (-r["epoch"], r["reviewer"]))
+
+
+def read_tool_round_reviews(
+    w3: Any, tool_bond_address: str, digest: str, *, to_block: Any = None,
+    axis_ids: Optional[List[str]] = None, start_block: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """A tool's on-chain reviews (``tool_round_reviews_from_logs``) from the
+    ToolBond logs the close's review snapshot is built from, up to
+    ``to_block`` (default the latest block), filtered to the tool by its
+    indexed digest. Households come from ToolBond's ``householdOf``. Raises
+    on RPC failure."""
+    from web3 import Web3
+
+    if axis_ids is None:
+        from .library.charter import active_charter
+        axis_ids = list(active_charter().ids)
+    abi = _TOOL_BOND_EVENTS_ABI + _TOOL_BOND_VIEWS_ABI + [
+        {"name": "householdOf", "type": "function", "stateMutability": "view",
+         "inputs": [{"name": "epoch", "type": "uint256"},
+                    {"name": "agent", "type": "address"}],
+         "outputs": [{"name": "", "type": "address"}]}]
+    contract = w3.eth.contract(address=Web3.to_checksum_address(tool_bond_address), abi=abi)
+    head = int(w3.eth.block_number) if to_block is None else int(to_block)
+    d = bytes.fromhex(str(digest).lower().removeprefix("0x"))
+    records: List[Dict[str, Any]] = []
+    for name in ("Reviewed", "ReviewUnweighted", "ReviewSettled", "Finalized"):
+        event = getattr(contract.events, name)
+
+        class _Filtered:
+            @staticmethod
+            def get_logs(_event=event, **kw):
+                return _event.get_logs(argument_filters={"digest": d}, **kw)
+
+        for log in _get_logs(_Filtered, w3, contract.address, head, start_block):
+            records.append({"block": int(log["blockNumber"]), "index": int(log["logIndex"]),
+                            "event": name, "args": dict(log["args"])})
+    epochs: Dict[int, Dict[str, Any]] = {}
+    households: Dict[Tuple[int, str], str] = {}
+    for r in records:
+        if r["event"] != "Reviewed":
+            continue
+        e = int(r["args"]["epoch"])
+        if e not in epochs:
+            info = contract.functions.epochInfo(e).call()
+            epochs[e] = {"axis_ids": [_hex32(x) for x in info[2]],
+                         "unscored_bps": int(info[6])}
+        who = str(r["args"]["reviewer"])
+        if (e, who.lower()) not in households:
+            households[(e, who.lower())] = str(contract.functions.householdOf(
+                e, Web3.to_checksum_address(who)).call()).lower()
+    return tool_round_reviews_from_logs(records, digest, epochs=epochs,
+                                        axis_ids=axis_ids, households=households)
+
+
 # ---------------------------------------------------------------------------
 # Pinned charter (docs/multi_jurisdiction.md decision 5).
 #
