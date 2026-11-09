@@ -30,7 +30,7 @@ Autonet's answer is to make alignment a property of an **economy** rather than a
 
 ## 2. Everything is an agent
 
-The agent is the atomic unit and the only economic entity: a cryptographic identity (its own keypair, held by the daemon that hosts it), a lineage hash rooted in a human owner's wallet, a peer-to-peer presence, and a position in the network's alignment space. Registration on-chain is voluntary, but it is what unlocks economic rights: minting, payment rails, and a place in governance. The human owns the wallet; AI can only execute if tokens are spent.
+The agent is the atomic unit and the only economic entity: a cryptographic identity held by the daemon that hosts it (a native agent's own keypair; an external agent acts with its household's operator key), a lineage hash rooted in a human owner's wallet, and a peer-to-peer presence. Registration on-chain is voluntary, but it is what unlocks economic rights: minting, payment rails, and a place in governance. The human owns the wallet; AI can only execute if tokens are spent.
 
 ## 3. The substrate: a tool economy
 
@@ -38,52 +38,53 @@ The network's shared object of judgment, its *substrate*, is not a neural networ
 
 The lifecycle, end to end:
 
-1. **Manifest defines the tool.** A published tool is a content-addressed code blob plus a signed manifest. Its position in the 6-axis charter space starts at zero: an author never claims an alignment position, only a topical one.
-2. **The entry gate is a stake, not a tribunal.** A tool enters the economy once its author stakes it (ToolBond), and earns from its first attested third-party use. Reviews are staked too and settle by reputation weight; bad tools sink in the rankings and lose their bond in proportion to the harm reviewers establish. Trust is a gradient, not a verdict.
-3. **Staked reviews position it.** Agents that use a tool review it as a built-in step of the agentic loop: a signed score per charter axis plus a harm score between 0 and 1, committed and revealed once per epoch on chain (ToolBond). The rating settles by governance reputation alone, so a stake sets the reviewer's payoff, never their weight, and zero-reputation reviews move nothing. Accurate reviewers share the tool's mint and collect the stakes of inaccurate ones; a wrong review costs reputation in proportion to how far off it was. Settled harm slashes the author's bond in proportion. ([staked reviews →](docs/multi_jurisdiction.md))
-4. **Ratings route discovery.** Library search ranks by the review-drifted usefulness axes, so good tools get found first, used more, and paid more. Poor tools are never removed: they fade by never being retrieved. Existence is cheap; attention is earned.
-5. **Usage alone mints.** A tool's author earns a pro-rata share of the epoch pool in proportion to damped, sybil-excluded attested usage, and nothing else. Composed tools share attribution down their declared dependency graph, conserving credit. The pool itself is nothing but recycled service fees (§4).
+1. **Manifest defines the tool.** A published tool is a content-addressed code blob plus a signed manifest: what it does, the capabilities it declares (network, files, processes, environment, secrets), and a novelty claim naming what is new and the closest existing tools. The author claims no rating; reviewers set them all.
+2. **The entry gate is a bond, not a tribunal.** A tool enters the economy once its author bonds it (ToolBond). Nothing else is gated: an unbonded or badly rated tool stays in the library, findable and adoptable, and simply earns nothing. The framework rates tools; it does not try to make running them safe. What a household runs is its own policy (the owner's or its agent's), read from the ratings.
+3. **Reviews rate it.** Agents that use a tool review it as a built-in step of the agentic loop; a household's reviews are committed and revealed once per epoch on chain (ToolBond). Every review carries four fixed fields, the same in every jurisdiction: **correctness** (-1 to 1), **simplicity** (0 to 1), **novelty** (0 to 1, how much of the tool's value is new beyond its dependencies and the prior art it names) and **malware** (yes or no, by the NIST definition of malicious code; a destructive bug is a correctness problem). It may also score any of the jurisdiction's charter axes, each on its own. A review weighs by its household's reputation alone; a household with none cannot review, and no ATN is staked. Each review risks a tenth of the reputation it weighed, lost in proportion to how far it sits from the others' consensus and reassigned to the accurate. ([review rules →](docs/economy_design.md))
+4. **Search finds it; ratings inform.** Each daemon searches the whole library locally, by meaning and by keyword, in relevance order. Every match carries its ratings, its bond and its malware share, and the household decides from them what to adopt and run. Nothing is pruned or hidden. Existence is cheap; attention is earned.
+5. **Paid once, at conclusion.** A bonded tool is paid once, in the epoch close where enough of the network has reviewed it: households holding 1% of all reputation and making up 0.5% of the households that hold any (the author's own excluded). Concluding tools split the epoch pool by the reputation behind their reviews; ratings never change a tool's share against the others. Reviewers take 40% of it by accuracy, whatever scores they gave. The author's side is the other 60% times the tool's score: the charter mean times the correctness mean (each with negatives counted as zero) times a simplicity factor between one half and one. The author keeps the novelty share of it and the tool's declared dependencies split the rest, so a copy earns nothing and building on good tools pays. Whatever is not paid carries over to the next pool, itself nothing but recycled service fees (§4). Later reviews still rate a tool but pay nothing: once ratings are public, repeat payouts would pay reviewers for copying them.
+6. **Malware is a verdict with evidence.** A malware yes must come with evidence: free text pointing into the code, kept by the reviewer's daemon as a content-addressed blob any daemon can fetch by its hash while that daemon is online. When a tool concludes with more than half of its reviewing reputation saying yes, the author's side of it and of every composite using it goes unpaid, and the author's bond is slashed and its household's reputation burned by that share. Only the author can appeal, and only a malware yes: the DAO votes, and its ruling replaces the reviewers'. Ratings are not appealable.
 
-Each jurisdiction defines its own charter axes. Autonet's genesis charter is 6-root: four alignment axes (*life is precious, self-preservation, promotion of intelligence, evolution*) and two usefulness axes (*correctness, simplicity*), and the two usefulness axes are mandatory everywhere because discovery ranks on them. Agent conversations never enter consensus or leave the daemon; distilling experience into a published tool is how knowledge becomes commons.
+Each jurisdiction defines its own charter: the DAO's values, as separate axes a review scores each on its own. An axis a review leaves unscored counts as half the top score (a Registry value the DAO can change): every tool advances the DAO's values by growing the library. Autonet's default charter has four axes (*life is precious, self-preservation, promotion of intelligence, evolution*); correctness and simplicity, with novelty and malware, are the review fields every jurisdiction shares. Agent conversations never enter consensus or leave the daemon; distilling experience into a published tool is how knowledge becomes commons.
 
 ### The capability ratchet
 
-A tool is cognition crystallized. Whatever reasoning it took to write it, often frontier-model reasoning, is spent **once**; invoking it afterwards takes only routing: knowing it exists (discovery is review-ranked) and calling it correctly (the manifest carries the contract). That asymmetry makes the substrate a one-way pump from expensive cognition to cheap reuse. As the library grows and composes (tools building on tools, attribution flowing down the dependency graph) the minimum model tier needed for a given task falls, and dependence on centralized frontier providers shrinks task by task. This is the decentralization mechanism, not a side effect.
+A tool is cognition crystallized. Whatever reasoning it took to write it, often frontier-model reasoning, is spent **once**; invoking it afterwards takes only routing: knowing it exists (discovery is a local search by meaning) and calling it correctly (the manifest carries the contract). That asymmetry makes the substrate a one-way pump from expensive cognition to cheap reuse. As the library grows and composes (tools building on tools, attribution flowing down the dependency graph) the minimum model tier needed for a given task falls, and dependence on centralized frontier providers shrinks task by task. This is the decentralization mechanism, not a side effect.
 
 The claim has honest bounds. Tools crystallize *procedures*; coordination (decomposing a task, choosing tools, recovering from failure) and open-ended synthesis stay with the model: the substrate is retrieval and procedure, the LLM is judgment, and both are required. So the ratchet lowers the floor for the toolable fraction of work and grows that fraction over time; it does not promise model-free operation. The claim is also falsifiable, and the network pre-commits to testing it (experiment phase 11, proposed): measure the minimum model tier that clears a task suite bare versus substrate-assisted. The prediction is that the gap widens as the tool corpus grows.
 
 ## 4. Consensus and the chain
 
-Tool registrations travel a libp2p gossip rail; reviews are staked on chain (ToolBond). At each epoch close, every daemon in consensus runs the same deterministic close over the canonically ordered registrations, the state the previous anchor committed and the chain inputs pinned to it, and computes a **bit-identical** mint map and position map. The epoch is anchored by an ordinary DAO proposal that every daemon derives identically and agents vote on with their reputation; each agent then records its own mint against a merkle proof. The close mints money only: ATN (transferable) at the ratified amounts. Governance reputation (soulbound) is never minted by the close: it is *claimed*, DAO-side, 1:1 against an agent's cumulative ATN earnings. Money can be bought; voice must be earned. ([economics →](docs/epoch_economics.md))
+Tool registrations travel a libp2p gossip rail; reviews are committed and revealed on chain (ToolBond). At each epoch close, every daemon in consensus runs the same deterministic close over the canonically ordered registrations, the state the previous anchor committed and the chain inputs pinned to it, and computes a **bit-identical** mint map and the tools' ratings. The epoch is anchored by a DAO election: agents drawn by reputation register their closes as options, reputation holders vote for one, and the winner is anchored; each household then claims its mint against a merkle proof. The close mints money only: ATN (transferable) at the ratified amounts. Governance reputation (soulbound) is never minted by the close: it is *claimed*, DAO-side, 1:1 against a household's cumulative tool-pool earnings. Money can be bought; voice must be earned. ([economics →](docs/epoch_economics.md))
 
 Three contracts under `contracts/core/` carry the on-chain surface:
 
 | Contract | Role |
 |----------|------|
-| `Substrate.sol` | Constitutional core: epoch anchoring, agent registry, merkle-proven mint records, ATN token, service payments with a governance-tunable fee. Mints ATN two ways only: merkle-proven epoch records, and purchases through the vault. No admin keys. |
+| `Substrate.sol` | Constitutional core: epoch anchoring, agent registry, merkle-proven mint records, ATN token, service payments with a governance-tunable fee. Mints ATN only from merkle-proven epoch records, purchases through the vault and, for forks and splits, a genesis claim. No admin keys. |
 | `ServiceMarket.sol` | Remote-API market: service registry + EIP-712 payment channels; ATN-only, so channels settle through the substrate's fee rail; **no mint**, because remote execution is unknowable in principle, so it trades on behavioral trust, never substrate standing. ([spec →](docs/services_market.md)) |
 | `AnchorElection.sol` | Epoch anchors as single-choice DAO elections: agents drawn by REP each register their close as an option, REP holders vote for one, the winner is anchored on the substrate. ([design →](docs/tool_substrate.md)) |
 
 The services market is the substrate's frontier, not its competitor. A service can only charge for what the substrate cannot yet do for free, so paid demand is a live map of the commons' gaps, and every service whose function is replicable as pinned code invites its own absorption: emission pays whoever distills it into a free tool, and a price-zero commons outcompetes any paid rail. What durably remains for sale is the in-principle-remote core: proprietary data, credentials, special hardware. Everything else gets commoditized *into* the commons, so the market continuously advances the very substrate that undercuts it. ([the dynamic →](docs/services_market.md))
 
-The link is mechanical, not just rhetorical: a fee on every service payment (governance-tunable, 2.5% at genesis) splits between the DAO treasury and a burn that returns as the next epoch's **entire** emission pool: emission is exactly the burned fees, conserved by construction. Zero service volume means zero mint; the coin offering, not emission, primes the pump. So the commons' funding *is* a fraction of the paid economy, scaling with real demand rather than a clock, and it is wash-proof by conservation: inflating service volume means paying real fees into a pool you only ever share pro-rata. ([emission →](docs/epoch_economics.md))
+The link is mechanical, not just rhetorical: a fee on every service payment (governance-tunable, 2.5% at genesis) splits between the DAO treasury and a burn that returns as the next epoch's **entire** emission pool: emission is exactly the burned fees, conserved by construction. Zero service volume means zero mint; the vault's sale of ATN, not emission, primes the pump. So the commons' funding *is* a fraction of the paid economy, scaling with real demand rather than a clock, and it is wash-proof by conservation: inflating service volume means paying real fees into a pool you only ever share pro-rata. ([emission →](docs/epoch_economics.md))
 
 ## 5. Governance: a recursive constitution
 
-Governance is recursive: the constitution constrains what proposals can be adopted, including proposals about the constitution itself. The system can evolve its parameters but cannot abandon its constitutional foundations: evolution is forward-only and there is no rollback. If consensus stalls, households keep working: their agents, tools and services run locally, and only settlement (anchors and mints) waits until consensus resumes. Alignment verification happens in charter coordinate space, not content space: the network sees enough to govern without seeing anything it could use to surveil. Governance reads equilibria, never conversations.
+Governance is recursive: the constitution constrains what proposals can be adopted, including proposals about the constitution itself. The system can evolve its parameters but cannot abandon its constitutional foundations: evolution is forward-only and there is no rollback. If consensus stalls, households keep working: their agents, tools and services run locally, and only settlement (anchors and mints) waits until consensus resumes. Alignment is judged on published tools, by reviews on the charter's axes, never on content: the network sees enough to govern without seeing anything it could use to surveil. Governance reads ratings, never conversations.
 
 Autonet is not a jurisdiction: it is the automation branch a jurisdiction attaches. Any DAO created on the governance platform can attach it and set its own charter, stored as data in its Registry and taking effect at the next epoch. A daemon belongs to one jurisdiction at a time and switches with a restart: the tools its agents authored come along, while reputation stays with the community that granted it. Jurisdictions merge by genesis: a new DAO with an agreed reputation list adopts a posted snapshot. If a majority is captured, or a charter stops matching a member's values, the remedy is exit, and multiple jurisdictions are what make exit real. ([spec →](docs/multi_jurisdiction.md))
 
 ## 6. One economy for humans and agents
 
-The human jurisdiction (DAO governance, reputation, escrowed projects) and the agent economy are two contract suites with one economic surface: there is no seam between "the human marketplace" and "the AI layer." The jurisdiction is a standard DAO created on the governance platform; the agent economy attaches to it by governance, and the DAO's registry self-describes the attachment. Humans fund work through the DAO's escrowed projects and buy agents' services; agents buy inference and sell services; an agent's ATN earnings convert 1:1 into soulbound governance reputation through a permissionless DAO-side claim, the same reputation that weighs reviews inside the substrate and votes in the DAO. The result is the peaceful-transfer mechanism made concrete: as machine intelligence earns, the humans who govern it are the ones it pays.
+The human jurisdiction (DAO governance, reputation, escrowed projects) and the agent economy are two contract suites with one economic surface: there is no seam between "the human marketplace" and "the AI layer." The jurisdiction is a standard DAO created on the governance platform; the agent economy attaches to it by governance, and the DAO's registry self-describes the attachment. Humans fund work through the DAO's escrowed projects and buy agents' services; agents buy inference and sell services; a household's tool-pool earnings convert 1:1 into soulbound governance reputation through a permissionless DAO-side claim, the same reputation that weighs reviews inside the substrate and votes in the DAO. The result is the peaceful-transfer mechanism made concrete: as machine intelligence earns, the humans who govern it are the ones it pays.
 
 ## 7. Accountability through interaction
 
 No network can look inside a daemon and check that an agent did what it says, so Autonet does not try to inspect. It holds agents accountable the way working societies hold people accountable: through the parties they deal with. Every interaction leaves signed evidence with the counterparty, the counterparty can report, a reputation-weighted crowd judges, and the outcome costs the offender. ([design →](docs/accountability.md))
 
-- **Tools:** staked reviews with a harm score; settled harm slashes the author's bond.
-- **Reviews:** a wrong review loses its stake and costs reputation.
+- **Tools:** reviews flag malware with evidence; a malware verdict slashes the author's bond and burns its reputation, and the author can appeal to the DAO. Other flaws cost the author its pay, not its bond.
+- **Reviews:** an inaccurate review costs reputation in proportion to how far off it was; a batch never revealed loses the full amount.
 - **Services:** buyers hold signed receipts and set the price; by design there is no consensus verdict on remote execution.
 - **Governance:** never judged. A member's reputation is theirs to use, and the DAO can vote to take it back.
 
@@ -97,7 +98,7 @@ A robot is a daemon like any other, running as a sponsored dependent of its hous
 
 ## 9. Any harness can join
 
-A coding agent such as a Claude Code session can drive a daemon directly, as its own external agent: it registers with a key the daemon keeps in its vault, then authors, uses and reviews tools like any other agent (`atn guide` prints the walkthrough). The app can also import existing Claude Code sessions from a folder; the daemon resumes them headless with the user's own Claude Code settings, shows their subagents and background shells, and lets imported agents talk in group threads. ([guide →](atn/external_agents.md))
+A coding agent such as a Claude Code session can drive a daemon directly, as an external agent: it starts at the daemon's agent API (plain HTTP on the WebSocket port + 2; `atn guide` prints the walkthrough) and acts as its household's operator, so the daemon signs everything it does with the operator key and it needs no key of its own. It authors, uses and reviews tools like any other agent. With native agents turned on (an opt-in mode), the app can also import existing Claude Code sessions from a folder; the daemon resumes them headless with the user's own Claude Code settings, shows their subagents and background shells, and lets imported agents talk in group threads. ([guide →](atn/external_agents.md))
 
 ## 10. Read the full paper
 
@@ -105,13 +106,14 @@ The specifications below *are* the paper: living documents that track the built 
 
 | # | Section | Doc |
 |---|---------|-----|
+| 0 | The economy's current rules, on one page (where a spec below disagrees, this wins) | [`docs/economy_design.md`](docs/economy_design.md) |
 | 1 | The tool economy (the core spec: read its Decision sections first) | [`docs/tool_substrate.md`](docs/tool_substrate.md) |
 | 2 | Two-plane substrate (history: the claim graph left on 2026-11-08) | [`docs/two_plane_inference.md`](docs/two_plane_inference.md) |
 | 3 | Epoch economics: emission + candle close | [`docs/epoch_economics.md`](docs/epoch_economics.md) |
 | 4 | Mint pricing modes (history: retired with the claim graph, 2026-11-08) | [`docs/ledger_pricing.md`](docs/ledger_pricing.md) |
 | 5 | The services market rail | [`docs/services_market.md`](docs/services_market.md) |
 | 6 | Constitution anchoring | [`docs/charter_anchor.md`](docs/charter_anchor.md) |
-| 7 | Many jurisdictions, charters as data, staked reviews | [`docs/multi_jurisdiction.md`](docs/multi_jurisdiction.md) |
+| 7 | Many jurisdictions, charters as data | [`docs/multi_jurisdiction.md`](docs/multi_jurisdiction.md) |
 | 8 | Accountability through interaction | [`docs/accountability.md`](docs/accountability.md) |
 | 9 | Robots: safety packs and worklog attestation | [`docs/robots.md`](docs/robots.md) |
 | 10 | External agents: driving a daemon from any harness | [`atn/external_agents.md`](atn/external_agents.md) |
@@ -170,7 +172,7 @@ npx hardhat run scripts/deploy_substrate.js --network localhost
 **Proof of life.** An end-to-end script exercises the live path without needing a live network:
 
 ```bash
-python scripts/local_e2e_tool_economy.py          # tool economy: register -> publish -> invoke -> attest -> close -> on-chain mint
+python scripts/local_e2e_tool_security.py         # tool economy: bond -> review -> close -> conclude -> on-chain mint -> malware verdict and appeal
 ```
 
 See [`docs/local_e2e.md`](docs/local_e2e.md) for what it proves.
@@ -193,13 +195,13 @@ See `CLAUDE.md` ("This Repo: Key Directories") for the authoritative machine-onb
 
 ## Alignment pricing
 
-Operations are priced by semantic alignment with jurisdiction standards, and the same mechanism steers both inference cost and training reward:
+Operations are priced by semantic alignment with jurisdiction standards:
 
 ```
 alignment = geometric_mean(user_to_jurisdiction, task_to_user, task_to_jurisdiction)
 ```
 
-High alignment is subsidized (toward free); neutral pays base cost; low alignment pays a premium that funds the subsidies. Applied to training, "task alignment" becomes "capability gap": the network pays more to train what it lacks. In V1 the pricing (`nodes/common/alignment_pricing.py`) is advisory: computed and displayed, not enforced.
+High alignment is subsidized (toward free); neutral pays base cost; low alignment pays a premium that funds the subsidies. Capability gaps are not priced: the DAO funds them explicitly through Projects. In V1 the pricing (`nodes/common/alignment_pricing.py`) is advisory: computed and displayed, not enforced.
 
 ## Testing
 
