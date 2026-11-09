@@ -529,18 +529,23 @@ whole run. About two minutes after the compile.
 9. **Close**: `read_voice_state` pinned to anchor 2 feeds
    `federated_epoch_close`: all three conclude ({clean 0, bad 6000, 6000}
    bps), each a third of the 5 ATN pool by its REP; the clean author side is
-   60% x V x C x S (0.327746) x N; the bad tools' author sides are held. The
-   blob and the agentMintRoot (mint and concluded leaves) are anchored and
-   every claimant claims through `AuthoritativeChainSubmitter`.
+   60% x V x C x S (0.327746) x N; the bad tools' author sides are fixed in
+   ATN and reserved outside the carry (0.074535 ATN for one, nothing for the
+   one whose correctness mean is below 0). The blob and the agentMintRoot
+   (mint and concluded leaves) are anchored and every claimant claims
+   through `AuthoritativeChainSubmitter`.
 10. **Verdicts**: `VerdictSubmitter` concludes all three from the anchored
     leaves; only the author can register an appeal (a reviewer reverts
     NotAuthor), which holds the verdict until the proposal can land; the DAO
     rules one bad tool malware (the whole bond slashed, the author's REP
     burned) and clears the other; rev-1's driver claims the slashed bond
     through the service rail.
-11. **Next close**: pinned after the rulings, the cleared tool's held author
-    side is paid from the carried pool; the malware one's stays unminted.
-12. **Owner surfaces**: WS `tool_security_status` and `review_batches`.
+11. **Next close**: pinned after the rulings, the cleared tool's author is
+    paid exactly the amount its conclusion reserved, outside the pool,
+    which carries over untouched.
+12. **Owner surfaces**: WS `tool_security_status`, `tool_round_reviews`
+    (both households' reviews of a tool, whose evidence hash daemon B
+    fetches) and `review_batches`.
 
 Not covered: anchoring through a real DAO proposal (the governor is an EOA
 here), forfeit of a missed reveal, a verdict settled by the reviewers'

@@ -968,15 +968,31 @@ async def amain() -> int:
                   f"{k}: malware verdict, author side held, reviewers paid")
             held = close1["tool_rounds"]["tools"][tools[k]].get("held")
             check(held and held["on"] == [tools[k]]
-                  and close_to(held["weight"], m["weight"] * 0.6, 1e-9),
-                  f"{k}: 60% of its weight waits for the vote")
+                  and held["amounts"] == close1["reserved_mint"].get(tools[k], {}),
+                  f"{k}: its author side waits for the vote, reserved "
+                  f"{sum(held['amounts'].values()):.6f} ATN")
+        # title_case would pay its author 60% of its share x V x C x S x N:
+        # fixed in ATN now, reserved until the DAO's word.
+        share_b = pool * tm[tools["mal_b"]]["weight"] / sum(tm[d]["weight"]
+                                                            for d in tools.values())
+        score_b = hundredths_mean([(300, 0.2), (200, 0.8)]) * 0.5 * (
+            0.5 + 0.5 * hundredths_mean([(300, 0.5), (200, 0.6)]))
+        n_b = hundredths_mean([(300, 0.4), (200, 0.5)])
+        reserved_b = close1["reserved_mint"][tools["mal_b"]]
+        check(set(reserved_b) == {author}
+              and close_to(reserved_b[author], share_b * 0.6 * score_b * n_b, 1e-6),
+              f"title_case: {reserved_b[author]:.6f} ATN reserved for its author")
+        check(close1["reserved_mint"].get(tools["mal_a"], {}) == {},
+              "lower_case: nothing reserved (its correctness mean is below 0)")
         am = close1["agent_mint"]
         check(set(am) == {author, r1, r2}, "mint: the author and both reviewers")
         minted = sum(am.values())
         carry = close1["tool_rounds"]["pool_carry"]
         check(minted <= pool and carry == round(pool * ATN) - sum(round(v * ATN)
-                                                                  for v in am.values()),
-              f"minted {minted:.6f} of {pool}; {carry / ATN:.6f} ATN carried over")
+                                                                  for v in am.values())
+              - round(reserved_b[author] * ATN),
+              f"minted {minted:.6f} of {pool}; {carry / ATN:.6f} ATN carried over, "
+              f"the reservation outside it")
         check(UNMINTED not in am, "no unminted sentinel in the claim map")
 
         # Anchor e3 with the close's mint tree and concluded leaves.
@@ -1129,20 +1145,17 @@ async def amain() -> int:
         check(set(tm2) == {tools["mal_b"]} and tm2[tools["mal_b"]].get("released"),
               "only title_case pays: its held author side is released")
         mb = tm2[tools["mal_b"]]
-        want = hundredths_mean([(300, 0.2), (200, 0.8)]) * 0.5 * (
-            0.5 + 0.5 * hundredths_mean([(300, 0.5), (200, 0.6)]))
-        n_b = hundredths_mean([(300, 0.4), (200, 0.5)])
-        check(close_to(mb["score"], want, 1e-9)
-              and close_to(mb["author_mint"], close2["emission_pool"] * want * n_b, 1e-6),
-              f"released by its score {mb['score']:.4f}, the author keeping N {n_b:.2f}")
+        check(close2["agent_mint"] == reserved_b
+              and close_to(mb["author_mint"], reserved_b[author], 1e-12),
+              f"the release pays exactly the conclusion's {reserved_b[author]:.6f} ATN")
         t2 = close2["tool_rounds"]["tools"]
         check("held" not in t2[tools["mal_a"]] and "held" not in t2[tools["mal_b"]],
               "nothing waits any more (lower_case's author side stays unminted)")
         check(close2["concluded"] == {}, "no new conclusion")
         am2 = close2["agent_mint"]
-        check(close_to(close2["emission_pool"], pool2 + carry / ATN, 1e-9),
-              f"its pool: {pool2} ATN burned since (the bond share's fee) + "
-              f"{carry / ATN:.6f} carried in")
+        check(close2["tool_rounds"]["pool_carry"] == round(pool2 * ATN) + carry,
+              f"this close's pool ({pool2} ATN, the bond share's fee) and the "
+              f"{carry / ATN:.6f} carried in stay unspent")
         check(set(am2) == {agents["author-1"].lower()}, "only the author is paid")
         blob = encode_agent_mint_blob(am2)
         cid = resolver.put(blob)
@@ -1160,7 +1173,8 @@ async def amain() -> int:
                                          rpc_url=RPC_URL, chain_id=CHAIN_ID,
                                          private_key=keys["author-1"]),
             web3=w3, substrate_abi=sub_abi).submit_for_epoch("e5")
-        check(res.success and atn_of("author-1") - before == res.contribution_scaled > 0,
+        check(res.success and atn_of("author-1") - before == res.contribution_scaled
+              == round(reserved_b[author] * ATN),
               f"author-1 claims {res.contribution_scaled / ATN:.6f} ATN for title_case")
         check(substrate.functions.networkMintTotal().call()
               <= substrate.functions.mintPoolTotal().call(),
@@ -1183,6 +1197,24 @@ async def amain() -> int:
                                        "digest": tools["mal_a"]}, owner)
         check(r["ok"] and r["result"]["status"]["stake"] == 0,
               "WS tool_security_status shows lower_case's bond slashed to 0")
+        # Every household's reviews of a tool, with the evidence hashes the
+        # app passes to fetch_evidence (here daemon B reads rev-1's flag).
+        srv_b = WebSocketBridge(rt_b)
+        r = await srv_b._handle_message({"type": "tool_round_reviews", "msg_id": "3",
+                                         "digest": tools["mal_a"]}, owner)
+        rows = r["result"]["reviews"] if r.get("ok") else []
+        by = {row["reviewer"]: row for row in rows}
+        f1 = by.get(agents["rev-1"].lower(), {})
+        check(r.get("ok") and set(by) == {agents["rev-1"].lower(), agents["rev-2"].lower()}
+              and f1.get("malware") is True and f1.get("correctness") == -0.8
+              and f1.get("household") == agents["rev-1"].lower()
+              and f1.get("weight") == 300 * E18 and f1.get("finalized")
+              and f1.get("accuracy") is not None,
+              "WS tool_round_reviews lists both households' reviews of lower_case")
+        ev = await execute_tool("fetch_evidence", {"evidence_hash": f1.get("evidence_hash", "")},
+                                rt_b, caller_id="rev-2")
+        check(ev.get("found") and "os.system" in str(ev["evidence"].get("evidence")),
+              "and the evidence of rev-1's flag is fetched from its hash")
         r = await srv._handle_message({"type": "review_batches", "msg_id": "2"}, owner)
         rows = r["result"]["batches"]
         check(r["ok"] and rows and rows[0]["sealed_reveal"]["salt"],
