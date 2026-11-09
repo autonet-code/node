@@ -265,35 +265,38 @@ def _get_logs(event, w3, address: str, to_block: int,
 
 
 # ---------------------------------------------------------------------------
-# ToolBond review snapshot (docs/multi_jurisdiction.md decision 10).
+# ToolBond review snapshot (Decision 2026-11-09; trustless-contracts f633bc1).
 #
-# ToolBond (trustless-contracts 448023a) is the single source of tool
-# ratings: staked reviews, committed and revealed per agent per epoch, settle
-# per tool round by REP weight. The close reads, pinned to the SAME snapshot
-# block as the voice weights:
+# ToolBond is the single source of tool ratings: reviews committed and
+# revealed per agent per epoch, each with the four fixed fields
+# (correctness, simplicity, novelty, malware) and the charter axes it
+# scored. The close reads, pinned to the SAME snapshot block as the voice
+# weights:
 #
-#   - each tool's rating per charter axis and its harm over every round
-#     finalized at or before the block (what toolRating / toolHarm return at
-#     that block), and
+#   - each tool's sums over every round finalized at or before the block,
+#     per fixed field and per charter axis, and
 #   - the rounds finalized in the window since the anchor before it, with
-#     each review's stake, accuracy and the axes it scored, for the reviewer
-#     share of the tool's mint.
+#     each review's accuracy, for the tool's conclusion and reviewer share,
+#   - the bonds, and each tool's malware verdict as ToolBond settled it.
 #
 # An eth_call at the anchor block needs archive state, so the state is
-# REBUILT from ToolBond's logs up to the snapshot block, like the owner map:
-# a round's per-axis sums and masses are the sums of its Reviewed events
-# (the contract's _record writes exactly these), and a round joins the
-# tool's rating when its Finalized event lands. Two facts the logs do not
-# carry are read from immutable views at the latest block: an epoch's axis
-# ids and REP supply (epochInfo, fixed once the epoch starts, which precedes
-# any reveal) and a finalized review's accuracy (reviewAt, fixed once the
-# round is Done). Any daemon, archive or not, derives the same snapshot.
+# REBUILT from ToolBond's logs up to the snapshot block, like the owner map.
+# A round's sums are those of its Reviewed events, exactly as ToolBond's
+# _tally adds them (an unscored charter axis at the epoch's unscoredBps with
+# the review's weight; ReviewUnweighted takes a review's weight back out),
+# and a round joins the tool's sums when its Finalized event lands. Two
+# facts the logs may not carry are read from immutable views at the latest
+# block: an epoch's axis ids, supply and unscored default (epochInfo, fixed
+# once the epoch starts) and a finalized review's accuracy (reviewAt, fixed
+# once the round is Done). Any daemon, archive or not, derives the same
+# snapshot.
 # ---------------------------------------------------------------------------
 
 REVIEWER_SHARE_BPS_DEFAULT = 4000
+UNSCORED_BPS_DEFAULT = 5000
 _NO_SCORE = -128
-_NO_HARM = 255
 _UNINFORMATIVE = 2 ** 64 - 1
+_FIELD_NAMES = ("correctness", "simplicity", "novelty", "malware")
 
 
 def _ev(name: str, fields: list) -> Dict[str, Any]:
@@ -306,50 +309,51 @@ def _ev(name: str, fields: list) -> Dict[str, Any]:
 
 _TOOL_BOND_EVENTS_ABI = [
     _ev("Reviewed", [("digest", "bytes32", True), ("epoch", "uint256", True),
-                     ("reviewer", "address", True), ("scores", "bytes", False),
-                     ("harm", "uint8", False), ("stake", "uint256", False),
+                     ("reviewer", "address", True), ("correctness", "int8", False),
+                     ("simplicity", "uint8", False), ("novelty", "uint8", False),
+                     ("malware", "uint8", False), ("scores", "bytes", False),
                      ("weight", "uint256", False), ("evidenceHash", "bytes32", False)]),
+    _ev("ReviewUnweighted", [("digest", "bytes32", True), ("epoch", "uint256", True),
+                             ("reviewer", "address", True)]),
     _ev("Finalized", [("digest", "bytes32", True), ("epoch", "uint256", True),
-                      ("harm", "uint256", False), ("bondSlashed", "uint256", False),
-                      ("lossPool", "uint256", False), ("repPool", "uint256", False)]),
-    _ev("Overruled", [("digest", "bytes32", True), ("epoch", "uint256", True),
-                      ("harm", "uint256", False)]),
-    _ev("HarmSettled", [("digest", "bytes32", True), ("epoch", "uint256", True),
-                        ("harm", "uint256", False), ("appealEnds", "uint48", False)]),
-    # Added in trustless-contracts baab631; older deploys simply emit none
-    # and the views below fill in.
+                      ("repPool", "uint256", False)]),
     _ev("ReviewSettled", [("digest", "bytes32", True), ("epoch", "uint256", True),
-                          ("reviewer", "address", True), ("accuracy", "uint256", False),
-                          ("harmAccuracy", "uint256", False)]),
+                          ("reviewer", "address", True), ("accuracy", "uint256", False)]),
     _ev("Bonded", [("digest", "bytes32", True), ("author", "address", True),
                     ("amount", "uint256", False), ("stake", "uint256", False)]),
     _ev("UnbondRequested", [("digest", "bytes32", True), ("availableAt", "uint256", False)]),
     _ev("Unbonded", [("digest", "bytes32", True), ("author", "address", True),
                      ("amount", "uint256", False), ("bounty", "uint256", False)]),
-
     _ev("EpochStarted", [("epoch", "uint256", True), ("charterHash", "bytes32", False),
                          ("axisIds", "bytes32[]", False), ("snapshot", "uint48", False),
-                         ("supply", "uint256", False)]),
+                         ("supply", "uint256", False), ("unscoredBps", "uint256", False)]),
     _ev("ParamsSet", [("minStake", "uint256", False), ("revealWindow", "uint256", False),
                       ("degradeBps", "uint256", False), ("authorSlashBps", "uint256", False),
-                      ("unbondDelay", "uint256", False), ("reviewerShareBps", "uint256", False),
-                      ("harmWeightBps", "uint256", False),
-                      ("harmQuorumBps", "uint256", False)]),
+                      ("unbondDelay", "uint256", False), ("reviewerShareBps", "uint256", False)]),
+    _ev("Concluded", [("digest", "bytes32", True), ("anchorIndex", "uint256", False),
+                      ("malwareShare", "uint256", False), ("appealEnds", "uint48", False)]),
+    _ev("MalwareRuled", [("digest", "bytes32", True), ("malware", "bool", False)]),
+    _ev("MalwareSettled", [("digest", "bytes32", True), ("malware", "bool", False),
+                           ("bondSlashed", "uint256", False), ("repBurned", "uint256", False)]),
 ]
 
 _REVIEW_COMPONENTS = [
-    {"name": "reviewer", "type": "address"}, {"name": "harm", "type": "uint8"},
-    {"name": "claimed", "type": "bool"}, {"name": "accuracy", "type": "uint64"},
-    {"name": "scores", "type": "bytes16"}, {"name": "stake", "type": "uint128"},
-    {"name": "weight", "type": "uint128"}, {"name": "harmAccuracy", "type": "uint64"},
+    {"name": "reviewer", "type": "address"}, {"name": "correctness", "type": "int8"},
+    {"name": "simplicity", "type": "uint8"}, {"name": "novelty", "type": "uint8"},
+    {"name": "malware", "type": "uint8"}, {"name": "claimed", "type": "bool"},
+    {"name": "bountied", "type": "bool"}, {"name": "bondClaimed", "type": "bool"},
+    {"name": "accuracy", "type": "uint64"}, {"name": "weight", "type": "uint128"},
+    {"name": "scores", "type": "bytes16"},
 ]
+_REVIEW_ACCURACY = 8   # index of accuracy in the reviewAt tuple
 
 _TOOL_BOND_VIEWS_ABI = [
     {"name": "epochInfo", "type": "function", "stateMutability": "view",
      "inputs": [{"name": "epoch", "type": "uint256"}],
      "outputs": [{"name": "started", "type": "bool"}, {"name": "charterHash", "type": "bytes32"},
                  {"name": "axisIds", "type": "bytes32[]"}, {"name": "snapshot", "type": "uint48"},
-                 {"name": "supply", "type": "uint256"}, {"name": "revealDeadline", "type": "uint256"}]},
+                 {"name": "supply", "type": "uint256"}, {"name": "revealDeadline", "type": "uint256"},
+                 {"name": "unscoredBps", "type": "uint256"}]},
     {"name": "reviewAt", "type": "function", "stateMutability": "view",
      "inputs": [{"name": "digest", "type": "bytes32"}, {"name": "epoch", "type": "uint256"},
                 {"name": "i", "type": "uint256"}],
@@ -364,6 +368,27 @@ def _hex32(value: Any) -> str:
 
 def _int8(b: int) -> int:
     return b - 256 if b > 127 else b
+
+
+def _tdiv(a: int, b: int) -> int:
+    """Integer division truncating toward zero, as Solidity's ``/``."""
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b > 0) else -q
+
+
+def review_values(review: Dict[str, Any], n_axes: int,
+                  unscored_bps: int) -> List[int]:
+    """A review's value on each field then each charter axis, in ToolBond's
+    units (hundredths of a point x 100): correctness, simplicity and novelty
+    x 100, a malware yes 10000, a charter score x 100, an unscored axis the
+    epoch's unscored bps (ToolBond._value)."""
+    out = [int(review["correctness"]) * 100, int(review["simplicity"]) * 100,
+           int(review["novelty"]) * 100, int(review["malware"]) * 10000]
+    scores = bytes(review.get("scores") or b"")
+    for k in range(n_axes):
+        s = _int8(scores[k]) if k < len(scores) else _NO_SCORE
+        out.append(int(unscored_bps) if s == _NO_SCORE else s * 100)
+    return out
 
 
 def tool_review_snapshot_from_logs(
@@ -388,19 +413,19 @@ def tool_review_snapshot_from_logs(
     ``records``: ``{"block", "index", "event", "args"}`` dicts (any order;
     folded in (block, logIndex) order). ``epochs``: epoch -> {"axis_ids":
     [hex keccak of each charter axis id, in that epoch's order], "supply":
-    int}. ``accuracies``: (digest, epoch, review index) -> accuracy (1e18
-    scale, None when uninformative), needed only for rounds finalized in
-    (since_block, block]. ``axis_ids``: the active charter's axis ids; a
-    ToolBond axis key outside it is dropped (a removed axis).
+    int, "unscored_bps": int}. ``accuracies``: (digest, epoch, review
+    index) -> accuracy (1e18 scale), needed only for rounds finalized in
+    (since_block, block] without ReviewSettled events. ``axis_ids``: the
+    active charter's axis ids; a ToolBond axis key outside it is dropped (a
+    removed axis).
 
-    Returns::
-
-      {"reviewer_share_bps": int,
-       "tools": {digest: {"axes": {axis_id: {"sum": int, "mass": int}},
-                          "harm": {"sum": int, "mass": int}}},
-       "rounds": {digest: [{"epoch", "supply", "prior_mass": {axis_id|"harm": int},
-                            "reviews": [{"reviewer", "stake", "accuracy",
-                                         "axes": [axis ids scored], "harm": bool}]}]}}
+    Returns the shape ``federated_reconcile._normalize_review_snapshot``
+    documents: per-tool and per-round ``fields`` / ``axes`` cells
+    (``{"sum", "mass"}``, sum / mass / 100 = the mean; malware's is the yes
+    share), the window's rounds with each review's accuracy, ``bonds``,
+    ``min_stake``, ``reviewer_share_bps`` and ``verdicts``: digest ->
+    ``{"concluded": bool, "ruling": True | False | None (the DAO's),
+    "settled": True | False | None (ToolBond's final verdict)}``.
     """
     from eth_utils import keccak
 
@@ -409,9 +434,8 @@ def tool_review_snapshot_from_logs(
     bps: Optional[int] = None
     reviews: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
     finalized: List[Tuple[str, int, int]] = []   # (digest, epoch, block), in order
-    overruled: Dict[Tuple[str, int], int] = {}    # DAO's harm 0..100 for a round
-    cooling: List[Tuple[str, int]] = []           # harm settled, appeal window open
     bonds: Dict[str, Dict[str, Any]] = {}         # digest -> {author, stake, unbonding}
+    verdicts: Dict[str, Dict[str, Any]] = {}
     min_stake = 0
     settled: Dict[Tuple[str, int, str], int] = {}  # (digest, epoch, reviewer) -> accuracy
     epochs = dict(epochs)
@@ -433,112 +457,103 @@ def tool_review_snapshot_from_logs(
                 bonds[_hex32(a["digest"])]["unbonding"] = True
         elif name == "Unbonded":
             bonds.pop(_hex32(a["digest"]), None)
-
         elif name == "Reviewed":
             reviews.setdefault((_hex32(a["digest"]), int(a["epoch"])), []).append({
                 "reviewer": str(a["reviewer"]).lower(),
-                "scores": bytes(a["scores"]), "harm": int(a["harm"]),
-                "stake": int(a["stake"]), "weight": int(a["weight"]),
+                "correctness": int(a["correctness"]), "simplicity": int(a["simplicity"]),
+                "novelty": int(a["novelty"]), "malware": int(a["malware"]),
+                "scores": bytes(a["scores"]), "weight": int(a["weight"]),
             })
+        elif name == "ReviewUnweighted":
+            who = str(a["reviewer"]).lower()
+            for v in reviews.get((_hex32(a["digest"]), int(a["epoch"])), []):
+                if v["reviewer"] == who:
+                    v["weight"] = 0
         elif name == "Finalized":
             finalized.append((_hex32(a["digest"]), int(a["epoch"]), int(r["block"])))
-            b = bonds.get(_hex32(a["digest"]))
-            if b is not None:
-                b["stake"] = max(0, b["stake"] - int(a["bondSlashed"]))
-        elif name == "Overruled":
-            overruled[(_hex32(a["digest"]), int(a["epoch"]))] = int(a["harm"])
-        elif name == "HarmSettled":
-            cooling.append((_hex32(a["digest"]), int(a["epoch"])))
         elif name == "ReviewSettled":
             settled[(_hex32(a["digest"]), int(a["epoch"]),
                      str(a["reviewer"]).lower())] = int(a["accuracy"])
         elif name == "EpochStarted":
             epochs.setdefault(int(a["epoch"]), {
                 "axis_ids": [_hex32(x) for x in a["axisIds"]],
-                "supply": int(a["supply"])})
+                "supply": int(a["supply"]),
+                "unscored_bps": int(a["unscoredBps"])})
+        elif name == "Concluded":
+            verdicts.setdefault(_hex32(a["digest"]), {
+                "concluded": False, "ruling": None, "settled": None})["concluded"] = True
+        elif name == "MalwareRuled":
+            verdicts.setdefault(_hex32(a["digest"]), {
+                "concluded": True, "ruling": None, "settled": None})["ruling"] = bool(a["malware"])
+        elif name == "MalwareSettled":
+            verdicts.setdefault(_hex32(a["digest"]), {
+                "concluded": True, "ruling": None, "settled": None})["settled"] = bool(a["malware"])
+            b = bonds.get(_hex32(a["digest"]))
+            if b is not None:
+                b["stake"] = max(0, b["stake"] - int(a["bondSlashed"]))
 
     excluded = {str(a).lower() for a in (excluded_reviewers or ())}
+
+    def _cells(revs: List[Dict[str, Any]], keys: List[str],
+               unscored: int) -> Tuple[Dict[str, Dict[str, int]], Dict[str, Dict[str, int]]]:
+        fields = {n: [0, 0] for n in _FIELD_NAMES}
+        axes: Dict[str, List[int]] = {}
+        for v in revs:
+            w = 0 if v["reviewer"] in excluded else int(v["weight"])
+            if w <= 0:
+                continue
+            vals = review_values(v, len(keys), unscored)
+            for i, name in enumerate(_FIELD_NAMES):
+                fields[name][0] += _tdiv(w * vals[i], 100)
+                fields[name][1] += w
+            for k, key in enumerate(keys):
+                axis = key_to_axis.get(key)
+                if axis is None:
+                    continue
+                cell = axes.setdefault(axis, [0, 0])
+                cell[0] += _tdiv(w * vals[4 + k], 100)
+                cell[1] += w
+        return ({n: {"sum": s, "mass": m} for n, (s, m) in fields.items() if m > 0},
+                {a: {"sum": s, "mass": m} for a, (s, m) in sorted(axes.items()) if m > 0})
+
     tools: Dict[str, Dict[str, Any]] = {}
     rounds: Dict[str, List[Dict[str, Any]]] = {}
     for digest, epoch, fin_block in finalized:
         revs = reviews.get((digest, epoch), [])
         info = epochs.get(epoch) or {}
         keys = [str(k).lower().removeprefix("0x") for k in (info.get("axis_ids") or [])]
-        sums: Dict[str, List[int]] = {}
-        h_sum = h_mass = 0
-        for v in revs:
-            w = 0 if v["reviewer"] in excluded else v["weight"]
-            for i, b in enumerate(v["scores"][:len(keys)]):
-                s = _int8(b)
-                axis = key_to_axis.get(keys[i])
-                if s == _NO_SCORE or w == 0 or axis is None:
-                    continue
-                cell = sums.setdefault(axis, [0, 0])
-                cell[0] += w * s
-                cell[1] += w
-            if v["harm"] != _NO_HARM and w > 0:
-                h_sum += w * v["harm"]
-                h_mass += w
-        if (digest, epoch) in overruled:
-            # The DAO's ruling replaces the round's harm, at the same REP
-            # mass (as ToolBond.toolHarm counts it since baab631).
-            h_sum = h_mass * overruled[(digest, epoch)]
-        tool = tools.setdefault(digest, {"axes": {}, "harm": {"sum": 0, "mass": 0}})
-        prior = {a: int(c["mass"]) for a, c in tool["axes"].items()}
-        prior["harm"] = int(tool["harm"]["mass"])
+        unscored = int(info.get("unscored_bps", UNSCORED_BPS_DEFAULT))
+        r_fields, r_axes = _cells(revs, keys, unscored)
         if fin_block > int(since_block):
             entries = []
             for i, v in enumerate(revs):
-                scored = [key_to_axis[keys[j]] for j, b in enumerate(v["scores"][:len(keys)])
-                          if _int8(b) != _NO_SCORE and keys[j] in key_to_axis]
                 acc = settled.get((digest, epoch, v["reviewer"]),
                                   accuracies.get((digest, epoch, i)))
                 entries.append({
-                    "reviewer": v["reviewer"], "stake": v["stake"],
+                    "reviewer": v["reviewer"],
                     "accuracy": None if acc is None or int(acc) == _UNINFORMATIVE else int(acc),
-                    "axes": sorted(scored), "harm": v["harm"] != _NO_HARM,
                 })
             rounds.setdefault(digest, []).append({
                 "epoch": epoch, "supply": int(info.get("supply") or 0),
-                "prior_mass": dict(sorted(prior.items())), "reviews": entries,
+                "fields": r_fields, "axes": r_axes, "reviews": entries,
             })
-        for axis, (sm, ms) in sums.items():
-            cell = tool["axes"].setdefault(axis, {"sum": 0, "mass": 0})
-            cell["sum"] += sm
-            cell["mass"] += ms
-        tool["harm"]["sum"] += h_sum
-        tool["harm"]["mass"] += h_mass
-
-    # Harm settled but still in its appeal window (Decision 2026-10-27):
-    # containment acts on it at once, since containment is reversible (an
-    # overrule replaces it); ratings, mint and slashes wait for Finalized.
-    # Kept out of "tools", so the close's inputs do not change.
-    done = {(d, e) for d, e, _b in finalized}
-    cooling_harm: Dict[str, Dict[str, int]] = {}
-    for digest, epoch in cooling:
-        if (digest, epoch) in done:
-            continue
-        h_sum = h_mass = 0
-        for v in reviews.get((digest, epoch), []):
-            w = 0 if v["reviewer"] in excluded else v["weight"]
-            if v["harm"] != _NO_HARM and w > 0:
-                h_sum += w * v["harm"]
-                h_mass += w
-        if (digest, epoch) in overruled:
-            h_sum = h_mass * overruled[(digest, epoch)]
-        cell = cooling_harm.setdefault(digest, {"sum": 0, "mass": 0})
-        cell["sum"] += h_sum
-        cell["mass"] += h_mass
+        tool = tools.setdefault(digest, {"fields": {}, "axes": {}})
+        for group, cells in (("fields", r_fields), ("axes", r_axes)):
+            for name, cell in cells.items():
+                t = tool[group].setdefault(name, {"sum": 0, "mass": 0})
+                t["sum"] += cell["sum"]
+                t["mass"] += cell["mass"]
 
     return {
         "reviewer_share_bps": int(default_bps if bps is None else bps),
-        "tools": {d: {"axes": dict(sorted(t["axes"].items())), "harm": dict(t["harm"])}
+        "tools": {d: {"fields": dict(sorted(t["fields"].items())),
+                      "axes": dict(sorted(t["axes"].items()))}
                   for d, t in sorted(tools.items())},
         "rounds": {d: rs for d, rs in sorted(rounds.items())},
-        "cooling_harm": dict(sorted(cooling_harm.items())),
         # What may mint (Decision 2026-10-27): tools bonded at the block.
         "bonds": dict(sorted(bonds.items())),
         "min_stake": int(min_stake),
+        "verdicts": dict(sorted(verdicts.items())),
     }
 
 
@@ -549,9 +564,9 @@ def read_tool_review_snapshot(
     start_block: Optional[int] = None,
 ) -> Dict[str, Any]:
     """ToolBond review snapshot as of ``block`` (the snapshot anchor's
-    block), with the reviewer-share rounds finalized after ``since_block``
-    (the anchor before it). Raises on RPC failure, like the rest of the
-    voice read: the driver keeps its previous snapshot."""
+    block), with the rounds finalized after ``since_block`` (the anchor
+    before it). Raises on RPC failure, like the rest of the voice read: the
+    driver keeps its previous snapshot."""
     from web3 import Web3
 
     if axis_ids is None:
@@ -574,18 +589,17 @@ def read_tool_review_snapshot(
     epochs: Dict[int, Dict[str, Any]] = {}
     review_counts: Dict[Tuple[str, int], int] = {}
     window: List[Tuple[str, int]] = []
+    started = {int(x["args"]["epoch"]) for x in records if x["event"] == "EpochStarted"}
     for r in records:
         if r["event"] == "Reviewed":
             k = (_hex32(r["args"]["digest"]), int(r["args"]["epoch"]))
             review_counts[k] = review_counts.get(k, 0) + 1
         elif r["event"] == "Finalized":
             e = int(r["args"]["epoch"])
-            if e not in epochs and not any(
-                    x["event"] == "EpochStarted" and int(x["args"]["epoch"]) == e
-                    for x in records):
+            if e not in epochs and e not in started:
                 info = contract.functions.epochInfo(e).call()
                 epochs[e] = {"axis_ids": [_hex32(x) for x in info[2]],
-                             "supply": int(info[4])}
+                             "supply": int(info[4]), "unscored_bps": int(info[6])}
             if int(r["block"]) > int(since_block):
                 window.append((_hex32(r["args"]["digest"]), e))
     accuracies: Dict[Tuple[str, int, int], Optional[int]] = {}
@@ -594,7 +608,7 @@ def read_tool_review_snapshot(
     for digest, e in sorted(set(window) - settled_keys):
         for i in range(review_counts.get((digest, e), 0)):
             v = contract.functions.reviewAt(bytes.fromhex(digest), e, i).call()
-            accuracies[(digest, e, i)] = int(v[3])
+            accuracies[(digest, e, i)] = int(v[_REVIEW_ACCURACY])
     return tool_review_snapshot_from_logs(
         records, block=block, since_block=since_block, epochs=epochs,
         accuracies=accuracies, axis_ids=axis_ids,

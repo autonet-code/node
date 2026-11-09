@@ -63,7 +63,7 @@ def test_bonds_fold_from_toolbond_logs():
         return {"block": block, "index": 0, "event": event, "args": {"digest": d, **args}}
     params = {"block": 1, "index": 0, "event": "ParamsSet", "args": {
         "minStake": 100, "revealWindow": 60, "degradeBps": 1000, "authorSlashBps": 10000,
-        "unbondDelay": 1, "reviewerShareBps": 4000, "harmWeightBps": 20000}}
+        "unbondDelay": 1, "reviewerShareBps": 4000}}
     kw = dict(since_block=0, epochs={}, accuracies={}, axis_ids=[])
     logs = [params, rec(2, "Bonded", author=AUTHOR, amount=100, stake=100)]
     snap = tool_review_snapshot_from_logs(logs, block=10, **kw)
@@ -74,7 +74,7 @@ def test_bonds_fold_from_toolbond_logs():
     logs.append(rec(4, "Bonded", author=AUTHOR, amount=50, stake=150))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST] == {
         "author": AUTHOR, "stake": 150, "unbonding": False}
-    logs.append(rec(5, "Finalized", epoch=1, harm=0, bondSlashed=60, lossPool=0, repPool=0))
+    logs.append(rec(5, "MalwareSettled", malware=True, bondSlashed=60, repBurned=0))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST]["stake"] == 90
     logs.append(rec(6, "Unbonded", author=AUTHOR, amount=90))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"] == {}

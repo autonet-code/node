@@ -102,10 +102,10 @@ class TestReviews:
         cut = tool_review_snapshot_from_logs(
             recs, block=100, since_block=0, epochs=EPOCHS, accuracies={},
             axis_ids=AXES, excluded_reviewers=[AUD_B.upper().replace("0X", "0x")])
-        assert cut["tools"][DIGEST]["axes"]["correctness"] == {
+        assert cut["tools"][DIGEST]["fields"]["correctness"] == {
             "sum": 300 * 90, "mass": 300}
-        assert "simplicity" not in cut["tools"][DIGEST]["axes"]
-        assert cut["tools"][DIGEST]["harm"] == {"sum": 300 * 10, "mass": 300}
+        assert cut["tools"][DIGEST]["fields"]["malware"] == {"sum": 0, "mass": 300}
+        assert cut["tools"][DIGEST]["axes"]["evolution"] == {"sum": 300 * 50, "mass": 300}
         assert [r["reviewer"] for r in cut["rounds"][DIGEST][0]["reviews"]] == [
             r["reviewer"] for r in plain["rounds"][DIGEST][0]["reviews"]]
 

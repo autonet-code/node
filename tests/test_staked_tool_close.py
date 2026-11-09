@@ -145,24 +145,26 @@ def _scores(**vals) -> bytes:
     return bytes(out)
 
 
-def _reviewed(block, who, epoch=1, weight=0, harm=255, stake=0, index=0, **scores):
+def _reviewed(block, who, epoch=1, weight=0, index=0, *, c=50, s=50, n=50, m=0,
+              **scores):
     return _rec(block, "Reviewed", index=index, digest=D, epoch=epoch, reviewer=who,
-                scores=_scores(**scores) if scores else b"", harm=harm, stake=stake,
+                correctness=c, simplicity=s, novelty=n, malware=m,
+                scores=_scores(**scores) if scores else b"",
                 weight=weight, evidenceHash=b"\x00" * 32)
 
 
 def _finalized(block, epoch=1, index=0):
-    return _rec(block, "Finalized", index=index, digest=D, epoch=epoch, harm=0,
-                bondSlashed=0, lossPool=0, repPool=0)
+    return _rec(block, "Finalized", index=index, digest=D, epoch=epoch, repPool=0)
 
 
 def _params(block=1, bps=3000):
     return _rec(block, "ParamsSet", minStake=1, revealWindow=1, degradeBps=1000,
-                authorSlashBps=10_000, unbondDelay=1, reviewerShareBps=bps,
-                harmWeightBps=20_000)
+                authorSlashBps=10_000, unbondDelay=1, reviewerShareBps=bps)
 
 
-EPOCHS = {1: {"axis_ids": KEYS, "supply": SUPPLY}, 2: {"axis_ids": KEYS, "supply": SUPPLY}}
+EPOCHS = {1: {"axis_ids": KEYS, "supply": SUPPLY, "unscored_bps": 5000},
+          2: {"axis_ids": KEYS, "supply": SUPPLY, "unscored_bps": 5000}}
+U = 50     # an unscored axis at the default 5000 bps, in score points
 
 
 def _fold(records, block=100, since=0, acc=None):
@@ -175,38 +177,71 @@ class TestReviewSnapshotFold:
     def _round1(self):
         return [
             _params(),
-            _reviewed(5, AUD_A, weight=300, harm=10, stake=7, index=0, life_precious=90),
-            _reviewed(5, AUD_B, weight=200, harm=50, stake=0, index=1,
+            _reviewed(5, AUD_A, weight=300, index=0, c=90, s=20, n=70, m=0,
+                      life_precious=90),
+            _reviewed(5, AUD_B, weight=200, index=1, c=40, s=60, n=10, m=1,
                       life_precious=40, evolution=-60),
             _finalized(9),
         ]
 
-    def test_rating_sums_reviews_of_finalized_rounds(self):
+    def test_sums_every_field_and_axis_of_finalized_rounds(self):
         snap = _fold(self._round1())
         tool = snap["tools"][DIGEST]
         assert snap["reviewer_share_bps"] == 3000
-        assert tool["axes"]["life_precious"] == {"sum": 300 * 90 + 200 * 40, "mass": 500}
-        assert tool["axes"]["evolution"] == {"sum": -200 * 60, "mass": 200}
-        assert tool["harm"] == {"sum": 300 * 10 + 200 * 50, "mass": 500}
+        f = tool["fields"]
+        assert f["correctness"] == {"sum": 300 * 90 + 200 * 40, "mass": 500}
+        assert f["simplicity"] == {"sum": 300 * 20 + 200 * 60, "mass": 500}
+        assert f["novelty"] == {"sum": 300 * 70 + 200 * 10, "mass": 500}
+        # A malware yes counts 100: sum / mass / 100 is the yes share.
+        assert f["malware"] == {"sum": 200 * 100, "mass": 500}
+        ax = tool["axes"]
+        assert ax["life_precious"] == {"sum": 300 * 90 + 200 * 40, "mass": 500}
+        # Unscored axes count at the default with the review's weight.
+        assert ax["evolution"] == {"sum": 300 * U - 200 * 60, "mass": 500}
+        assert ax["self_preservation"] == {"sum": 500 * U, "mass": 500}
+
+    def test_empty_scores_count_every_axis_at_the_default(self):
+        recs = [_reviewed(5, AUD_A, weight=7), _finalized(9)]
+        ax = _fold(recs)["tools"][DIGEST]["axes"]
+        assert set(ax) == set(AXES)
+        assert all(cell == {"sum": 7 * U, "mass": 7} for cell in ax.values())
+
+    def test_the_epochs_unscored_default_and_truncation(self):
+        epochs = {1: {"axis_ids": KEYS, "supply": SUPPLY, "unscored_bps": 3333}}
+        recs = [_reviewed(5, AUD_A, weight=7), _finalized(9)]
+        snap = tool_review_snapshot_from_logs(recs, block=10, since_block=0,
+                                              epochs=epochs, accuracies={},
+                                              axis_ids=AXES)
+        # ToolBond adds w x 3333 / 100, truncated: 233.31 -> 233.
+        assert snap["tools"][DIGEST]["axes"]["evolution"] == {"sum": 233, "mass": 7}
 
     def test_pinned_block_excludes_later_finalize(self):
         snap = _fold(self._round1(), block=8)
         assert snap["tools"] == {}
         assert snap["reviewer_share_bps"] == 3000
 
-    def test_window_rounds_carry_stake_accuracy_and_prior_mass(self):
+    def test_window_rounds_carry_accuracy_and_their_own_cells(self):
         recs = self._round1() + [
-            _reviewed(20, AUD_A, epoch=2, weight=100, stake=5, life_precious=80),
+            _reviewed(20, AUD_A, epoch=2, weight=100, c=80),
             _finalized(25, epoch=2),
         ]
         acc = {(DIGEST, 2, 0): 9 * E18 // 10}
         snap = _fold(recs, block=30, since=10, acc=acc)
         assert [r["epoch"] for r in snap["rounds"][DIGEST]] == [2]
         rnd = snap["rounds"][DIGEST][0]
-        assert rnd["prior_mass"] == {"life_precious": 500, "harm": 500, "evolution": 200}
-        assert rnd["reviews"] == [{"reviewer": AUD_A, "stake": 5, "accuracy": 9 * E18 // 10,
-                                   "axes": ["life_precious"], "harm": False}]
-        assert snap["tools"][DIGEST]["axes"]["life_precious"]["mass"] == 600
+        assert rnd["reviews"] == [{"reviewer": AUD_A, "accuracy": 9 * E18 // 10}]
+        assert rnd["fields"]["correctness"] == {"sum": 100 * 80, "mass": 100}
+        assert snap["tools"][DIGEST]["fields"]["correctness"]["mass"] == 600
+
+    def test_an_unweighted_review_leaves_the_sums(self):
+        """One weight per household: ToolBond takes a review's weight back
+        out when an earlier commit of the household reveals later."""
+        recs = [_reviewed(5, AUD_A, weight=300, c=90),
+                _rec(6, "ReviewUnweighted", digest=D, epoch=1, reviewer=AUD_A),
+                _reviewed(6, AUD_B, weight=300, index=1, c=10),
+                _finalized(9)]
+        f = _fold(recs)["tools"][DIGEST]["fields"]
+        assert f["correctness"] == {"sum": 300 * 10, "mass": 300}
 
     def test_uninformative_accuracy_reads_as_none(self):
         snap = _fold(self._round1(), since=0, acc={(DIGEST, 1, 0): 2 ** 64 - 1,
@@ -215,32 +250,39 @@ class TestReviewSnapshotFold:
         assert revs[0]["accuracy"] is None and revs[1]["accuracy"] == E18
 
     def test_unknown_axis_key_is_dropped(self):
-        epochs = {1: {"axis_ids": [keccak(text="retired").hex()] + KEYS[1:], "supply": 1}}
+        epochs = {1: {"axis_ids": [keccak(text="retired").hex()] + KEYS[1:],
+                      "supply": 1, "unscored_bps": 5000}}
         recs = [_reviewed(5, AUD_A, weight=10, life_precious=50, evolution=20),
                 _finalized(9)]
         snap = tool_review_snapshot_from_logs(recs, block=10, since_block=0, epochs=epochs,
                                               accuracies={}, axis_ids=AXES)
-        assert set(snap["tools"][DIGEST]["axes"]) == {"evolution"}
+        assert "life_precious" not in snap["tools"][DIGEST]["axes"]
+        assert snap["tools"][DIGEST]["axes"]["evolution"] == {"sum": 200, "mass": 10}
 
-    def test_overruled_round_counts_at_the_daos_harm(self):
-        # ToolBond baab631: an overruled round's harm counts at the DAO's
-        # value with the same REP mass, so discovery follows the appeal.
-        recs = self._round1()[:-1] + [
-            _rec(8, "Overruled", digest=D, epoch=1, harm=0), _finalized(9)]
-        assert _fold(recs)["tools"][DIGEST]["harm"] == {"sum": 0, "mass": 500}
+    def test_verdict_events_fold_per_tool(self):
+        recs = self._round1() + [
+            _rec(20, "Concluded", digest=D, anchorIndex=3, malwareShare=6 * E18 // 10,
+                 appealEnds=99),
+            _rec(21, "MalwareRuled", digest=D, malware=False),
+            _rec(22, "MalwareSettled", digest=D, malware=False, bondSlashed=0,
+                 repBurned=0)]
+        assert _fold(recs)["verdicts"][DIGEST] == {
+            "concluded": True, "ruling": False, "settled": False}
+        assert _fold(recs, block=20)["verdicts"][DIGEST] == {
+            "concluded": True, "ruling": None, "settled": None}
 
     def test_settlement_and_epoch_logs_replace_the_views(self):
         # ReviewSettled carries each accuracy and EpochStarted the axis ids
-        # (baab631), so no view read is needed.
+        # and the unscored default, so no view read is needed.
         recs = [
             _rec(2, "EpochStarted", epoch=1, charterHash=b"\x00" * 32,
                  axisIds=[bytes.fromhex(k.removeprefix("0x")) for k in KEYS],
-                 snapshot=1, supply=SUPPLY),
+                 snapshot=1, supply=SUPPLY, unscoredBps=5000),
             *self._round1()[1:3],
             _rec(9, "ReviewSettled", index=0, digest=D, epoch=1, reviewer=AUD_A,
-                 accuracy=E18, harmAccuracy=E18),
+                 accuracy=E18),
             _rec(9, "ReviewSettled", index=1, digest=D, epoch=1, reviewer=AUD_B,
-                 accuracy=2 ** 64 - 1, harmAccuracy=0),
+                 accuracy=2 ** 64 - 1),
             _finalized(9, index=2),
         ]
         snap = tool_review_snapshot_from_logs(recs, block=10, since_block=0, epochs={},
@@ -248,7 +290,7 @@ class TestReviewSnapshotFold:
         revs = snap["rounds"][DIGEST][0]["reviews"]
         assert [r["accuracy"] for r in revs] == [E18, None]
         assert snap["rounds"][DIGEST][0]["supply"] == SUPPLY
-        assert snap["tools"][DIGEST]["axes"]["life_precious"]["mass"] == 500
+        assert snap["tools"][DIGEST]["fields"]["correctness"]["mass"] == 500
 
     def test_default_bps_without_params_event(self):
         snap = _fold(self._round1()[1:])
@@ -264,6 +306,13 @@ class TestReviewSnapshotFold:
             shuffled = recs[:]
             rng.shuffle(shuffled)
             assert _fold(shuffled) == want
+
+    def test_the_close_reads_the_fold(self):
+        """End to end: the fold's cells give the close's rating."""
+        from nodes.common.federated_reconcile import tool_rating
+        r = tool_rating(_fold(self._round1())["tools"][DIGEST], AXES, 1000)
+        assert r["correctness"] == pytest.approx((300 * 90 + 200 * 40) / 500 / 100)
+        assert r["malware"] == pytest.approx(0.4)
 
 
 # ---------------------------------------------------------------------------
