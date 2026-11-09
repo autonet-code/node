@@ -754,6 +754,7 @@ class AutonetService:
                 bc, "anchor_election_address", "") or "",
             rep_claim_address=getattr(bc, "rep_claim_address", "") or "",
             owner_wallet=owner_wallet,
+            tool_bond_address=getattr(bc, "tool_bond_address", "") or "",
         )
         from pathlib import Path
         try:

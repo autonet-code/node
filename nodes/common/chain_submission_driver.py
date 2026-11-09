@@ -96,6 +96,10 @@ class ChainSubmissionConfig:
     # The household this daemon serves (Decision 2026-10-27). Claimed for
     # alongside the on-chain owners of the local agents.
     owner_wallet: str = ""
+    # ToolBond. Set => after the claims the operator shows ToolBond each
+    # tool the anchor concluded and settles malware verdicts that are due
+    # (verdict_submitter, Decision 2026-11-09).
+    tool_bond_address: str = ""
 
 
 # Resolver: local agent_id (YAML id) -> (address, private_key) or None.
@@ -166,6 +170,9 @@ class ChainSubmissionDriver:
         # nobody follows any more holds up every later one.
         self._elections_path = Path(elections_path) if elections_path else None
         self._load_elections()
+        self._verdicts_path = (self._elections_path.parent / "open_verdicts.json"
+                               if self._elections_path else None)
+        self._verdict_submitter: Optional[Any] = None
 
     def governed_anchorer(self) -> Optional[GovernedAnchorer]:
         if self._governed is None and self._anchorer is not None:
@@ -572,6 +579,9 @@ class ChainSubmissionDriver:
             if done:
                 with self._lock:
                     self._pending.pop(epoch_id, None)
+        verdicts = self._verdicts()
+        if verdicts is not None and verdicts.open_verdicts:
+            verdicts.settle_due()
 
     def _ensure_ticker(self) -> None:
         with self._lock:
@@ -669,7 +679,50 @@ class ChainSubmissionDriver:
                 "error": r.error,
             })
         self._claim_rep([r["claimant"] for r in results], op)
+        verdicts = self._verdicts(op)
+        if verdicts is not None:
+            for row in verdicts.conclude_epoch(epoch_id):
+                if row.get("error"):
+                    logger.warning("epoch %s: tool %s not concluded on chain: %s",
+                                   epoch_id, row["digest"][:12], row["error"])
+            verdicts.settle_due()
         return results
+
+    def _verdicts(self, op: Optional[Voter] = None) -> Optional[Any]:
+        """The verdict submitter (conclude, settleMalware), operator-signed;
+        None without a ToolBond address, an anchorer or an operator key."""
+        if self._verdict_submitter is not None:
+            return self._verdict_submitter
+        if not self.config.tool_bond_address or self._anchorer is None:
+            return None
+        op = op or self._operator()
+        if op is None:
+            return None
+        from .verdict_submitter import VerdictSubmitter
+        w3 = self._anchorer._w3
+        from eth_account import Account
+        acct = Account.from_key(op.private_key)
+        chain_id = int(self.config.chain_id or w3.eth.chain_id)
+
+        def send(fn: Any) -> Dict[str, Any]:
+            try:
+                gas = max(int(fn.estimate_gas({"from": acct.address}) * 16 // 10), 200_000)
+            except Exception as e:  # a revert shows up here first
+                return {"success": False, "error": f"would revert: {e}"}
+            tx = fn.build_transaction({"from": acct.address, "gas": gas,
+                                       "chainId": chain_id,
+                                       "nonce": next_nonce(w3, acct.address)})
+            signed = acct.sign_transaction(tx)
+            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            receipt = w3.eth.wait_for_transaction_receipt(
+                w3.eth.send_raw_transaction(raw), timeout=180)
+            return {"success": receipt.status == 1}
+
+        self._verdict_submitter = VerdictSubmitter(
+            w3=w3, tool_bond_address=self.config.tool_bond_address,
+            substrate=self._anchorer._get_contract(), resolver=self._blob_resolver,
+            send=send, state_path=self._verdicts_path)
+        return self._verdict_submitter
 
     def _claim_rep(self, claimants: List[str], op: Voter) -> None:
         """REP follows the ATN (Decision 2026-10-27): claim each

@@ -135,6 +135,12 @@ TOOL_BOND_REVIEW_ABI = [
     _fn("claim", [("digest", "bytes32"), ("epoch", "uint256"), ("reviewer", "address")]),
     _fn("toolRating", [("digest", "bytes32"), ("key", "bytes32")],
         [("sum", "int256"), ("mass", "uint256")], "view"),
+    _fn("verdicts", [("", "bytes32")],
+        [("concludedAt", "uint48"), ("appealEnds", "uint48"), ("heldUntil", "uint48"),
+         ("ruling", "uint8"), ("settled", "bool"), ("share", "uint64"),
+         ("yesMass", "uint256"), ("bondPool", "uint256")], "view"),
+    _fn("claimBondShare", [("digest", "bytes32"), ("epoch", "uint256"),
+                           ("reviewer", "address")]),
 ]
 
 # Substrate's owner binding and RepToken's balance: a household's REP.
@@ -474,6 +480,23 @@ class ReviewBondClient:
     async def claim(self, private_key: str, digest: str, epoch: int,
                     reviewer: str) -> dict[str, Any]:
         return await self._write(private_key, lambda b, s, a: b.functions.claim(
+            _b32(digest), int(epoch), reviewer))
+
+    async def verdict_of(self, digest: str) -> Optional[dict[str, Any]]:
+        """The tool's malware verdict on ToolBond (Decision 2026-11-09)."""
+        def fn(b, s):
+            v = b.functions.verdicts(_b32(digest)).call()
+            return {"concluded_at": int(v[0]), "appeal_ends": int(v[1]),
+                    "held_until": int(v[2]), "ruling": int(v[3]),
+                    "settled": bool(v[4]), "share": int(v[5]),
+                    "yes_mass": int(v[6]), "bond_pool": int(v[7])}
+        return await self._read(fn)
+
+    async def claim_bond_share(self, private_key: str, digest: str, epoch: int,
+                               reviewer: str) -> dict[str, Any]:
+        """A malware-yes review's share of the slashed bond, paid to the
+        reviewer through the service rail."""
+        return await self._write(private_key, lambda b, s, a: b.functions.claimBondShare(
             _b32(digest), int(epoch), reviewer))
 
 
