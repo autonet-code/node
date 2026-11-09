@@ -394,8 +394,10 @@ class TestResolutionAndExecution:
 
 
 # ---------------------------------------------------------------------------
-# Cognitive attestation (docs/tool_substrate.md — two receipt tiers)
+# Reviews from use (attest_tools, Decision 2026-11-09)
 # ---------------------------------------------------------------------------
+
+REVIEW = {"correctness": 0.9, "simplicity": 0.5, "novelty": 0.5, "malware": False}
 
 
 class TestAttestation:
@@ -411,19 +413,21 @@ class TestAttestation:
 
         out = await execute_tool(
             "attest_tools",
-            {"judgments": [{"tool": "echo_tool", "ok": True, "score": 0.9,
+            {"judgments": [{"tool": "echo_tool", **REVIEW,
                             "note": "did the job"}],
              "context": "wiring up an echo round-trip"},
             rt, caller_id="child",
         )
-        assert out == {"attested": 1, "skipped": []}
+        assert out["attested"] == 1 and out["skipped"] == []
+        # Not registered on chain: the review is held for later.
+        assert out["reviews"]["held"] == 1
         rows = list(store._iter_attestations())
         assert len(rows) == 1
         row = rows[0]
         assert row["caller"] == "child"
         assert row["tool_author"] == "child"
         assert row["manifest_digest"] == res["digest"]
-        assert row["score"] == 0.9
+        assert row["correctness"] == 0.9 and row["ok"] is True
         assert row["review_digest"]  # note was blob-stored
 
     @pytest.mark.asyncio
@@ -435,8 +439,8 @@ class TestAttestation:
 
         out = await execute_tool(
             "attest_tools",
-            {"judgments": [{"tool": "echo_tool", "ok": True},
-                           {"tool": "nonexistent", "ok": True}],
+            {"judgments": [{"tool": "echo_tool", **REVIEW},
+                           {"tool": "nonexistent", **REVIEW}],
              "context": "sibling tries to attest"},
             rt, caller_id="sibling",  # out of child's lineage
         )
@@ -455,7 +459,7 @@ class TestAttestation:
 
         await execute_tool(
             "attest_tools",
-            {"judgments": [{"tool": "echo_tool", "ok": False, "score": 0.1,
+            {"judgments": [{"tool": "echo_tool", **REVIEW, "correctness": 0.1,
                             "note": "flaky on empty input"}],
              "context": "stress-testing echo"},
             rt, caller_id="parent",
@@ -466,6 +470,7 @@ class TestAttestation:
         assert blob["note"] == "flaky on empty input"
         assert blob["caller"] == "parent"
         assert blob["context"] == "stress-testing echo"
+        assert blob["correctness"] == 0.1 and blob["malware"] is False
 
     @pytest.mark.asyncio
     async def test_attestation_summary_aggregates(self, tmp_path):
@@ -475,10 +480,11 @@ class TestAttestation:
         store = rt.tool_store
 
         store.attest_usage(
-            "child", [{"tool": "echo_tool", "ok": True, "score": 0.8}],
+            "child", [{"tool": "echo_tool", **REVIEW, "correctness": 0.8}],
             "work one")
         store.attest_usage(
-            "child", [{"tool": "echo_tool", "ok": False, "score": 0.4}],
+            "child", [{"tool": "echo_tool", **REVIEW, "correctness": 0.4,
+                       "ok": False}],
             "work two")
 
         summary = store.attestation_summary()
@@ -512,7 +518,7 @@ class TestAttestation:
 
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="child")
         store.attest_usage(
-            "child", [{"tool": "echo_tool", "ok": True}], "some work")
+            "child", [{"tool": "echo_tool", **REVIEW}], "some work")
         await rt.tool_registry.call_tool("echo_tool", {"x": "2"}, caller_id="child")
 
         seqs = sorted([r["seq"] for r in store._iter_receipts()]
@@ -1108,24 +1114,23 @@ class TestVetting:
         )
         assert out["manifest"]["name"] == "echo_tool"
         assert out["code"] == ECHO_CODE
-        assert "verdict" not in out
+        assert "review" not in out
 
     @pytest.mark.asyncio
     async def test_vet_pass_records_locally_and_gossips_nothing(self, tmp_path):
-        """An inspection is a staked ToolBond review now (docs/
-        multi_jurisdiction.md decision 10): recorded locally with its
-        report blob, never gossiped as a consensus event."""
+        """An inspection is a ToolBond review (Decision 2026-11-09):
+        recorded locally with its report blob, never gossiped."""
         rt = _make_runtime(tmp_path)
         await _family(rt)
         res = await _register_echo(rt)
         store = rt.tool_store
         out = await execute_tool(
             "vet_tool",
-            {"digest": res["digest"], "verdict": "pass",
+            {"digest": res["digest"], **REVIEW,
              "report": "read the code; echoes x, no fs/net access"},
             rt, caller_id="sibling",
         )
-        assert out["verdict"] == "pass"
+        assert "error" not in out, out
         report = store._blob_store().get_json(out["review_digest"])
         assert report["kind"] == "tool_vet_report"
         # sibling is not registered on-chain; wallet-less env → local-id
@@ -1138,27 +1143,26 @@ class TestVetting:
         assert res["digest"] not in store.attestation_summary()
 
     @pytest.mark.asyncio
-    async def test_vet_axes_and_harm_land_in_the_report(self, tmp_path):
-        """An inspection's per-charter-axis scores and harm land in the
-        report blob and the local row (history and UI); the staked review
-        itself goes to ToolBond, nothing rides a gossip event."""
+    async def test_vet_fields_and_axes_land_in_the_report(self, tmp_path):
+        """An inspection's fields and charter scores land in the report blob
+        and the local row (history and UI); the review itself goes to
+        ToolBond, nothing rides a gossip event."""
         rt = _make_runtime(tmp_path)
         await _family(rt)
         res = await _register_echo(rt)
         store = rt.tool_store
         out = await execute_tool(
             "vet_tool",
-            {"digest": res["digest"], "verdict": "pass",
+            {"digest": res["digest"], **REVIEW,
              "report": "read the code; echoes x cleanly",
-             "axes": {"correctness": 0.9, "simplicity": 0.5,
-                      "bogus_axis": "nope"}, "harm": 0.1},
+             "axes": {"evolution": 0.9, "life_precious": 1.5,
+                      "bogus_axis": "nope"}},
             rt, caller_id="sibling",
         )
-        assert out["verdict"] == "pass"
         report = store._blob_store().get_json(out["review_digest"])
-        # Garbage axis dropped; valid axes clamped-through and sorted.
-        assert report["axes"] == {"correctness": 0.9, "simplicity": 0.5}
-        assert report["harm"] == 0.1
+        # Garbage dropped; valid scores clamped and sorted.
+        assert report["axes"] == {"evolution": 0.9, "life_precious": 1.0}
+        assert report["correctness"] == 0.9 and report["malware"] is False
 
     @pytest.mark.asyncio
     async def test_self_vet_rejected(self, tmp_path):
@@ -1167,21 +1171,27 @@ class TestVetting:
         res = await _register_echo(rt)  # author = child
         out = await execute_tool(
             "vet_tool",
-            {"digest": res["digest"], "verdict": "pass", "report": "lgtm"},
+            {"digest": res["digest"], **REVIEW, "report": "lgtm"},
             rt, caller_id="child",
         )
         assert "your own tool" in out["error"]
 
     @pytest.mark.asyncio
-    async def test_verdict_requires_report(self, tmp_path):
+    async def test_review_requires_report_and_every_field(self, tmp_path):
         rt = _make_runtime(tmp_path)
         await _family(rt)
         res = await _register_echo(rt)
         out = await execute_tool(
-            "vet_tool", {"digest": res["digest"], "verdict": "pass"},
+            "vet_tool", {"digest": res["digest"], **REVIEW},
             rt, caller_id="sibling",
         )
         assert "report" in out["error"]
+        out = await execute_tool(
+            "vet_tool", {"digest": res["digest"], "correctness": 0.5,
+                         "report": "partial"},
+            rt, caller_id="sibling",
+        )
+        assert "novelty" in out["error"]
 
     @pytest.mark.asyncio
     async def test_attested_class_not_vettable(self, tmp_path):
@@ -1221,11 +1231,11 @@ class TestVetting:
         assert inspect["code"] == ECHO_CODE
 
         out = await store_val.vet_tool(
-            "validator", res["digest"], verdict="pass",
+            "validator", res["digest"], review=dict(REVIEW),
             report="fetched by digest; code matches manifest",
         )
-        assert out["verdict"] == "pass"
         assert out["digest"] == res["digest"]
+        assert out["review"]["correctness"] == 0.9
         # The fetched blobs are now cached locally (content-addressed).
         assert store_val._blob_store().get_bytes(code_digest) is not None
 

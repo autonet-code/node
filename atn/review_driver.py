@@ -1,7 +1,7 @@
-"""Staked review driver (docs/multi_jurisdiction.md decision 10).
+"""Review driver (Decision 2026-11-09, docs/tool_substrate.md).
 
 Walks every hosted agent's review batches through ToolBond's epoch rounds
-(trustless-contracts ToolBond 448023a; batches and chain calls live in
+(trustless-contracts ToolBond f633bc1; batches and chain calls live in
 atn/runtime/review_batch.py). Batches are keyed by the reviewer's address,
 and every external agent reviews as the operator (Decision 2026-11-08), so
 the household's external sessions share one batch per epoch, committed,
@@ -11,21 +11,20 @@ revealed and claimed with the operator key:
    (``on_local_close``, hooked from the autonet bridge's federated-close
    subscriber), each agent's pending batch for the open epoch
    (``ToolBond.currentEpoch()``) is committed: one commitment plus the
-   total ATN stake, once per agent per epoch. The batch (salt included) is
+   review count, once per agent per epoch. The batch (salt included) is
    written to disk BEFORE the commit transaction goes out, so a crash can
    never lose the salt of a landed commit. A pending batch whose epoch was
    anchored before it was committed can no longer be committed; its reviews
-   roll into the open epoch's batch.
+   roll into the open epoch's batch. A household holding no REP cannot
+   commit (NoWeight): its batch is marked refused and its reviews dropped.
 2. REVEAL. After the epoch's anchor (``revealEnds(epoch) > 0``) every
    committed, unrevealed batch is revealed while the window is open. A
    reveal is relayable: a sealed copy sits in the batch file, which the WS
    ``review_batches`` read lists for the owner to back up.
 3. FINALIZE and CLAIM. Once the reveal window has passed, the driver
    finalizes the rounds its agents reviewed (permissionless, in batches) and
-   claims each agent's settlement (refund, winnings, REP). A round with a
-   settled harm waits out the appeal window first; appealing is a DAO
-   proposal (``daoOverrule`` is timelock-only), not something a daemon
-   sends.
+   claims each agent's settlement (REP moved by accuracy, bounty). A
+   malware verdict is judged per tool at its conclusion, not per round.
 
 The driver never forfeits anyone: enforcing another agent's missed reveal is
 that agent's keepers' business (anyone may, nothing is gained by it here).
@@ -43,8 +42,8 @@ import secrets
 from typing import Any, Optional
 
 from .runtime.review_batch import (
-    STAGE_COOLING, STAGE_DONE, STAGE_FINALIZING, STAGE_NONE, STAGE_OPEN, STAGES,
-    EpochBatch, client_for, commitment_of, store_for,
+    DEAD_STATES, STAGE_DONE, STAGE_FINALIZING, STAGE_NONE, STAGE_OPEN, STAGES,
+    EpochBatch, client_for, commitment_of, note_household_rep, store_for,
 )
 
 log = logging.getLogger(__name__)
@@ -182,6 +181,10 @@ class ReviewDriver:
             log.debug("review driver: held reviews not flushed: %s", exc)
         now = await client.chain_time()
         keys = self._agent_keys()
+        if keys and hasattr(client, "household_rep"):
+            # One household per daemon: review_due stays quiet without REP.
+            note_household_rep(self._runtime,
+                               await client.household_rep(sorted(keys)[0]))
         if self._close_pending:
             self._close_pending = False
             self._close_epochs.add(int(epoch))
@@ -190,7 +193,7 @@ class ReviewDriver:
         for batch in store.all():
             agent = batch.agent.lower()
             try:
-                if batch.status in ("settled", "rolled", "forfeited"):
+                if batch.status == "settled" or batch.status in DEAD_STATES:
                     continue
                 if not batch.commitment:
                     if batch.epoch < epoch and batch.reviews:
@@ -251,6 +254,15 @@ class ReviewDriver:
             return True
         if reverted_with(res, "AlreadyCommitted"):
             # A commit of ours landed earlier (crash after send): confirm.
+            store.save(batch)
+            return False
+        if reverted_with(res, "NoWeight"):
+            # The household holds no REP at the epoch's snapshot: ToolBond
+            # refuses its reviews (Decision 2026-11-09).
+            batch.commitment = ""
+            batch.status = "refused"
+            batch.last_error = "the household holds no REP; ToolBond refuses its reviews"
+            note_household_rep(self._runtime, 0)
             store.save(batch)
             return False
         batch.commitment = ""
@@ -345,15 +357,13 @@ class ReviewDriver:
             stage = int(rnd["stage"])
             if stage == STAGE_NONE:
                 # The review did not count (unbonded tool, the author's own,
-                # malformed): its stake was refunded at reveal.
+                # a field missing or out of range).
                 batch.rounds[digest] = "none"
                 continue
             for _ in range(FINALIZE_MAX_CALLS):
                 if stage == STAGE_DONE or not gas_key:
                     break
-                if stage == STAGE_COOLING and not rnd["overruled"] and now <= rnd["appeal_ends"]:
-                    break  # inside the appeal window
-                if stage not in (STAGE_OPEN, STAGE_COOLING, STAGE_FINALIZING):
+                if stage not in (STAGE_OPEN, STAGE_FINALIZING):
                     break
                 res = await client.finalize(gas_key, digest, batch.epoch, FINALIZE_BATCH)
                 if res.get("success"):
@@ -398,7 +408,7 @@ def batch_rows(runtime: Any) -> list[dict[str, Any]]:
         rows.append({
             "epoch": b.epoch, "agent": b.agent, "status": b.status or (
                 "pending" if not b.commitment else "committed"),
-            "reviews": len(b.reviews), "total_stake": str(b.total_stake),
+            "reviews": len(b.reviews),
             "commitment": b.commitment, "committed_tx": b.committed_tx,
             "revealed_tx": b.revealed_tx, "rounds": dict(b.rounds),
             "last_error": b.last_error,

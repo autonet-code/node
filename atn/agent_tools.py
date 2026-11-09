@@ -687,9 +687,9 @@ _TOOLS: list[ToolDefinition] = [
             "Use list_tools first to see available tools and their input schemas. "
             "REVIEW STEP: if you invoke registered (network) tools, the work item "
             "is not closed until you call attest_tools once at the end, reviewing "
-            "the tools that mattered with per-charter-axis scores and harm. "
-            "Reviews are staked on chain (ToolBond) and are the signal that "
-            "routes every agent's tool discovery."
+            "the tools that mattered (correctness, simplicity, novelty, malware, "
+            "and the charter axes that apply). Reviews go on chain (ToolBond) "
+            "and are what pays a tool and its reviewers."
         ),
         input_schema={
             "type": "object",
@@ -719,9 +719,10 @@ _TOOLS: list[ToolDefinition] = [
             "Registration is ALWAYS private: local capability "
             "scoped to you and your superiors; only the user can grant it outside "
             "that lineage. You own what you author. Publishing to the substrate "
-            "(where other agents can find, review and adopt it, and you earn a "
-            "pro-rata share of the epoch pool from attested third-party usage) "
-            "is the separate publish_tool capability, granted case-by-case. Remote "
+            "(where other agents can find, review and adopt it, and you are "
+            "paid once from the epoch pool when other households' reviews of "
+            "it conclude) is the separate publish_tool capability, granted "
+            "case-by-case. Remote "
             "paid APIs are Services, not tools: use the services rail instead of "
             "an endpoint."
         ),
@@ -751,13 +752,15 @@ _TOOLS: list[ToolDefinition] = [
         name="publish_tool",
         description=(
             "Publish a tool YOU authored to the substrate: its manifest becomes "
-            "network-visible and reviewable, and (pinned tools) earns you a share "
-            "of the epoch pool from attested third-party usage. This is "
+            "network-visible and reviewable, and (pinned tools) is paid once "
+            "from the epoch pool when other households' reviews of it "
+            "conclude. This is "
             "a separately granted capability — having register_tool does not imply "
             "having this. You can only publish your own tools. Publishing STAKES "
             "ATN on ToolBond from your own wallet (you must be registered "
-            "on-chain); the stake stands behind the tool and is slashed in "
-            "proportion to the harm staked reviews settle on. A novelty claim is required: search "
+            "on-chain); the stake stands behind the tool and is slashed if "
+            "more than half the REP reviewing it says malware. A novelty "
+            "claim is required: search "
             "probe_tools first and name the closest existing tools. Passing "
             "`novelty` here on a tool registered without it re-stamps the "
             "manifest, so the published digest is NEW (returned as `digest`)."
@@ -799,30 +802,29 @@ _TOOLS: list[ToolDefinition] = [
         name="vet_tool",
         description=(
             "Inspect a published tool's pinned code and review it. Call "
-            "with only a digest "
-            "to INSPECT: you receive the manifest and the pinned source "
-            "code to read. Then call again with verdict 'pass' (code "
-            "adheres to the manifest) or 'fail', a report stating what you "
-            "checked, and your review: 'harm' and per-charter-axis 'axes' "
-            "scores (the axes are listed below), optionally with an ATN "
-            "'stake'. An inspection is the same staked review attest_tools "
-            "sends, without a usage receipt (so it never counts toward the "
-            "author's mint); a heavily staked one is what a UI may call an "
-            "audit. You cannot review your own tools."
+            "with only a digest to INSPECT: you receive the manifest "
+            "(declared capabilities included) and the pinned source code to "
+            "read. Then call again with your review (correctness, "
+            "simplicity, novelty, malware, and evidence for a malware flag; "
+            "charter axes optional) and a report stating what you checked. "
+            "It is the same review attest_tools sends, after reading the "
+            "code. You cannot review your own household's tools."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "digest": {"type": "string", "description": "Manifest digest (64-hex) — local or network-published."},
-                "verdict": {"type": "string", "enum": ["pass", "fail"], "description": "Omit to inspect; set to record your inspection review."},
-                "report": {"type": "string", "description": "Required with a verdict: what you checked, what you found."},
+                "report": {"type": "string", "description": "Required with a review: what you checked, what you found."},
+                "correctness": {"type": "number", "description": "Required, -1..1: it works and is good at what it claims."},
+                "simplicity": {"type": "number", "description": "Required, 0..1: how simple it is for what it does."},
+                "novelty": {"type": "number", "description": "Required, 0..1: how much of its value is new beyond its dependencies and the prior art it names."},
+                "malware": {"type": "boolean", "description": "Required: true only for malicious code (see the review text below); a destructive bug is correctness, not malware."},
+                "evidence": {"type": "string", "description": "Required with malware true: what the code does, with a pointer into it (file and line numbers, or the quoted code)."},
                 "axes": {
                     "type": "object",
-                    "description": "Optional per-charter-axis scores from reading the code, -1..+1.",
+                    "description": "Optional charter-axis scores, -1..1, keyed by axis id: score each axis that applies, on its own.",
                     "additionalProperties": {"type": "number"},
                 },
-                "harm": {"type": "number", "description": "0 safe .. 1 malicious, optional."},
-                "stake": {"type": "integer", "description": "Optional ATN stake in base units (default 0)."},
             },
             "required": ["digest"],
         },
@@ -830,12 +832,12 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="attest_tools",
         description=(
-            "Review which registered tools contributed to a piece of work you "
-            "just finished. Call ONCE when you close a work item, judging the "
-            "tools that helped, not after every call. Your attestation is the "
-            "ONLY usage that counts toward a tool author's mint; a mechanical "
-            "call receipt is worth nothing. Provide 'context': what you were "
-            "working on (embedded to locate the work)."
+            "Review the registered tools that contributed to a piece of work "
+            "you just finished. Call ONCE when you close a work item, one "
+            "judgment per tool that mattered, not after every call. Every "
+            "review needs correctness, simplicity, novelty and malware; a "
+            "malware flag needs evidence. Provide 'context': what you were "
+            "working on."
         ),
         input_schema={
             "type": "object",
@@ -847,28 +849,20 @@ _TOOLS: list[ToolDefinition] = [
                         "type": "object",
                         "properties": {
                             "tool": {"type": "string", "description": "Tool name, digest, or reg_ prefix."},
-                            "ok": {"type": "boolean", "description": "Did the tool serve the work?"},
-                            "score": {"type": "number", "description": "Optional overall quality score 0..1."},
-                            "axes": {
-                                "type": "object",
-                                "description": "Optional per-charter-axis signed scores, -1..+1. Only include axes you observed.",
-                                "additionalProperties": {"type": "number"},
-                            },
-                            "harm": {"type": "number", "description": "0 safe .. 1 malicious, optional."},
-                            "stake": {"type": "integer", "description": "Optional ATN stake in base units behind this review (default 0)."},
-                            "own_share": {
-                                "type": "number",
-                                "description": (
-                                    "Optional, for a tool that calls other tools "
-                                    "(declared dependencies): your estimate 0..1 of "
-                                    "how much of its value is its own logic rather "
-                                    "than its dependencies. Sets how its usage "
-                                    "credit splits between it and them."
-                                ),
-                            },
+                        "correctness": {"type": "number", "description": "Required, -1..1: it works and is good at what it claims."},
+                        "simplicity": {"type": "number", "description": "Required, 0..1: how simple it is for what it does."},
+                        "novelty": {"type": "number", "description": "Required, 0..1: how much of its value is new beyond its dependencies and the prior art it names."},
+                        "malware": {"type": "boolean", "description": "Required: true only for malicious code (see the review text below); a destructive bug is correctness, not malware."},
+                        "evidence": {"type": "string", "description": "Required with malware true: what the code does, with a pointer into it (file and line numbers, or the quoted code)."},
+                        "axes": {
+                            "type": "object",
+                            "description": "Optional charter-axis scores, -1..1, keyed by axis id: score each axis that applies, on its own.",
+                            "additionalProperties": {"type": "number"},
+                        },
+                            "ok": {"type": "boolean", "description": "Optional: did the tool serve the work? (local note)"},
                             "note": {"type": "string", "description": "Optional reviewable justification (blob-stored)."},
                         },
-                        "required": ["tool", "ok"],
+                        "required": ["tool", "correctness", "simplicity", "novelty", "malware"],
                     },
                 },
                 "context": {
@@ -880,6 +874,21 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="fetch_evidence",
+        description=(
+            "Read the evidence behind a review by its evidence_hash (a "
+            "malware flag carries one): from this daemon, else from the "
+            "peers holding it. The bytes are checked against the hash."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "evidence_hash": {"type": "string", "description": "64-hex sha256 of the evidence blob."},
+            },
+            "required": ["evidence_hash"],
+        },
+    ),
+    ToolDefinition(
         name="probe_tools",
         description=(
             "Search the tool library before building something yourself. "
@@ -887,18 +896,19 @@ _TOOLS: list[ToolDefinition] = [
             "every tool this daemon knows (its own, adopted, and every "
             "published tool it fetched), merged into one list in RELEVANCE "
             "order: ratings never move a tool up or down, so read each "
-            "match's metadata to price the risk yourself. Each match: "
-            "digest, name, description, author, 'score' (relevance) and "
-            "'match' (its keyword and semantic ranks); 'chain_rating' (the "
-            "settled score per charter axis, -1..1) with 'rating_mass' (the "
-            "REP behind each); 'harm' (0 safe .. 1 malicious) with "
-            "'harm_mass'; 'bonded' (null = chain unreachable) and 'stake'; "
-            "'author_context' (author REP, their other tools, the highest "
-            "harm among them); and 'household': whether this household "
-            "adopted it, authored it, and reviewed it ('review' holds our "
-            "own scores and harm). No REP behind a rating = nobody has "
-            "reviewed it: inspect it (vet_tool) before trusting. Only "
-            "bonded tools are listed. When 'semantic.ready' is false the "
+            "match's metadata to decide what to run yourself: nothing "
+            "contains a tool when it runs. Each match: digest, name, "
+            "description, author, 'score' (relevance) and 'match' (its "
+            "keyword and semantic ranks); 'rating' as of the latest close "
+            "(correctness -1..1, simplicity and novelty 0..1, 'malware' the "
+            "share of the reviewing REP that flagged it, 'axes' per charter "
+            "axis and 'value' over them, 'mass' the REP behind it as a share "
+            "of all REP; null = no close has rated it yet); 'bonded' (null = "
+            "chain unreachable) and 'stake'; 'author_context' (author REP, "
+            "their other tools, the highest malware share among them); and "
+            "'household': whether this household adopted it, authored it, "
+            "and reviewed it ('review' holds our own review). Unbonded tools "
+            "are listed too, with bonded false. When 'semantic.ready' is false the "
             "search model is still downloading: results are keyword "
             "matches only and 'semantic.note' says how far it got. Use the "
             "digest with adopt_tool."
@@ -2954,10 +2964,14 @@ def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
     with the chain. Derived from what the daemon already keeps, so a restart
     forgets nothing and no extra copy can drift. A batch forfeited
     unrevealed never counted, so its tools are due again. Cached until the
-    tool store, the held reviews or the batches change."""
+    tool store, the held reviews or the batches change. A household known
+    to hold no REP is reminded of nothing: its reviews would be refused."""
     store = getattr(runtime, "tool_store", None)
     if not agent_id or store is None:
         return {}
+    from .runtime.review_batch import household_has_no_rep
+    if household_has_no_rep(runtime):
+        return {}   # ToolBond refuses its reviews (Decision 2026-11-09)
     adopted = store.adopted_by(agent_id)
     if not adopted:
         return {}
@@ -3280,14 +3294,16 @@ def _checked_out(runtime: Runtime, digest: str, dest, result: dict[str, Any]) ->
                      "REP are what pay a tool and its reviewers.")}
 
 
-async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Inspection review (docs/multi_jurisdiction.md decision 10).
+_REVIEW_KEYS = ("correctness", "simplicity", "novelty", "malware", "evidence", "axes")
 
-    Inspect (no verdict) returns the manifest and pinned code; a verdict
-    plus report records the inspection locally and queues the caller's
-    staked review (axes, harm, stake) into its ToolBond epoch batch. No
-    usage receipt and no gossip: it mints nothing. The caller is derived,
-    never accepted as input.
+
+async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Inspection review (Decision 2026-11-09).
+
+    Inspect (no review fields) returns the manifest and pinned code; the
+    four fields plus a report record the inspection locally and queue the
+    caller's review into its ToolBond epoch batch. No usage receipt and no
+    gossip. The caller is derived, never accepted as input.
     """
     from .tool_store import OWNER_AUTHOR
     digest = str(input.get("digest") or "").strip()
@@ -3295,26 +3311,25 @@ async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Missing required field: 'digest'"}
     caller_id = input.get("_caller_id")
     caller = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
-    verdict = input.get("verdict")
-    raw_axes = input.get("axes")
-    axes = raw_axes if isinstance(raw_axes, dict) else None
+    given = {k: input[k] for k in _REVIEW_KEYS if k in input}
     try:
         result = await runtime.tool_store.vet_tool(
-            caller, digest,
-            verdict=str(verdict) if verdict is not None else None,
-            report=str(input.get("report") or ""),
-            axes=axes,
-            harm=input.get("harm"),
-        )
+            caller, digest, review=given or None,
+            report=str(input.get("report") or ""))
     except Exception as exc:
         return {"error": str(exc)}
-    if verdict is not None and "error" not in result and result.get("digest"):
-        review = {"digest": result["digest"], "axes": axes or {},
-                  "harm": input.get("harm"), "stake": input.get("stake"),
-                  "evidence_hash": result.get("review_digest") or "",
-                  "author": result.get("tool_author") or ""}
+    review = result.pop("review", None)
+    if review and "error" not in result:
         result["review"] = await _queue_staked_reviews(runtime, caller_id, [review])
     return result
+
+
+async def _fetch_evidence(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """A review's evidence by its hash (local blob store, then peers)."""
+    h = str(input.get("evidence_hash") or "").strip()
+    if not h:
+        return {"error": "Missing required field: 'evidence_hash'"}
+    return await runtime.tool_store.fetch_evidence(h)
 
 
 async def _queue_staked_reviews(runtime: Runtime, caller_id: Any,
@@ -3323,8 +3338,8 @@ async def _queue_staked_reviews(runtime: Runtime, caller_id: Any,
     if not reviews:
         return {"queued": 0}
     if caller_id is None or is_owner_caller(caller_id):
-        return {"queued": 0, "note": "the owner has no agent key: staked "
-                                     "reviews are sent by registered agents"}
+        return {"queued": 0, "note": "the owner has no agent key: reviews "
+                                     "are sent by registered agents"}
     try:
         from .runtime.review_batch import queue_reviews
         return await queue_reviews(runtime, str(caller_id), reviews)
@@ -3334,11 +3349,11 @@ async def _queue_staked_reviews(runtime: Runtime, caller_id: Any,
 
 
 async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Record cognitive attestations for a closed work item.
+    """Record the reviews of a closed work item (Decision 2026-11-09).
 
     The caller is derived (authorship/scoping primitive); owner callers
-    attest as "user". This is the per-work-item reflection step — the only
-    usage that counts toward a tool author's mint (docs/tool_substrate.md).
+    attest as "user". Each valid review is queued on ToolBond, which is
+    what pays a tool and its reviewers.
     """
     from .tool_store import OWNER_AUTHOR
     judgments = input.get("judgments")
@@ -3356,8 +3371,7 @@ async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     except Exception as exc:
         return {"error": str(exc)}
     # The local log stays on this machine (it only drives review_due); the
-    # review goes on chain: each judgment's axes / harm / stake become a
-    # review in the caller's ToolBond epoch batch, which is what pays.
+    # review goes on chain, in the caller's ToolBond epoch batch.
     reviews = [r for r in (result.pop("_reviews", None) or [])]
     if reviews:
         result["reviews"] = await _queue_staked_reviews(runtime, caller_id, reviews)
@@ -4382,7 +4396,8 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # tools must be able to search for them and review them — the review is
     # the signal that routes discovery, so a use-without-review surface
     # would be a broken grant.
-    "unified_tools": {"list_tools", "use_tool", "probe_tools", "attest_tools"},
+    "unified_tools": {"list_tools", "use_tool", "probe_tools", "attest_tools",
+                      "fetch_evidence"},
     # Tool substrate (docs/tool_substrate.md): authoring is opt-in per
     # agent. attest_tools also stays here for back-compat with existing
     # toolsmith-only grants.
@@ -5637,6 +5652,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "register_tool": _register_tool,
     "publish_tool": _publish_tool,
     "vet_tool": _vet_tool,
+    "fetch_evidence": _fetch_evidence,
     "adopt_tool": _adopt_tool,
     "attest_tools": _attest_tools,
     "get_history": _get_history,
@@ -5702,27 +5718,33 @@ _REVIEW_TOOL_BASE: dict[str, str] = {
 
 
 def review_axes_text() -> str:
-    """The active charter's axes, harm and stake, as the review tools
-    describe them (docs/multi_jurisdiction.md decisions 5 and 10)."""
+    """How to review, with the active charter's axes, as the review tools
+    describe it (Decision 2026-11-09)."""
     try:
         from nodes.common.library.charter import active_charter
+        from nodes.common.library.review_fields import MALWARE_DEFINITION
         axes = active_charter().axes
     except Exception:  # noqa: BLE001 (standalone atn install)
         return ""
     listed = "; ".join(f"{aid} ({thesis})" for aid, thesis in axes)
     return (
-        " REVIEW: rate per charter axis in 'axes' when you have a real "
-        f"signal, signed scores -1..+1 keyed by axis id: {listed}. Score only "
-        "axes you actually observed; omit the rest. 'harm': 0 safe .. 1 "
-        "malicious, optional. 'stake': optional ATN in base units (default "
-        "0). Reviews are staked on chain (ToolBond): committed hidden in your "
-        "epoch batch and revealed by this daemon after the epoch's anchor. "
-        "The rating settles by REP weight; it ranks the tool in library "
-        "search, and the author's bond is slashed in proportion to the "
-        "settled harm. Reviews close to the settled rating earn part of the "
-        "tool's mint (stake x accuracy, early reviews most) and win the "
-        "inaccurate reviewers' lost stake; a far-off review loses stake and "
-        "REP. You cannot review your own tools.")
+        " REVIEW: every review carries correctness (-1..1), simplicity "
+        "(0..1), novelty (0..1) and malware (true or false); one missing "
+        "any is refused. Malware means malicious code: " + MALWARE_DEFINITION
+        + ". Any system, not only the one running it; a destructive bug is "
+        "correctness, not malware. A malware flag needs evidence: what the "
+        "code does, with a pointer into it (line numbers or the quoted "
+        "code). The jurisdiction's charter axes (the DAO's values) are "
+        f"optional, -1..1 keyed by axis id: {listed}. Score each axis that "
+        "applies, on its own; an axis you leave out counts as the middle "
+        "(0.5 of the top score). Reviews carry no stake: they are committed "
+        "hidden in your epoch batch and revealed by this daemon after the "
+        "epoch's anchor, weighted by your household's REP (a household "
+        "without REP cannot review). When a tool's reviews conclude, its "
+        "reviewers share 40% of its payment by accuracy (how close each "
+        "review lands to the others on every field), whatever the scores; "
+        "a review far from the others loses REP. You cannot review your "
+        "own household's tools.")
 
 
 def _refresh_review_tools() -> None:

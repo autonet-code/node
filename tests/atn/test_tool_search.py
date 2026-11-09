@@ -283,27 +283,28 @@ async def test_household_states(tmp_path):
     rt = _make_runtime(tmp_path)
     await _family(rt)
     _with_network(rt, REMOTE)
-    axis_ids = ["correctness", "simplicity"]
+    axis_ids = ["evolution"]
+    fields = {"correctness": 0.8, "simplicity": 0.3, "novelty": 0.5, "malware": False}
     # Adopted and reviewed by us (on chain, in a batch).
     _adopt(rt, R_CSV, REMOTE[R_CSV])
     review_batch.store_for(rt).add(
         "0xagent", 7, axis_ids,
-        review_batch.ReviewEntry(digest=R_CSV, axes={"correctness": 0.8}, harm=0.1))
+        review_batch.ReviewEntry(digest=R_CSV, axes={"evolution": 0.8}, **fields))
     # Adopted, not reviewed.
     _adopt(rt, R_MAIL, REMOTE[R_MAIL])
     # Reviewed (held until registration), not adopted.
     review_batch.hold_reviews(rt, "child", [
-        {"digest": R_PDF, "axes": {"simplicity": -0.5}, "harm": 0.0}])
+        {"digest": R_PDF, **fields, "axes": {"evolution": -0.5}}])
 
     out = await search_tools(rt, "csv mail pdf", 5)
     by = {m["digest"]: m["household"] for m in out["matches"]}
     assert by[R_CSV] == {"adopted": True, "authored": False, "reviewed": True,
-                         "review": {"axes": {"correctness": 0.8}, "harm": 0.1,
+                         "review": {**fields, "axes": {"evolution": 0.8},
                                     "state": "pending", "epoch": 7}}
     assert by[R_MAIL] == {"adopted": True, "authored": False, "reviewed": False,
                           "review": None}
     assert by[R_PDF]["adopted"] is False and by[R_PDF]["reviewed"] is True
-    assert by[R_PDF]["review"] == {"axes": {"simplicity": -0.5}, "harm": 0.0,
+    assert by[R_PDF]["review"] == {**fields, "axes": {"evolution": -0.5},
                                    "state": "held", "epoch": None}
 
 
@@ -320,8 +321,8 @@ async def test_a_forfeited_batch_does_not_count_as_reviewed(tmp_path):
     rt = _make_runtime(tmp_path)
     _with_network(rt, REMOTE)
     store = review_batch.store_for(rt)
-    batch = store.add("0xagent", 3, ["correctness"],
-                      review_batch.ReviewEntry(digest=R_CSV, axes={"correctness": 1.0}))
+    batch = store.add("0xagent", 3, [],
+                      review_batch.ReviewEntry(digest=R_CSV, correctness=1.0))
     batch.status = "forfeited"
     store.save(batch)
     out = await search_tools(rt, "csv", 3)

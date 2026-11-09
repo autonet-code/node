@@ -424,9 +424,11 @@ def household_reviews(runtime: Any) -> dict[str, dict[str, Any]]:
     """digest -> this household's newest review of the tool: the reviews
     held for any agent on this daemon (not yet on chain) and those in any
     batch of its batch store that still counts (not forfeited, not rolled
-    forward). External sessions share the operator's batch, so this is the
-    household's view. Each value: ``axes``, ``harm``, ``state`` ("held" or
-    the batch status, "pending" before commit) and ``epoch``. Cached until
+    forward, not refused). External sessions share the operator's batch, so
+    this is the household's view. Each value: the review's
+    ``correctness``, ``simplicity``, ``novelty``, ``malware`` and charter
+    ``axes``, ``state`` ("held" or the batch status, "pending" before
+    commit) and ``epoch``. Cached until
     the held reviews or the batches change: every write to them bumps
     ``review_batch.writes()`` (the directories' mtimes stay in the key for
     anything written from outside, but alone they miss changes on exFAT and
@@ -455,11 +457,13 @@ def household_reviews(runtime: Any) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     if batches is not None:
         for batch in batches.all():           # oldest epoch first
-            if batch.status in ("forfeited", "rolled"):
+            if batch.status in review_batch.DEAD_STATES:
                 continue
             for r in batch.reviews:
                 out[r.digest.lower()] = {
-                    "axes": dict(r.axes), "harm": r.harm,
+                    "correctness": r.correctness, "simplicity": r.simplicity,
+                    "novelty": r.novelty, "malware": r.malware,
+                    "axes": dict(r.axes),
                     "state": batch.status or "pending", "epoch": batch.epoch}
     held = sorted(review_batch.all_held_reviews(runtime),
                   key=lambda r: int((r or {}).get("held_ts") or 0))
@@ -468,8 +472,9 @@ def household_reviews(runtime: Any) -> dict[str, dict[str, Any]]:
         if not digest:
             continue
         axes = raw.get("axes") if isinstance(raw.get("axes"), dict) else {}
-        out[digest] = {"axes": dict(axes), "harm": raw.get("harm"),
-                       "state": "held", "epoch": None}
+        out[digest] = {**{k: raw.get(k) for k in ("correctness", "simplicity",
+                                                  "novelty", "malware")},
+                       "axes": dict(axes), "state": "held", "epoch": None}
     runtime.__dict__["_household_reviews_cache"] = (key, out)
     return out
 
@@ -479,7 +484,7 @@ def household_relation(runtime: Any, digest: str,
                        ) -> dict[str, Any]:
     """``{adopted, authored, reviewed, review}`` for one tool: adopted here
     (by any agent of this daemon), authored here, and this household's own
-    review (its scores and harm) when it made one."""
+    review when it made one."""
     store = getattr(runtime, "tool_store", None)
     record = store.get(digest) if store is not None else None
     origin = getattr(record, "origin", "") if record is not None else ""

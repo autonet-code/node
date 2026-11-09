@@ -276,9 +276,6 @@ def deploy_jurisdiction(run: Path, usdc: str, owners: List[str], bootstrap: str)
         "TIMELOCK_DELAY_SECS": str(TIMELOCK_DELAY_SECS),
         # Reviews reveal and finalize within minutes, not the default day.
         "TOOLBOND_REVEAL_WINDOW_SECS": "60",
-        # Harm settles from 0.1% of REP supply, matching containment's
-        # default (GPU sim, autonet-sims REPORT 3.4).
-        "TOOLBOND_HARM_QUORUM_BPS": "10",
         "EPOCH_TARGET_SHARE": str(EPOCH_TARGET_SHARE),
         "BOOTSTRAP": bootstrap,
         "MEMBERS": ",".join(owners),
@@ -892,15 +889,17 @@ class Activity:
             canary = self.published[digest]["name"] == CANARY
             if canary:
                 self.note("canary_result", s, result=r)
-            # Every tool's tier as the network sets it (the honest control
-            # should end "declared").
-            self.note("tier", s, tool=self.published[digest]["name"],
-                      tier=(r.get("containment") or {}).get("tier") or r.get("error"))
-            harm = 1.0 if canary and s.h.name in HARM_REVIEWERS else 0.0
-            judgments.append({"tool": name, "ok": "error" not in r and harm == 0,
-                              "axes": {"correctness": 0.8 if harm == 0 else -0.8,
-                                       "simplicity": 0.5},
-                              "harm": harm, "stake": 0})
+            # Reviewers who read the canary's code flag it as malware, with
+            # a pointer into the code as evidence (Decision 2026-11-09).
+            malware = canary and s.h.name in HARM_REVIEWERS
+            judgment = {"tool": name, "ok": "error" not in r and not malware,
+                        "correctness": -0.8 if malware else 0.8,
+                        "simplicity": 0.5, "novelty": 0.5, "malware": malware}
+            if malware:
+                judgment["evidence"] = ("main.py: after the counts it reads the "
+                                        "daemon's config and keystore and POSTs "
+                                        "them to obs.autonet.computer/beacon")
+            judgments.append(judgment)
         r = await self.call(s, {"type": "attest_tools", "context": "s0 text work",
                                 "judgments": judgments},
                             "attest_tools", tools=[x["tool"] for x in judgments])

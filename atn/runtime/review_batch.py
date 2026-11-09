@@ -1,16 +1,19 @@
-"""Staked reviews on ToolBond (docs/multi_jurisdiction.md decision 10).
+"""Reviews on ToolBond (Decision 2026-11-09, docs/tool_substrate.md).
 
-Every review of a tool is one entry in its agent's batch for the epoch. The
-agent commits the batch once per epoch (a hash plus the total ATN stake),
-and reveals it after the epoch is anchored, within ToolBond's reveal window.
-ToolBond settles each tool's round on chain: the REP-weighted mean per axis
-and harm, each reviewer's accuracy, stake gains and losses, REP penalties
-and the author's bond slash (trustless-contracts ToolBond, 448023a).
+Every review of a tool is one entry in its agent's batch for the epoch: the
+four fixed fields (correctness, simplicity, novelty, malware), the charter
+axes the reviewer scored, and an evidence hash. The agent commits the batch
+once per epoch (a hash and the review count; no ATN stake) and reveals it
+after the epoch is anchored, within ToolBond's reveal window. ToolBond
+settles each tool's round on chain: the REP-weighted sums per field and
+axis, each reviewer's accuracy over all of them, and REP moved by accuracy
+(trustless-contracts ToolBond f633bc1). A household with no REP cannot
+commit (ToolBond reverts NoWeight), so the daemon queues nothing for it.
 
 A reveal is relayable: anyone holding the plaintext and the salt can submit
 it, so the batch is kept on disk as a sealed reveal the owner can hand to a
-backup. A batch never revealed forfeits its whole stake and the full REP
-penalty, so revealing always beats withholding.
+backup. A batch never revealed loses REP for each review it declared, so
+revealing always beats withholding.
 
 This module is the daemon's half: encoding, the commitment (computed locally,
 identical to ToolBond.commitmentOf), a per-agent per-epoch batch store, and
@@ -34,11 +37,12 @@ from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
-NO_SCORE = -128          # int8 sentinel: no score on this axis
-NO_HARM = 255            # uint8 sentinel: no harm score
+NO_SCORE = -128          # int8 sentinel: no score on this charter axis
 MAX_AXES = 16
 
-REVIEW_INPUT_TYPE = "(bytes32,bytes,uint8,uint256,bytes32)"
+# ToolBond.ReviewInput: digest, correctness (-100..100), simplicity (0..100),
+# novelty (0..100), malware (0 or 1), charter scores, evidence hash.
+REVIEW_INPUT_TYPE = "(bytes32,int8,uint8,uint8,uint8,bytes,bytes32)"
 
 # Counts every write to the batch store and the held reviews in this
 # process, so a cache of what they hold (tool_search.household_reviews,
@@ -64,8 +68,12 @@ def _fn(name: str, inputs: list, outputs: list = (), mutability: str = "nonpayab
     def arg(n: str, t: str) -> dict[str, Any]:
         if t == "ReviewInput[]":
             return {"name": n, "type": "tuple[]", "components": [
-                {"name": "digest", "type": "bytes32"}, {"name": "scores", "type": "bytes"},
-                {"name": "harm", "type": "uint8"}, {"name": "stake", "type": "uint256"},
+                {"name": "digest", "type": "bytes32"},
+                {"name": "correctness", "type": "int8"},
+                {"name": "simplicity", "type": "uint8"},
+                {"name": "novelty", "type": "uint8"},
+                {"name": "malware", "type": "uint8"},
+                {"name": "scores", "type": "bytes"},
                 {"name": "evidenceHash", "type": "bytes32"}]}
         return {"name": n, "type": t}
     return {"name": name, "type": "function", "stateMutability": mutability,
@@ -74,9 +82,10 @@ def _fn(name: str, inputs: list, outputs: list = (), mutability: str = "nonpayab
 
 
 REVIEW_TUPLE = [
-    ("reviewer", "address"), ("harm", "uint8"), ("claimed", "bool"),
-    ("accuracy", "uint64"), ("scores", "bytes16"), ("stake", "uint128"),
-    ("weight", "uint128"), ("harmAccuracy", "uint64"),
+    ("reviewer", "address"), ("correctness", "int8"), ("simplicity", "uint8"),
+    ("novelty", "uint8"), ("malware", "uint8"), ("claimed", "bool"),
+    ("bountied", "bool"), ("bondClaimed", "bool"), ("accuracy", "uint64"),
+    ("weight", "uint128"), ("scores", "bytes16"),
 ]
 
 
@@ -88,20 +97,20 @@ def _review_fn(name: str, inputs: list) -> dict[str, Any]:
 
 
 # ToolBond.Stage
-STAGE_NONE, STAGE_OPEN, STAGE_COOLING, STAGE_FINALIZING, STAGE_DONE = range(5)
-STAGES = ("none", "open", "cooling", "finalizing", "done")
-# Review.accuracy when nothing could be scored (refunded, no gain or loss).
+STAGE_NONE, STAGE_OPEN, STAGE_FINALIZING, STAGE_DONE = range(4)
+STAGES = ("none", "open", "finalizing", "done")
+# Review.accuracy when nothing could be scored (no gain or loss).
 UNINFORMATIVE = 2 ** 64 - 1
 
 TOOL_BOND_REVIEW_ABI = [
     _fn("currentEpoch", [], [("", "uint256")], "view"),
     _fn("epochInfo", [("epoch", "uint256")],
         [("started", "bool"), ("charterHash", "bytes32"), ("axisIds", "bytes32[]"),
-         ("snapshot", "uint48"), ("supply", "uint256"), ("revealDeadline", "uint256")], "view"),
+         ("snapshot", "uint48"), ("supply", "uint256"), ("revealDeadline", "uint256"),
+         ("unscoredBps", "uint256")], "view"),
     _fn("getRound", [("digest", "bytes32"), ("epoch", "uint256")],
-        [("stage", "uint8"), ("overruled", "bool"), ("appealEnds", "uint48"),
-         ("weight", "uint256"), ("harmSum", "uint256"), ("harmMass", "uint256"),
-         ("settledHarm", "uint256"), ("stakes", "uint256"), ("reviewCount", "uint256")], "view"),
+        [("stage", "uint8"), ("weight", "uint256"), ("reviewCount", "uint256"),
+         ("beforeConclusion", "bool")], "view"),
     _fn("roundAxis", [("digest", "bytes32"), ("epoch", "uint256"), ("i", "uint256")],
         [("sum", "int256"), ("mass", "uint256")], "view"),
     _review_fn("reviewAt", [("digest", "bytes32"), ("epoch", "uint256"), ("i", "uint256")]),
@@ -109,23 +118,31 @@ TOOL_BOND_REVIEW_ABI = [
     _fn("isBonded", [("digest", "bytes32")], [("", "bool")], "view"),
     _fn("reviewerShareBps", [], [("", "uint256")], "view"),
     _fn("revealEnds", [("epoch", "uint256")], [("", "uint256")], "view"),
+    _fn("rep", [], [("", "address")], "view"),
     _fn("commits", [("", "uint256"), ("", "address")],
-        [("commitment", "bytes32"), ("stake", "uint128"), ("weight", "uint128"),
+        [("commitment", "bytes32"), ("weight", "uint128"),
          ("revealed", "bool"), ("forfeited", "bool")], "view"),
     _fn("commitmentOf", [("epoch", "uint256"), ("agent", "address"),
                          ("reviews", "ReviewInput[]"), ("salt", "bytes32")],
         [("", "bytes32")], "pure"),
-    # trustless-contracts ad32e38: the commit declares its review count
-    # (public), the reveal must hold exactly that many.
-    _fn("commit", [("commitment", "bytes32"), ("stake", "uint256"), ("reviews", "uint256")]),
+    # The commit declares its review count (public); the reveal must hold
+    # exactly that many. No ATN rides on it.
+    _fn("commit", [("commitment", "bytes32"), ("reviews", "uint256")]),
     _fn("reveal", [("epoch", "uint256"), ("agent", "address"),
                    ("reviews", "ReviewInput[]"), ("salt", "bytes32")]),
     _fn("forfeit", [("epoch", "uint256"), ("agent", "address")]),
     _fn("finalize", [("digest", "bytes32"), ("epoch", "uint256"), ("maxReviews", "uint256")]),
     _fn("claim", [("digest", "bytes32"), ("epoch", "uint256"), ("reviewer", "address")]),
-    _fn("toolRating", [("digest", "bytes32"), ("axisId", "bytes32")],
+    _fn("toolRating", [("digest", "bytes32"), ("key", "bytes32")],
         [("sum", "int256"), ("mass", "uint256")], "view"),
-    _fn("toolHarm", [("digest", "bytes32")], [("sum", "uint256"), ("mass", "uint256")], "view"),
+]
+
+# Substrate's owner binding and RepToken's balance: a household's REP.
+_HOUSEHOLD_ABI = [
+    _fn("getAgentOwner", [("agent", "address")], [("", "address")], "view"),
+]
+_REP_BALANCE_ABI = [
+    _fn("balanceOf", [("account", "address")], [("", "uint256")], "view"),
 ]
 
 
@@ -136,7 +153,8 @@ TOOL_BOND_REVIEW_ABI = [
 def encode_scores(axes: dict[str, float] | None, axis_ids: list[str]) -> bytes:
     """One int8 per charter axis, in charter order: round(score x 100),
     clamped to [-100, 100]; NO_SCORE where the review has no score. Empty
-    bytes when the review scores no axis at all."""
+    bytes when the review scores no axis at all (ToolBond reads that as
+    every axis unscored)."""
     if not axes:
         return b""
     if len(axis_ids) > MAX_AXES:
@@ -154,11 +172,8 @@ def encode_scores(axes: dict[str, float] | None, axis_ids: list[str]) -> bytes:
     return bytes(out)
 
 
-def encode_harm(harm: float | None) -> int:
-    """Harm in [0, 1] as 0..100; NO_HARM when absent."""
-    if harm is None:
-        return NO_HARM
-    return max(0, min(100, int(round(float(harm) * 100))))
+def _hundredths(value: float, lo: int) -> int:
+    return max(lo, min(100, int(round(float(value) * 100))))
 
 
 def _b32(h: str) -> bytes:
@@ -170,16 +185,32 @@ def _b32(h: str) -> bytes:
 
 @dataclass
 class ReviewEntry:
-    """One review in an agent's epoch batch."""
+    """One review in an agent's epoch batch (Decision 2026-11-09)."""
     digest: str                      # tool manifest digest (hex)
-    axes: dict[str, float] = field(default_factory=dict)   # axis id -> [-1, 1]
-    harm: Optional[float] = None     # [0, 1], None = no harm score
-    stake: int = 0                   # ATN base units
-    evidence_hash: str = "00" * 32   # hex
+    correctness: float = 0.0         # -1..1
+    simplicity: float = 0.0          # 0..1
+    novelty: float = 0.0             # 0..1
+    malware: bool = False
+    axes: dict[str, float] = field(default_factory=dict)   # charter axis id -> [-1, 1]
+    evidence_hash: str = "00" * 32   # hex; sha256 of the evidence blob
 
     def to_input(self, axis_ids: list[str]) -> tuple:
-        return (_b32(self.digest), encode_scores(self.axes, axis_ids),
-                encode_harm(self.harm), int(self.stake), _b32(self.evidence_hash))
+        return (_b32(self.digest), _hundredths(self.correctness, -100),
+                _hundredths(self.simplicity, 0), _hundredths(self.novelty, 0),
+                1 if self.malware else 0, encode_scores(self.axes, axis_ids),
+                _b32(self.evidence_hash))
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Optional["ReviewEntry"]:
+        """A stored entry, or None when it lacks a fixed field (a batch
+        written before the fields existed)."""
+        known = {k: d[k] for k in ("digest", "correctness", "simplicity",
+                                   "novelty", "malware", "axes", "evidence_hash")
+                 if k in d}
+        if not all(k in known for k in ("digest", "correctness", "simplicity",
+                                        "novelty", "malware")):
+            return None
+        return cls(**known)
 
 
 def commitment_of(epoch: int, agent: str, inputs: list[tuple], salt: bytes) -> bytes:
@@ -216,10 +247,6 @@ class EpochBatch:
     rounds: dict[str, str] = field(default_factory=dict)
     last_error: str = ""
 
-    @property
-    def total_stake(self) -> int:
-        return sum(int(r.stake) for r in self.reviews)
-
     def inputs(self) -> list[tuple]:
         return [r.to_input(self.axis_ids) for r in self.reviews]
 
@@ -246,8 +273,10 @@ class ReviewBatchStore:
         if not p.is_file():
             return EpochBatch(epoch=int(epoch), agent=agent, axis_ids=list(axis_ids))
         d = json.loads(p.read_text(encoding="utf-8"))
+        entries = [ReviewEntry.from_dict(r) for r in d.get("reviews", [])
+                   if isinstance(r, dict)]
         return EpochBatch(epoch=int(d["epoch"]), agent=d["agent"], axis_ids=list(d["axis_ids"]),
-                          reviews=[ReviewEntry(**r) for r in d.get("reviews", [])],
+                          reviews=[e for e in entries if e is not None],
                           salt=d.get("salt", ""), commitment=d.get("commitment", ""),
                           committed_tx=d.get("committed_tx", ""),
                           revealed_tx=d.get("revealed_tx", ""),
@@ -292,6 +321,11 @@ class ReviewBatchStore:
         """Committed batches not yet revealed (oldest first)."""
         return [b for b in self.all()
                 if b.commitment and not b.revealed_tx and b.status != "forfeited"]
+
+
+# Batch states whose reviews never count: forfeited unrevealed, rolled into
+# a later batch, or refused (the household held no REP).
+DEAD_STATES = ("forfeited", "rolled", "refused")
 
 
 # ---------------------------------------------------------------------------
@@ -357,18 +391,17 @@ class ReviewBondClient:
     async def commit_of(self, epoch: int, agent: str) -> Optional[dict[str, Any]]:
         def fn(b, s):
             from web3 import Web3
-            c, stake, weight, revealed, forfeited = b.functions.commits(
+            c, weight, revealed, forfeited = b.functions.commits(
                 int(epoch), Web3.to_checksum_address(agent)).call()
-            return {"commitment": c.hex(), "stake": int(stake), "weight": int(weight),
+            return {"commitment": c.hex(), "weight": int(weight),
                     "revealed": bool(revealed), "forfeited": bool(forfeited)}
         return await self._read(fn)
 
     async def round_of(self, digest: str, epoch: int) -> Optional[dict[str, Any]]:
         def fn(b, s):
             r = b.functions.getRound(_b32(digest), int(epoch)).call()
-            return {"stage": int(r[0]), "overruled": bool(r[1]), "appeal_ends": int(r[2]),
-                    "weight": int(r[3]), "harm_sum": int(r[4]), "harm_mass": int(r[5]),
-                    "settled_harm": int(r[6]), "stakes": int(r[7]), "reviews": int(r[8])}
+            return {"stage": int(r[0]), "weight": int(r[1]), "reviews": int(r[2]),
+                    "before_conclusion": bool(r[3])}
         return await self._read(fn)
 
     async def review_of(self, digest: str, epoch: int,
@@ -377,15 +410,33 @@ class ReviewBondClient:
             from web3 import Web3
             v = b.functions.reviewOf(_b32(digest), int(epoch),
                                      Web3.to_checksum_address(reviewer)).call()
-            return {"reviewer": v[0], "harm": int(v[1]), "claimed": bool(v[2]),
-                    "accuracy": int(v[3]), "stake": int(v[5]), "weight": int(v[6]),
-                    "harm_accuracy": int(v[7])}
+            return {"reviewer": v[0], "correctness": int(v[1]), "simplicity": int(v[2]),
+                    "novelty": int(v[3]), "malware": int(v[4]), "claimed": bool(v[5]),
+                    "accuracy": int(v[8]), "weight": int(v[9])}
         return await self._read(fn)
 
+    async def household_rep(self, agent: str) -> Optional[int]:
+        """The REP of ``agent``'s household (its bound owner, else itself),
+        as ToolBond weighs a commit; None when it can't be read."""
+        def run() -> int:
+            from web3 import Web3
+            w3 = self._base._w3()
+            bond, substrate = self._contracts(w3)
+            sub = w3.eth.contract(address=substrate.address, abi=_HOUSEHOLD_ABI)
+            a = Web3.to_checksum_address(agent)
+            owner = sub.functions.getAgentOwner(a).call()
+            house = a if int(owner, 16) == 0 else Web3.to_checksum_address(owner)
+            rep = w3.eth.contract(address=bond.functions.rep().call(), abi=_REP_BALANCE_ABI)
+            return int(rep.functions.balanceOf(house).call())
+        try:
+            return await asyncio.to_thread(run)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("household REP read failed: %s", exc)
+            return None
+
     async def commit(self, private_key: str, batch: EpochBatch) -> dict[str, Any]:
-        """Seal and commit ``batch`` (approving its stake first). The salt is
-        fresh per batch; the caller saves the batch so the reveal survives a
-        restart."""
+        """Seal and commit ``batch``. The salt is fresh per batch; the
+        caller saves the batch so the reveal survives a restart."""
         from eth_account import Account
         agent = Account.from_key(private_key).address
         if agent.lower() != batch.agent.lower():
@@ -394,18 +445,9 @@ class ReviewBondClient:
             batch.salt = secrets.token_hex(32)
         c = commitment_of(batch.epoch, agent, batch.inputs(), bytes.fromhex(batch.salt))
         batch.commitment = c.hex()
-        stake = batch.total_stake
-        if stake > 0:
-            allowance = await self._read(
-                lambda b, s: int(s.functions.allowance(agent, b.address).call()))
-            if allowance is None or allowance < stake:
-                res = await self._write(private_key, lambda b, s, a: s.functions.approve(
-                    b.address, int(stake)))
-                if not res.get("success"):
-                    return {**res, "step": "approve"}
         count = len(batch.inputs())
         res = await self._write(private_key, lambda b, s, a: b.functions.commit(
-                                    c, int(stake), int(count)),
+                                    c, int(count)),
                                 gas_floor=400_000)
         if res.get("success"):
             batch.committed_tx = res["tx_hash"]
@@ -473,15 +515,38 @@ HELD_NOTE = (
     "held: reviews go on chain from a registered agent. This one is kept "
     "and submitted to the open round once your household is registered "
     "(the owner connects a wallet in the Autonet app and approves your "
-    "registration). To earn from a review it also needs a stake, any "
-    "amount of ATN; your reviews weigh by your household's REP.")
+    "registration). Your reviews weigh by your household's REP, and a "
+    "household without REP cannot review.")
 # An external agent's reviews go out from the operator (Decision 2026-11-08).
 HELD_NOTE_OPERATOR = (
     "held: you review as this household's operator, which is not registered "
     "yet. This review is kept and submitted to the open round once it is "
-    "(the owner registers the operator in the Autonet app, Household). To "
-    "earn from a review it also needs a stake, any amount of ATN from the "
-    "operator's balance; your reviews weigh by your household's REP.")
+    "(the owner registers the operator in the Autonet app, Household). Your "
+    "reviews weigh by your household's REP, and a household without REP "
+    "cannot review.")
+NO_REP_NOTE = (
+    "not sent: your household holds no REP, and ToolBond refuses reviews "
+    "from a household without it (Decision 2026-11-09). REP comes from the "
+    "tool pool, as an author of tools other households review.")
+
+
+def note_household_rep(runtime: Any, rep: Optional[int]) -> None:
+    """Remember this daemon's household REP (one household per daemon):
+    ``review_due`` stays quiet while it is 0. None = unknown, ignored."""
+    if rep is None:
+        return
+    try:
+        runtime.__dict__["_household_rep"] = int(rep)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def household_has_no_rep(runtime: Any) -> bool:
+    """True once a read showed the household holds no REP."""
+    try:
+        return runtime.__dict__.get("_household_rep") == 0
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def all_held_reviews(runtime: Any) -> list[dict[str, Any]]:
@@ -568,11 +633,36 @@ async def flush_held_reviews(runtime: Any) -> int:
     return queued
 
 
+def review_error(raw: dict[str, Any]) -> str:
+    """Why ``raw`` is not a valid review, or "" (Decision 2026-11-09): every
+    review carries correctness, simplicity, novelty and malware, and a
+    malware flag carries evidence (its blob's sha256 as ``evidence_hash``)."""
+    from nodes.common.library.review_fields import parse_fields
+    fields, why = parse_fields(raw)
+    if fields is None:
+        return why
+    if fields["malware"] and not _evidence_hash(raw.get("evidence_hash")):
+        return ("a malware flag needs evidence: say what the code does and "
+                "point into it (file and line numbers, or the quoted code)")
+    return ""
+
+
+def _evidence_hash(value: Any) -> str:
+    h = str(value or "").lower().removeprefix("0x")
+    if len(h) != 64 or any(c not in "0123456789abcdef" for c in h) or h == "0" * 64:
+        return ""
+    return h
+
+
 def normalize_review(raw: dict[str, Any], axis_ids: list[str]) -> Optional[ReviewEntry]:
-    """A review step's {digest, axes?, harm?, stake?, evidence_hash?} as a
-    ReviewEntry, or None when it carries nothing ToolBond can settle (no
-    charter axis scored and no harm). Axes outside the charter are dropped;
-    scores clamp to [-1, 1], harm to [0, 1], stake to a non-negative int."""
+    """A review step's {digest, correctness, simplicity, novelty, malware,
+    axes?, evidence_hash?} as a ReviewEntry, or None when it is not a valid
+    review (``review_error``). Charter axes outside the charter are dropped;
+    scores clamp to their ranges."""
+    from nodes.common.library.review_fields import parse_fields
+    if review_error(raw):
+        return None
+    fields, _ = parse_fields(raw)
     axes: dict[str, float] = {}
     for axis_id, value in (raw.get("axes") or {}).items():
         if str(axis_id) not in axis_ids or isinstance(value, bool):
@@ -583,41 +673,26 @@ def normalize_review(raw: dict[str, Any], axis_ids: list[str]) -> Optional[Revie
             continue
         if v == v:
             axes[str(axis_id)] = max(-1.0, min(1.0, v))
-    harm: Optional[float] = None
-    raw_harm = raw.get("harm")
-    if raw_harm is not None and not isinstance(raw_harm, bool):
-        try:
-            h = float(raw_harm)
-            if h == h:
-                harm = max(0.0, min(1.0, h))
-        except (TypeError, ValueError):
-            harm = None
-    if not axes and harm is None:
-        return None
-    stake = 0
-    try:
-        stake = max(0, int(raw.get("stake") or 0))
-    except (TypeError, ValueError):
-        stake = 0
-    evidence = str(raw.get("evidence_hash") or "").lower().removeprefix("0x")
-    if len(evidence) != 64 or any(c not in "0123456789abcdef" for c in evidence):
-        evidence = "00" * 32
     return ReviewEntry(digest=str(raw["digest"]).lower().removeprefix("0x"),
-                       axes=dict(sorted(axes.items())), harm=harm, stake=stake,
-                       evidence_hash=evidence)
+                       correctness=fields["correctness"],
+                       simplicity=fields["simplicity"], novelty=fields["novelty"],
+                       malware=fields["malware"], axes=dict(sorted(axes.items())),
+                       evidence_hash=_evidence_hash(raw.get("evidence_hash")) or "00" * 32)
 
 
 async def queue_reviews(runtime: Any, agent_id: str,
                         reviews: list[dict[str, Any]]) -> dict[str, Any]:
     """Queue the reviewing agent's reviews into its batch for ToolBond's
     current epoch. Never raises; returns {queued, epoch, skipped, note}.
-    Each review is {digest, axes?, harm?, stake?, evidence_hash?, author?};
-    ``author`` (the manifest author) lets the agent's own tools be skipped.
+    Each review is {digest, correctness, simplicity, novelty, malware,
+    axes?, evidence_hash?, author?}; ``author`` (the manifest author) lets
+    the agent's own tools be skipped. An invalid review (a fixed field
+    missing, a malware flag without evidence) is skipped with the reason.
 
     The agent must be registered on chain with a daemon-held key (the batch
     is committed with its key), and ToolBond must be reachable to read the
-    epoch. Reviews carrying no charter axis score and no harm are skipped:
-    ToolBond would refund them as uninformative.
+    epoch. A household holding no REP gets nothing queued: ToolBond refuses
+    its commit.
 
     An external agent's identity is the operator's (Decision 2026-11-08),
     so its reviews land in the operator's batch: every external session of
@@ -650,24 +725,31 @@ async def queue_reviews(runtime: Any, agent_id: str,
     if epoch is None:
         out["note"] = "ToolBond unreachable; reviews were not queued"
         return out
+    rep = await client.household_rep(address) if hasattr(client, "household_rep") else None
+    note_household_rep(runtime, rep)
+    if rep == 0:
+        out["note"] = NO_REP_NOTE
+        out["skipped"] = [{"digest": r.get("digest"), "error": "household holds no REP"}
+                          for r in reviews]
+        return out
     axis_ids = list(active_charter().ids)
     store = store_for(runtime)
     batch = None
     for raw in reviews:
         if str(raw.get("author") or "").lower() == address.lower():
-            # ToolBond never counts an author's review of their own tool;
-            # queueing it would only lock the stake until the reveal.
+            # ToolBond never counts an author's review of their own tool.
             out["skipped"].append({"digest": raw.get("digest"),
                                    "error": "you cannot review your own tool"})
             continue
         try:
-            entry = normalize_review(raw, axis_ids)
+            why = review_error(raw)
+            entry = None if why else normalize_review(raw, axis_ids)
         except Exception as exc:  # noqa: BLE001
             out["skipped"].append({"digest": raw.get("digest"), "error": str(exc)})
             continue
         if entry is None:
             out["skipped"].append({"digest": raw.get("digest"),
-                                   "error": "no charter axis or harm scored"})
+                                   "error": why or "not a valid review"})
             continue
         batch = store.add(address, int(epoch), axis_ids, entry)
         out["queued"] += 1

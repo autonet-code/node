@@ -335,7 +335,8 @@ async def test_a_tool_one_session_adopted_serves_every_external_session(tmp_path
     assert used.get("result") == {"echo": "hi"}, used
     reviewed = await execute_tool(
         "attest_tools", {"context": "work", "judgments": [
-            {"tool": "net_tool", "ok": True, "axes": {"correctness": 0.5}}]},
+            {"tool": "net_tool", "correctness": 0.5, "simplicity": 0.5,
+             "novelty": 0.5, "malware": False}]},
         rt, caller_id="cc-b")
     assert reviewed.get("attested") == 1 and not reviewed.get("skipped"), reviewed
     # Reviewed by the household: due for nobody.
@@ -381,7 +382,8 @@ async def test_native_agents_keep_their_lineage_scoping(tmp_path):
     assert "not available" in used.get("error", ""), used
     reviewed = await execute_tool(
         "attest_tools", {"context": "work", "judgments": [
-            {"tool": "net_tool", "ok": True}]}, rt, caller_id="nat")
+            {"tool": "net_tool", "correctness": 0.5, "simplicity": 0.5,
+             "novelty": 0.5, "malware": False}]}, rt, caller_id="nat")
     assert reviewed.get("attested") == 0 and reviewed["skipped"], reviewed
     # ...nor its code.
     dest = tmp_path / "nat-checkout"

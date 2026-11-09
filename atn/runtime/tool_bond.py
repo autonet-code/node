@@ -167,10 +167,7 @@ TOOL_BOND_CLIENT_ABI = [
     _fn("reviewerShareBps", [], [("", "uint256")], "view"),
     _fn("bonds", [("", "bytes32")],
         [("author", "address"), ("stake", "uint256"), ("unbondRequestedAt", "uint256"),
-         ("unbondEpoch", "uint256"), ("pending", "uint32")], "view"),
-    _fn("toolRating", [("digest", "bytes32"), ("axisId", "bytes32")],
-        [("sum", "int256"), ("mass", "uint256")], "view"),
-    _fn("toolHarm", [("digest", "bytes32")], [("sum", "uint256"), ("mass", "uint256")], "view"),
+         ("pending", "uint32"), ("bounty", "uint256")], "view"),
     _fn("bond", [("digest", "bytes32"), ("amount", "uint256")]),
     _fn("requestUnbond", [("digest", "bytes32")]),
     _fn("withdraw", [("digest", "bytes32")]),
@@ -288,30 +285,12 @@ class ToolBondClient:
         """The author's bond: what the UI and the bond gate show."""
         def fn(b, s):
             d = _b32(digest)
-            author, stake, unbond_at, unbond_epoch, pending = b.functions.bonds(d).call()
+            author, stake, unbond_at, pending, bounty = b.functions.bonds(d).call()
             return {
                 "author": author, "stake": int(stake), "unbond_requested_at": int(unbond_at),
-                "unbond_epoch": int(unbond_epoch), "pending_rounds": int(pending),
+                "pending_rounds": int(pending), "bounty": int(bounty),
                 "bonded": bool(b.functions.isBonded(d).call()),
             }
-        return await self._read(fn)
-
-    async def rating(self, digest: str, axis_ids: list[str]) -> Optional[dict[str, Any]]:
-        """The settled rating over every finalized round, per charter axis:
-        the REP-weighted sum and REP mass (``mean`` = sum / mass / 100, in
-        -1..1), and harm the same way (``mean`` in 0..1). Numbers, not a
-        verdict: what is trustworthy enough is the reader's call."""
-        def fn(b, s):
-            d = _b32(digest)
-            axes: dict[str, Any] = {}
-            for axis_id in axis_ids:
-                total, mass = b.functions.toolRating(d, axis_key(axis_id)).call()
-                axes[axis_id] = {"sum": int(total), "mass": int(mass),
-                                 "mean": (int(total) / int(mass) / 100.0) if mass else None}
-            h_sum, h_mass = b.functions.toolHarm(d).call()
-            return {"axes": axes,
-                    "harm": {"sum": int(h_sum), "mass": int(h_mass),
-                             "mean": (int(h_sum) / int(h_mass) / 100.0) if h_mass else None}}
         return await self._read(fn)
 
     # -- writes: author ------------------------------------------------

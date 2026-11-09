@@ -72,6 +72,28 @@ def _is_address(value: str) -> bool:
     return True
 
 
+MALWARE_EVIDENCE_REQUIRED = (
+    "a malware flag needs evidence: say what the code does and point into "
+    "it (file and line numbers, or the quoted code)")
+
+
+def _charter_scores(raw: Any) -> dict[str, float]:
+    """A review's charter scores, ``{axis_id: [-1, 1]}``: garbage dropped,
+    unscored axes simply absent (ToolBond counts them at the default)."""
+    out: dict[str, float] = {}
+    if isinstance(raw, dict):
+        for axis_id, value in raw.items():
+            if isinstance(value, bool):
+                continue
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                continue
+            if v == v:
+                out[str(axis_id)] = max(-1.0, min(1.0, v))
+    return out
+
+
 @dataclass
 class ToolRecord:
     """One registered tool: manifest digest + daemon-local state.
@@ -1503,26 +1525,22 @@ class ToolStore:
         judgments: list[dict[str, Any]],
         context_text: str,
     ) -> dict[str, Any]:
-        """Record COGNITIVE attestations for a closed work item.
+        """Record the reviews of a closed work item (Decision 2026-11-09).
 
-        Unlike mechanical receipts (per call, worthless to mint), an
-        attestation is a deliberate reflection step: the caller judges which
-        registered tools served the work it just finished. This is the only
-        usage the mint counts (docs/tool_substrate.md — two receipt tiers).
+        ``judgments`` — list of ``{"tool", "correctness", "simplicity",
+        "novelty", "malware", "evidence"?, "axes"?, "ok"?, "note"?}``.
+        Every review carries the four fixed fields; a malware flag carries
+        ``evidence`` (free text pointing into the code), stored as a
+        content-addressed blob whose sha256 is the review's evidence hash.
+        Each tool is resolved via ``self.resolve`` and scoping-checked; a
+        tool the caller may not use, can't resolve, or an invalid review is
+        skipped and reported, never failing the batch. ``context_text``
+        (the work item) is kept with the note blob.
 
-        ``judgments`` — list of ``{"tool", "ok", "score"?, "axes"?,
-        "harm"?, "stake"?, "own_share"?, "note"?}``. Each
-        tool is resolved via ``self.resolve`` and scoping-checked; a tool the
-        caller may not use (or can't resolve) is skipped and reported, never
-        failing the batch. ``context_text`` (the work item) is kept with the
-        review blob.
-
-        Nothing is gossiped (docs/multi_jurisdiction.md decision 10;
-        Decision 2026-11-07: the mint reads staked ToolBond review rounds,
-        so a use event would only reveal which household used which tool).
-        Each judgment's axes / harm / stake come back under ``_reviews`` for
-        the caller to queue as a staked ToolBond review; the local
-        attestation row keeps them for history, the UI and ``review_due``."""
+        Nothing is gossiped: each review comes back under ``_reviews`` for
+        the caller to queue on ToolBond; the local row keeps it for
+        history, the UI and ``review_due``."""
+        from nodes.common.library.review_fields import parse_fields
         caller = caller_id if caller_id else OWNER_AUTHOR
 
         try:
@@ -1546,50 +1564,17 @@ class ToolStore:
                 skipped.append({"tool": tool_ref,
                                 "error": "not in author lineage"})
                 continue
-
-            ok = bool(judgment.get("ok"))
-            raw_score = judgment.get("score")
-            score = 0.0
-            if raw_score is not None:
-                try:
-                    score = max(0.0, min(1.0, float(raw_score)))
-                except (TypeError, ValueError):
-                    score = 0.0
-            # v3 per-charter-axis signed review scores (spec Decision
-            # 2026-07-08): {axis_id: [-1, +1]}, unknown/garbage entries
-            # dropped, axes the reviewer didn't score simply absent.
-            axes: dict[str, float] = {}
-            raw_axes = judgment.get("axes")
-            if isinstance(raw_axes, dict):
-                for axis_id, value in raw_axes.items():
-                    try:
-                        axes[str(axis_id)] = max(-1.0, min(1.0, float(value)))
-                    except (TypeError, ValueError):
-                        continue
-            harm: float | None = None
-            raw_harm = judgment.get("harm")
-            if raw_harm is not None and not isinstance(raw_harm, bool):
-                try:
-                    harm = max(0.0, min(1.0, float(raw_harm)))
-                except (TypeError, ValueError):
-                    harm = None
-            stake = 0
-            try:
-                stake = max(0, int(judgment.get("stake") or 0))
-            except (TypeError, ValueError):
-                stake = 0
-            # Reviewed composition split (Decision 2026-10-13 §9): optional
-            # estimate in [0,1] of how much of a composite's value is its
-            # own logic vs its declared deps. Garbage is dropped.
-            own_share: float | None = None
-            raw_own = judgment.get("own_share")
-            if raw_own is not None and not isinstance(raw_own, bool):
-                try:
-                    v = float(raw_own)
-                    if v == v and abs(v) != float("inf"):  # finite only
-                        own_share = round(max(0.0, min(1.0, v)), 6)
-                except (TypeError, ValueError):
-                    own_share = None
+            fields, why = parse_fields(judgment)
+            if fields is None:
+                skipped.append({"tool": tool_ref, "error": why})
+                continue
+            evidence_text = str(judgment.get("evidence") or "").strip()
+            if fields["malware"] and not evidence_text:
+                skipped.append({"tool": tool_ref, "error": MALWARE_EVIDENCE_REQUIRED})
+                continue
+            axes = _charter_scores(judgment.get("axes"))
+            ok = (bool(judgment["ok"]) if isinstance(judgment.get("ok"), bool)
+                  else fields["correctness"] > 0 and not fields["malware"])
             note = judgment.get("note")
 
             review_digest = ""
@@ -1599,21 +1584,25 @@ class ToolStore:
                     "manifest_digest": record.digest,
                     "caller": caller,
                     "ok": ok,
-                    "score": score,
+                    **fields,
                     "note": str(note),
                     "context": context_text[:2000],
                     "ts": ts,
                 }
                 if axes:
                     review["axes"] = dict(sorted(axes.items()))
-                if harm is not None:
-                    review["harm"] = harm
-                if own_share is not None:
-                    review["own_share"] = own_share
                 try:
                     review_digest = blobs.add_json(review) or ""
                 except Exception as exc:
                     log.warning("attestation review blob failed: %s", exc)
+            evidence_hash = review_digest
+            if fields["malware"]:
+                evidence_hash = self.store_evidence(
+                    record.digest, record.manifest, caller, evidence_text, ts)
+                if not evidence_hash:
+                    skipped.append({"tool": tool_ref,
+                                    "error": "the evidence could not be stored"})
+                    continue
 
             self._receipt_seq += 1
             row = {
@@ -1624,17 +1613,14 @@ class ToolStore:
                 "tool_author": record.author,
                 "caller": caller,
                 "ok": ok,
-                "score": score,
+                "score": round(max(0.0, fields["correctness"]), 6),
+                **fields,
                 "review_digest": review_digest,
             }
             if axes:
                 row["axes"] = dict(sorted(axes.items()))
-            if harm is not None:
-                row["harm"] = harm
-            if stake:
-                row["stake"] = stake
-            if own_share is not None:
-                row["own_share"] = own_share
+            if fields["malware"]:
+                row["evidence_hash"] = evidence_hash
             # Stamp the CALLER's harness distro (docs/tool_substrate.md —
             # loadout digest is atomic with the attestation; Decision
             # 2026-10-12: per-agent binding, not the daemon-wide default).
@@ -1653,13 +1639,54 @@ class ToolStore:
                 fh.write(json.dumps(row) + "\n")
 
             attested += 1
-            if axes or harm is not None:
-                reviews.append({"digest": record.digest, "axes": dict(axes),
-                                "harm": harm, "stake": stake,
-                                "evidence_hash": review_digest,
-                                "author": str(record.manifest.get("author") or "")})
+            reviews.append({"digest": record.digest, **fields, "axes": dict(axes),
+                            "evidence_hash": evidence_hash,
+                            "author": str(record.manifest.get("author") or "")})
 
         return {"attested": attested, "skipped": skipped, "_reviews": reviews}
+
+    def store_evidence(self, digest: str, manifest: dict[str, Any], caller: str,
+                       text: str, ts: int | None = None) -> str:
+        """Keep a malware flag's evidence as a content-addressed blob on this
+        daemon and return its sha256 (the review's evidence hash). Keeping it
+        available is the reviewer's job: peers fetch it from here
+        (``fetch_evidence``). "" when the blob store is unavailable."""
+        try:
+            blobs: Any = self._blob_store()
+        except RuntimeError:
+            return ""
+        body = {"kind": "malware_evidence", "manifest_digest": digest,
+                "code_digest": str(manifest.get("code_digest") or ""),
+                "reviewer": self._consensus_identity(caller),
+                "evidence": str(text)[:20_000],
+                "ts": int(ts if ts is not None else time.time())}
+        try:
+            return blobs.add_json(body) or ""
+        except Exception as exc:  # noqa: BLE001
+            log.warning("malware evidence blob failed: %s", exc)
+            return ""
+
+    async def fetch_evidence(self, evidence_hash: str) -> dict[str, Any]:
+        """A review's evidence by its hash: this daemon's blob store, then
+        peers (``blob_fetcher``). The bytes are checked against the hash."""
+        import hashlib
+        h = str(evidence_hash or "").strip().lower().removeprefix("0x")
+        if len(h) != 64 or any(c not in "0123456789abcdef" for c in h):
+            return {"error": "evidence_hash must be 64 hex characters"}
+        if h == "0" * 64:
+            return {"error": "this review carries no evidence"}
+        raw = await self.fetch_bytes(h)
+        if raw is None:
+            return {"evidence_hash": h, "found": False,
+                    "note": "no daemon holding this evidence is reachable; "
+                            "keeping it online is the reviewer's job"}
+        if hashlib.sha256(raw).hexdigest() != h:
+            return {"error": "the fetched bytes do not match the hash"}
+        try:
+            body: Any = json.loads(raw)
+        except ValueError:
+            body = raw.decode("utf-8", errors="replace")[:20_000]
+        return {"evidence_hash": h, "found": True, "evidence": body}
 
     def recent_attestations(
         self, digest: str, *, limit: int = 50,
@@ -1704,10 +1731,12 @@ class ToolStore:
                 "ts": row.get("ts"),
                 "caller": row.get("caller", ""),
                 "ok": bool(row.get("ok")),
-                "score": row.get("score"),
+                "correctness": row.get("correctness"),
+                "simplicity": row.get("simplicity"),
+                "novelty": row.get("novelty"),
+                "malware": row.get("malware"),
                 "axes": row.get("axes") or {},
-                "harm": row.get("harm"),
-                "stake": row.get("stake", 0),
+                "evidence_hash": row.get("evidence_hash", ""),
                 "note": "",
             }
             review_digest = str(row.get("review_digest") or "")
@@ -2404,29 +2433,26 @@ class ToolStore:
         self,
         caller_id: str | None,
         tool_ref: str,
-        verdict: str | None = None,
+        review: dict[str, Any] | None = None,
         report: str = "",
-        axes: dict[str, float] | None = None,
-        harm: Any = None,
     ) -> dict[str, Any]:
-        """Inspection-review flow (docs/multi_jurisdiction.md decision 10),
-        two steps in one rail:
+        """Inspection review (Decision 2026-11-09), two steps in one rail:
 
-        - ``verdict=None`` — INSPECT: resolve the manifest (locally or
+        - ``review=None`` — INSPECT: resolve the manifest (locally or
           fetched from the network by digest) and return it with the
-          pinned source code, so the validator can actually read what
-          it is judging.
-        - ``verdict="pass"|"fail"`` — ATTEST: record the inspection
-          locally. ``report`` (required) is blob-stored as the inspection
-          report (its digest becomes the review's evidence hash). The
-          review itself (``axes`` ``{axis_id: [-1,1]}`` and ``harm`` in
-          [0,1]) is queued by the caller as a staked ToolBond review; no
-          consensus event is gossiped. An inspection MINTS NOTHING.
+          pinned source code, so the reviewer can read what it is judging.
+        - ``review`` given — REVIEW: the four fixed fields (correctness,
+          simplicity, novelty, malware), optional charter ``axes``, and for
+          a malware flag its ``evidence``. ``report`` (required) is
+          blob-stored as the inspection report; a malware flag's evidence
+          is its own blob, whose sha256 is the review's evidence hash
+          (otherwise the report's). The caller queues the review on
+          ToolBond; no consensus event is gossiped.
 
-        Self-vetting is rejected here for the local-author case; the
-        close voids it structurally anyway (fleet + wire exclusions).
-        An inspection is not usage and never touches the receipt ledgers.
+        Self-review is rejected. An inspection is not usage and never
+        touches the receipt ledgers.
         """
+        from nodes.common.library.review_fields import parse_fields
         caller = caller_id if caller_id else OWNER_AUTHOR
 
         record = self.resolve(tool_ref)
@@ -2456,14 +2482,16 @@ class ToolStore:
         code_digest = str(manifest.get("code_digest") or "")
         code_raw = await self.fetch_bytes(code_digest) if code_digest else None
 
-        if verdict is None:
+        if review is None:
             out = {
                 "digest": digest,
                 "manifest": manifest,
                 "code": (code_raw.decode("utf-8", errors="replace")
                          if code_raw is not None else None),
-                "note": ("review the code against the manifest, then call "
-                         "again with verdict 'pass' or 'fail' and a report"),
+                "note": ("review the code against the manifest and its "
+                         "declared capabilities, then call again with "
+                         "correctness, simplicity, novelty, malware (and "
+                         "evidence for a malware flag) and a report"),
             }
             if manifest.get("code_format") == "tree" and code_raw is not None:
                 # A codebase: its files, not the archive bytes. Large or
@@ -2491,10 +2519,11 @@ class ToolStore:
                                "entrypoint is the manifest's). " + out["note"])
             return out
 
-        if verdict not in ("pass", "fail"):
-            return {"error": "verdict must be 'pass' or 'fail'"}
+        fields, why = parse_fields(review)
+        if fields is None:
+            return {"error": why}
         if not report.strip():
-            return {"error": "a vet requires a report — state what you "
+            return {"error": "a review requires a report — state what you "
                              "checked and what you found"}
         if record is not None and record.author_id == caller:
             return {"error": "you cannot vet your own tool"}
@@ -2505,26 +2534,12 @@ class ToolStore:
             return {"error": "code blob unavailable — a vet without the "
                              "code read is worthless; retry when the blob "
                              "is fetchable"}
+        evidence_text = str(review.get("evidence") or "").strip()
+        if fields["malware"] and not evidence_text:
+            return {"error": MALWARE_EVIDENCE_REQUIRED}
 
-        ok = verdict == "pass"
         ts = int(time.time())
-        # Per-charter-axis inspection scores (v4.1): {axis_id: [-1,1]},
-        # same normalization as attest_usage — garbage entries dropped,
-        # unscored axes simply absent. These ride the vet event so the
-        # inspection moves position/rating like a usage review.
-        norm_axes: dict[str, float] = {}
-        if isinstance(axes, dict):
-            for axis_id, value in axes.items():
-                try:
-                    norm_axes[str(axis_id)] = max(-1.0, min(1.0, float(value)))
-                except (TypeError, ValueError):
-                    continue
-        norm_harm: float | None = None
-        if harm is not None and not isinstance(harm, bool):
-            try:
-                norm_harm = max(0.0, min(1.0, float(harm)))
-            except (TypeError, ValueError):
-                norm_harm = None
+        norm_axes = _charter_scores(review.get("axes"))
         review_digest = ""
         try:
             blobs: Any = self._blob_store()
@@ -2537,17 +2552,21 @@ class ToolStore:
                     "manifest_digest": digest,
                     "code_digest": code_digest,
                     "validator": consensus_caller,
-                    "ok": ok,
+                    **fields,
                     "report": str(report),
                     "ts": ts,
                 }
                 if norm_axes:
                     report_blob["axes"] = dict(sorted(norm_axes.items()))
-                if norm_harm is not None:
-                    report_blob["harm"] = norm_harm
                 review_digest = blobs.add_json(report_blob) or ""
             except Exception as exc:
                 log.warning("vet report blob failed: %s", exc)
+        evidence_hash = review_digest
+        if fields["malware"]:
+            evidence_hash = self.store_evidence(digest, manifest, caller,
+                                                evidence_text, ts)
+            if not evidence_hash:
+                return {"error": "the evidence could not be stored"}
 
         self._receipt_seq += 1
         row = {
@@ -2557,20 +2576,23 @@ class ToolStore:
             "tool_name": str(manifest.get("name") or ""),
             "tool_author": str(manifest.get("author") or ""),
             "caller": caller,
-            "ok": ok,
+            "ok": fields["correctness"] > 0 and not fields["malware"],
             "vet": True,
+            **fields,
             "review_digest": review_digest,
         }
         if norm_axes:
             row["axes"] = dict(sorted(norm_axes.items()))
-        if norm_harm is not None:
-            row["harm"] = norm_harm
+        if fields["malware"]:
+            row["evidence_hash"] = evidence_hash
         self._dir.mkdir(parents=True, exist_ok=True)
         with self._attestations_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
 
-        return {"digest": digest, "verdict": verdict,
-                "review_digest": review_digest,
+        return {"digest": digest, "review_digest": review_digest,
+                "review": {"digest": digest, **fields, "axes": dict(norm_axes),
+                           "evidence_hash": evidence_hash,
+                           "author": str(manifest.get("author") or "")},
                 "tool_author": str(manifest.get("author") or "")}
 
     # ------------------------------------------------------------------

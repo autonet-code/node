@@ -362,13 +362,14 @@ class TestDeterminism:
 
 
 # ---------------------------------------------------------------------------
-# 7. Plumbing: attest_tools gossips own_share, never axes; ABI matches ToolBond
+# 7. Plumbing: attest_tools gossips nothing; the ABI matches ToolBond
 # ---------------------------------------------------------------------------
 
 
 async def test_attest_tools_gossips_nothing(tmp_path):
-    """Attestations stay local (Decision 2026-11-07): the row keeps the
-    composition estimate and the review, the store has no gossip rail."""
+    """Reviews stay local until ToolBond (Decision 2026-11-07): the row
+    keeps the review, the store has no gossip rail, and there is no
+    composition estimate (novelty replaced it, Decision 2026-11-09)."""
     from atn.agent_tools import execute_tool
     from tests.atn.test_tool_store import (
         _family,
@@ -381,17 +382,16 @@ async def test_attest_tools_gossips_nothing(tmp_path):
     assert not hasattr(rt.tool_store, "event_sink")
     out = await execute_tool(
         "attest_tools",
-        {"judgments": [{"tool": "echo_tool", "ok": True, "own_share": 1.4,
-                        "axes": {"correctness": 0.5}, "harm": 0.1},
-                       {"tool": "echo_tool", "ok": True, "own_share": "junk"}],
+        {"judgments": [{"tool": "echo_tool", "correctness": 0.5, "simplicity": 1,
+                        "novelty": 0.2, "malware": False, "own_share": 1.4,
+                        "axes": {AXES[0]: 0.5}}],
          "context": "composing tools"},
         rt, caller_id="parent",
     )
-    assert out["attested"] == 2
-    rows = list(rt.tool_store._iter_attestations())
-    assert rows[0]["own_share"] == 1.0
-    assert rows[0]["axes"] == {"correctness": 0.5} and rows[0]["harm"] == 0.1
-    assert "own_share" not in rows[1]
+    assert out["attested"] == 1
+    (row,) = list(rt.tool_store._iter_attestations())
+    assert "own_share" not in row
+    assert row["axes"] == {AXES[0]: 0.5} and row["novelty"] == 0.2
 
 
 def test_tool_bond_event_abi_matches_contract():

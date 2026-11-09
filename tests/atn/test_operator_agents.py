@@ -86,25 +86,28 @@ class KeyedBond(FakeBond):
         return await super().commit(key, batch)
 
 
+_F = {"correctness": 0.5, "simplicity": 0.5, "novelty": 0.5, "malware": False}
+
+
 class TestReviews:
     async def test_sessions_merge_into_one_operator_batch(self, tmp_path):
         from atn.review_driver import ReviewDriver
         rt = await _externals(tmp_path, "cc-a", "cc-b")
         rt.review_bond_client = bond = KeyedBond()
         op = _operator_address(rt)
-        a = await queue_reviews(rt, "cc-a", [{"digest": D1, "axes": {"correctness": 0.2}}])
+        a = await queue_reviews(rt, "cc-a", [{"digest": D1, **_F, "correctness": 0.2}])
         assert a["queued"] == 1 and a["reviewer"] == op
         b = await queue_reviews(rt, "cc-b", [
-            {"digest": D1, "axes": {"correctness": 0.9}},
-            {"digest": D2, "harm": 0.0},
+            {"digest": D1, **_F, "correctness": 0.9},
+            {"digest": D2, **_F},
             # A tool the household published: never its own review.
-            {"digest": D3, "axes": {"correctness": 1.0}, "author": op}])
+            {"digest": D3, **_F, "author": op}])
         assert b["queued"] == 2 and b["skipped"][0]["digest"] == D3
         (batch,) = store_for(rt).all()
         assert batch.agent == op and batch.epoch == 3
         # The second review of D1 replaced the first.
-        assert [(r.digest, r.axes) for r in batch.reviews] == [
-            (D1, {"correctness": 0.9}), (D2, {})]
+        assert [(r.digest, r.correctness) for r in batch.reviews] == [
+            (D1, 0.9), (D2, 0.5)]
 
         driver = ReviewDriver(rt)
         driver.on_local_close()
@@ -116,7 +119,7 @@ class TestReviews:
     async def test_held_until_the_operator_registers(self, tmp_path):
         rt = await _externals(tmp_path, "cc", registered=False)
         rt.review_bond_client = KeyedBond()
-        out = await queue_reviews(rt, "cc", [{"digest": D1, "axes": {"correctness": 0.5}}])
+        out = await queue_reviews(rt, "cc", [{"digest": D1, **_F}])
         assert out["held"] == 1 and out["note"] == HELD_NOTE_OPERATOR
         assert await flush_held_reviews(rt) == 0          # still unregistered
         rt.registry.set_operator_registered(True)
