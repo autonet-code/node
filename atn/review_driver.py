@@ -15,8 +15,10 @@ revealed and claimed with the operator key:
    written to disk BEFORE the commit transaction goes out, so a crash can
    never lose the salt of a landed commit. A pending batch whose epoch was
    anchored before it was committed can no longer be committed; its reviews
-   roll into the open epoch's batch. A household holding no REP cannot
-   commit (NoWeight): its batch is marked refused and its reviews dropped.
+   roll into the open epoch's batch. A household that held no REP at the
+   epoch's snapshot (its start) cannot commit (NoWeight): its batch is
+   marked refused and its reviews dropped. The daemon reads REP at that
+   same snapshot, so it queues and reminds only when ToolBond would accept.
 2. REVEAL. After the epoch's anchor (``revealEnds(epoch) > 0``) every
    committed, unrevealed batch is revealed while the window is open. A
    reveal is relayable: a sealed copy sits in the batch file, which the WS
@@ -183,8 +185,8 @@ class ReviewDriver:
         keys = self._agent_keys()
         if keys and hasattr(client, "household_rep"):
             # One household per daemon: review_due stays quiet without REP.
-            note_household_rep(self._runtime,
-                               await client.household_rep(sorted(keys)[0]))
+            note_household_rep(self._runtime, await client.household_rep(
+                sorted(keys)[0], epoch=int(epoch)))
         if self._close_pending:
             self._close_pending = False
             self._close_epochs.add(int(epoch))
@@ -257,7 +259,7 @@ class ReviewDriver:
             store.save(batch)
             return False
         if reverted_with(res, "NoWeight"):
-            # The household holds no REP at the epoch's snapshot: ToolBond
+            # The household held no REP at the epoch's snapshot: ToolBond
             # refuses its reviews (Decision 2026-11-09).
             batch.commitment = ""
             batch.status = "refused"

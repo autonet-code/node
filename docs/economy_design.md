@@ -182,8 +182,9 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   author gets the unspent rest back only with the bond.
 - **No ATN stakes on reviews.** They deterred nothing (the reviewer chose
   the amount, default 0), changed no weight, rating or payment, and as a
-  group lost the fee. A household with no REP cannot review (ToolBond
-  refuses its commit); its daemon sends nothing and reminds no one.
+  group lost the fee. A household with no REP at the epoch's start (the
+  previous anchor) cannot review (ToolBond refuses its commit); its daemon
+  reads REP at the same point, sends nothing and reminds no one.
   Reviews written before the household registers are held by its daemon
   and submitted to the open round once it does.
 

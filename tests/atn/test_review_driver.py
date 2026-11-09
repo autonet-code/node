@@ -46,6 +46,7 @@ class FakeBond:
         self.calls: List[tuple] = []
         self.fail_commit = False
         self.rep: Optional[int] = 10 * E18
+        self.rep_epochs: List[Optional[int]] = []
 
     def available(self) -> bool:
         return True
@@ -59,7 +60,8 @@ class FakeBond:
     async def reveal_ends(self, epoch: int) -> int:
         return self.anchored.get(int(epoch), 0)
 
-    async def household_rep(self, agent: str) -> Optional[int]:
+    async def household_rep(self, agent: str, epoch: Optional[int] = None) -> Optional[int]:
+        self.rep_epochs.append(epoch)
         return self.rep
 
     async def commit(self, key: str, batch) -> Dict[str, Any]:
@@ -196,6 +198,8 @@ class TestReviewQueueing:
             "judgments": [{"tool": "echo_tool", **FIELDS}],
             "context": "x"}, rt, caller_id="parent")
         assert out["reviews"]["queued"] == 0 and out["reviews"]["note"] == NO_REP_NOTE
+        # Read at the open epoch's snapshot, as ToolBond.commit weighs it.
+        assert bond.rep_epochs == [bond.epoch]
         assert store_for(rt).all() == []
         # And the daemon stops reminding it.
         rt.tool_store.adopted_by = lambda agent_id: [rt.tool_store.get(digest)]

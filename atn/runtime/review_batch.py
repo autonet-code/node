@@ -143,12 +143,16 @@ TOOL_BOND_REVIEW_ABI = [
                            ("reviewer", "address")]),
 ]
 
-# Substrate's owner binding and RepToken's balance: a household's REP.
+# Substrate's owner binding and the epoch's REP timepoint, and RepToken's
+# balances: a household's REP as ToolBond weighs a commit.
 _HOUSEHOLD_ABI = [
     _fn("getAgentOwner", [("agent", "address")], [("", "address")], "view"),
+    _fn("anchorSnapshotTime", [], [("", "uint256")], "view"),
 ]
 _REP_BALANCE_ABI = [
     _fn("balanceOf", [("account", "address")], [("", "uint256")], "view"),
+    _fn("getPastBalance", [("account", "address"), ("timepoint", "uint256")],
+        [("", "uint256")], "view"),
 ]
 
 
@@ -421,19 +425,35 @@ class ReviewBondClient:
                     "accuracy": int(v[8]), "weight": int(v[9])}
         return await self._read(fn)
 
-    async def household_rep(self, agent: str) -> Optional[int]:
-        """The REP of ``agent``'s household (its bound owner, else itself),
-        as ToolBond weighs a commit; None when it can't be read."""
-        def run() -> int:
+    async def household_rep(self, agent: str, epoch: Optional[int] = None) -> Optional[int]:
+        """The REP of ``agent``'s household (its bound owner now, else
+        itself) at ``epoch``'s snapshot (default: the current epoch), as
+        ToolBond.commit weighs it: REP gained after the epoch started does
+        not count until the next one. None when it can't be read."""
+        def run() -> Optional[int]:
             from web3 import Web3
             w3 = self._base._w3()
             bond, substrate = self._contracts(w3)
             sub = w3.eth.contract(address=substrate.address, abi=_HOUSEHOLD_ABI)
+            current = int(bond.functions.currentEpoch().call())
+            e = current if epoch is None else int(epoch)
+            started, _, _, snap, *_ = bond.functions.epochInfo(e).call()
+            if not started:
+                if e != current:
+                    return None
+                # ToolBond fixes the snapshot at the epoch's first commit:
+                # the previous anchor's time (deployedAt before any).
+                snap = sub.functions.anchorSnapshotTime().call()
             a = Web3.to_checksum_address(agent)
             owner = sub.functions.getAgentOwner(a).call()
             house = a if int(owner, 16) == 0 else Web3.to_checksum_address(owner)
             rep = w3.eth.contract(address=bond.functions.rep().call(), abi=_REP_BALANCE_ABI)
-            return int(rep.functions.balanceOf(house).call())
+            now = int(w3.eth.get_block("latest")["timestamp"])
+            if int(snap) >= now:
+                # Not in the past yet (ToolBond reverts TooEarly until it is);
+                # no later block can change the balance at it: the live one.
+                return int(rep.functions.balanceOf(house).call())
+            return int(rep.functions.getPastBalance(house, int(snap)).call())
         try:
             return await asyncio.to_thread(run)
         except Exception as exc:  # noqa: BLE001
@@ -548,9 +568,11 @@ HELD_NOTE_OPERATOR = (
     "reviews weigh by your household's REP, and a household without REP "
     "cannot review.")
 NO_REP_NOTE = (
-    "not sent: your household holds no REP, and ToolBond refuses reviews "
-    "from a household without it (Decision 2026-11-09). REP comes from the "
-    "tool pool, as an author of tools other households review.")
+    "not sent: your household held no REP when this epoch started, and "
+    "ToolBond refuses reviews from a household without it (Decision "
+    "2026-11-09); it weighs each epoch's reviews by the REP held at the "
+    "epoch's start. REP comes from the tool pool, as an author of tools "
+    "other households review.")
 
 
 def note_household_rep(runtime: Any, rep: Optional[int]) -> None:
@@ -714,8 +736,8 @@ async def queue_reviews(runtime: Any, agent_id: str,
 
     The agent must be registered on chain with a daemon-held key (the batch
     is committed with its key), and ToolBond must be reachable to read the
-    epoch. A household holding no REP gets nothing queued: ToolBond refuses
-    its commit.
+    epoch. A household that held no REP at the epoch's snapshot gets
+    nothing queued: ToolBond refuses its commit (NoWeight).
 
     An external agent's identity is the operator's (Decision 2026-11-08),
     so its reviews land in the operator's batch: every external session of
@@ -748,11 +770,13 @@ async def queue_reviews(runtime: Any, agent_id: str,
     if epoch is None:
         out["note"] = "ToolBond unreachable; reviews were not queued"
         return out
-    rep = await client.household_rep(address) if hasattr(client, "household_rep") else None
+    rep = (await client.household_rep(address, epoch=int(epoch))
+           if hasattr(client, "household_rep") else None)
     note_household_rep(runtime, rep)
     if rep == 0:
         out["note"] = NO_REP_NOTE
-        out["skipped"] = [{"digest": r.get("digest"), "error": "household holds no REP"}
+        out["skipped"] = [{"digest": r.get("digest"),
+                           "error": "household held no REP at the epoch's start"}
                           for r in reviews]
         return out
     axis_ids = list(active_charter().ids)

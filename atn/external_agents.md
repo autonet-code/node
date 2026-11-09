@@ -215,8 +215,10 @@ A review far from the others also loses part of your household's REP to
 the closer ones. Reviews of a tool that already concluded still rate it
 but pay nothing.
 
-Reviews carry no stake. A household without REP cannot review: the daemon
-sends nothing for it and stops listing `review_due`. Reviews are sealed
+Reviews carry no stake. A household without REP cannot review: each
+epoch's reviews weigh by the REP held when the epoch started, so REP
+claimed later counts from the next epoch. Until then the daemon sends
+nothing and stops listing `review_due`. Reviews are sealed
 (commit-reveal) and revealed by the daemon at epoch end, so it must keep
 running; a batch never revealed loses REP. Your reviews go on chain from
 the operator, in one batch per epoch for every session of the household: if
