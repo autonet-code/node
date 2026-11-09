@@ -75,3 +75,61 @@ async def test_registration_goes_out_even_if_announcing_fails(tmp_path, monkeypa
             break
         await asyncio.sleep(0.02)
     assert pushed == ["echo_tool"]
+
+
+@pytest.mark.asyncio
+async def test_a_malware_flag_announces_its_evidence_and_nothing_else(tmp_path):
+    """Decision 2026-11-09: the reviewer's daemon provides the evidence of
+    its own malware flags in the DHT, so any daemon can fetch it while this
+    one is online. Other review blobs (a note, a vet report) are not
+    announced."""
+    from tests.atn.test_review_driver import FIELDS, _reviewer
+
+    rt, digest, bond, addr = await _reviewer(tmp_path)
+    announced: list[list[str]] = []
+    rt.tool_store.blob_announcer = lambda digests: announced.append(list(digests))
+
+    out = await execute_tool("attest_tools", {
+        "judgments": [{"tool": "echo_tool", **FIELDS, "note": "fine, echoes x"}],
+        "context": "x"}, rt, caller_id="parent")
+    assert out["attested"] == 1
+    await asyncio.sleep(0.1)
+    assert announced == []                    # a plain review: nothing
+
+    out = await execute_tool("attest_tools", {
+        "judgments": [{"tool": "echo_tool", **FIELDS, "correctness": -1.0,
+                       "malware": True,
+                       "evidence": "tool.py line 3 posts ~/.ssh/id_rsa to evil.example"}],
+        "context": "x"}, rt, caller_id="parent")
+    assert out["attested"] == 1
+    evidence_hash = rt.tool_store.recent_attestations(digest)[0]["evidence_hash"]
+    assert len(evidence_hash) == 64
+    for _ in range(100):
+        if announced:
+            break
+        await asyncio.sleep(0.02)
+    assert announced == [[evidence_hash]]
+    # What the host provides at start: the flags' evidence still held.
+    assert rt.tool_store.held_evidence_digests() == [evidence_hash]
+    assert evidence_hash not in rt.tool_store.held_blob_digests()
+
+
+@pytest.mark.asyncio
+async def test_a_flag_is_kept_when_announcing_fails(tmp_path):
+    from tests.atn.test_review_driver import FIELDS, _reviewer
+
+    rt, digest, bond, addr = await _reviewer(tmp_path)
+
+    def broken(_digests):
+        raise RuntimeError("no DHT peers")
+    rt.tool_store.blob_announcer = broken
+    out = await execute_tool("attest_tools", {
+        "judgments": [{"tool": "echo_tool", **FIELDS, "malware": True,
+                       "evidence": "line 9 deletes the home dir"}],
+        "context": "x"}, rt, caller_id="parent")
+    assert out["attested"] == 1 and out["reviews"]["queued"] == 1
+    await asyncio.sleep(0.1)
+    (h,) = rt.tool_store.held_evidence_digests()
+    got = await execute_tool("fetch_evidence", {"evidence_hash": h}, rt,
+                             caller_id="parent")
+    assert got["found"] and got["evidence"]["evidence"].startswith("line 9")

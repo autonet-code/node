@@ -1390,14 +1390,16 @@ class AutonetBridge:
 
             # DHT provider records (docs/p2p_networking.md, "Blobs"): a
             # published tool's manifest and code are provided before its
-            # registration is gossiped, adopted ones once installed, and
-            # every tool blob we hold now (the host re-provides them).
+            # registration is gossiped, adopted ones once installed, a
+            # malware flag's evidence once stored, and every tool blob and
+            # flag evidence we hold now (the host re-provides them).
             p2p = self._p2p_host
             if p2p is not None and hasattr(p2p, "provide_blobs_blocking"):
                 tool_store.blob_announcer = (
                     lambda digests, _h=p2p: _h.provide_blobs_blocking(digests, timeout=15.0))
                 try:
-                    p2p.provide_blobs_threadsafe(tool_store.held_blob_digests())
+                    p2p.provide_blobs_threadsafe(tool_store.held_blob_digests()
+                                                 + tool_store.held_evidence_digests())
                 except Exception:  # noqa: BLE001
                     log.debug("providing held tool blobs failed", exc_info=True)
 

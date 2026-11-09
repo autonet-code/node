@@ -183,8 +183,12 @@ into `jurisdiction.<id>.bootstrap` by proposal.
   tool needs that it holds: a published tool's manifest and code before
   its registration event is gossiped (`ToolStore.blob_announcer`, bounded
   at 15 s, the registration goes out regardless), an adopted tool's once
-  installed, and every tool blob it holds at start. Relays provide the
-  blobs they keep. Records are re-announced every 30 min and whenever our
+  installed, and every tool blob it holds at start. It also provides the
+  evidence of its own malware flags (`ToolStore.store_evidence`, when the
+  flag is written and again at start), so any daemon can fetch a flag's
+  evidence by its hash while the reviewer's daemon is online; malware
+  evidence only (other review blobs are not announced), and no copy is
+  offered to relays. Relays provide the blobs they keep. Records are re-announced every 30 min and whenever our
   addresses change (a new reservation), so they carry dialable addresses.
 - **Fetch** (`AutonetHost.fetch_blob_from_network`, behind
   `LibP2PBlobResolver` and `BlobStore`): ask the connected peers and look
@@ -236,7 +240,10 @@ stream, same-stream framing (write without closing, read, close).
   closes, no blob forwarding, the mesh dialer, the peer cache, the
   connection cap, SOCKS5. `tests/test_search_model_mesh.py`: the search
   model's files provided by a NAT'd holder and fetched by a daemon that
-  joins later, through the DHT record.
+  joins later, through the DHT record. `tests/test_evidence_mesh.py`: a
+  malware flag's evidence provided by the reviewer's NAT'd daemon and read
+  with `fetch_evidence` by a daemon that joins later, through the DHT
+  record.
 - `scripts/mesh_nat_harness.py`: Docker, two LANs behind NAT gateways
   (iptables MASQUERADE, unsolicited inbound dropped), a public relay, a
   public daemon and an HTTPS-only daemon behind a CONNECT proxy. Checks

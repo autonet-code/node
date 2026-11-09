@@ -91,7 +91,7 @@ the network's judgement" and the reviewed own-share of Decision
   tool pays exactly the reserved amounts in the next close (the pay waits
   for the vote: the author is paid what the conclusion computed). A flag needs evidence: free text pointing into the code,
   kept by the reviewer's daemon as a content-addressed blob whose sha256
-  is `evidenceHash`, read with `fetch_evidence`.
+  is `evidenceHash` and announced in the DHT, read with `fetch_evidence`.
 - **Disqualified means unpaid, nothing else.** The tool stays in the
   library, in search with its ratings, and can be adopted. Positions (the
   head/mass geometry) became plain means: the carry bundle keeps

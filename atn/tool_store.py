@@ -1728,14 +1728,58 @@ class ToolStore:
                 "evidence": str(text)[:20_000],
                 "ts": int(ts if ts is not None else time.time())}
         try:
-            return blobs.add_json(body) or ""
+            evidence_hash = blobs.add_json(body) or ""
         except Exception as exc:  # noqa: BLE001
             log.warning("malware evidence blob failed: %s", exc)
             return ""
+        self._announce_evidence(evidence_hash)
+        return evidence_hash
+
+    def _announce_evidence(self, evidence_hash: str) -> None:
+        """Provide a malware flag's evidence in the DHT (``blob_announcer``),
+        so any daemon finds this one as its holder and fetches it while this
+        daemon is online. Malware evidence only; no copy goes to relays.
+        Not awaited: the review goes on whether or not a DHT peer took the
+        record (the host keeps re-providing it)."""
+        if self.blob_announcer is None or not evidence_hash:
+            return
+        try:
+            asyncio.get_running_loop().run_in_executor(
+                None, self._announce, [evidence_hash])
+        except RuntimeError:
+            self._announce([evidence_hash])
+
+    def held_evidence_digests(self) -> list[str]:
+        """The evidence blobs of this daemon's own malware flags that it
+        still holds (from its attestation log), for the host's provider
+        records at start. Other review blobs (notes, reports) are not
+        announced."""
+        out: list[str] = []
+        if not self._attestations_path.exists():
+            return out
+        try:
+            blobs = self._blob_store()
+            lines = self._attestations_path.read_text(encoding="utf-8").splitlines()
+        except (RuntimeError, OSError):
+            return out
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict) or row.get("malware") is not True:
+                continue
+            h = str(row.get("evidence_hash") or "")
+            if len(h) == 64 and h not in out and blobs.has(h):
+                out.append(h)
+        return out
 
     async def fetch_evidence(self, evidence_hash: str) -> dict[str, Any]:
         """A review's evidence by its hash: this daemon's blob store, then
-        peers (``blob_fetcher``). The bytes are checked against the hash."""
+        the network (``blob_fetcher``: the connected peers and, through the
+        DHT, the hash's providers, the reviewer's daemon among them, dialled
+        directly or through a relay circuit). The bytes are checked against
+        the hash."""
         import hashlib
         h = str(evidence_hash or "").strip().lower().removeprefix("0x")
         if len(h) != 64 or any(c not in "0123456789abcdef" for c in h):

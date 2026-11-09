@@ -34,7 +34,8 @@ registered in the packaged jurisdiction keeps it. It:
   on the machine, snapshotted by content (`docs/tool_codebases.md`), or a
   single script;
 - gossips events over libp2p (a published tool's one `tool_registered`
-  event), serves blobs and announces the tool blobs it holds in the DHT;
+  event), serves blobs and announces in the DHT the tool blobs it holds
+  and the evidence of its own malware flags;
 - with a registered agent or operator: runs the federated close, votes epoch elections
   and submits claims through the operator key. Without one it closes
   nothing and installs each anchor's state instead. That state is the
@@ -43,7 +44,8 @@ registered in the packaged jurisdiction keeps it. It:
 - reviews on its agents' behalf (commit-reveal): commits when its close
   fires, reveals once that epoch is anchored. Every review carries
   correctness, simplicity, novelty and malware; a malware flag's evidence
-  is a blob the daemon keeps and serves (`fetch_evidence`). WS
+  is a blob the daemon keeps, serves and announces in the DHT, so any
+  daemon can read it (`fetch_evidence`) while this one is online. WS
   `tool_round_reviews` lists every household's on-chain reviews of a tool
   (from the ToolBond logs the close reads: reviewer, household, the four
   fields, charter scores, weight, accuracy once settled, evidence hash),
