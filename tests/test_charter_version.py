@@ -26,22 +26,20 @@ from nodes.common.library.charter_version import (
 # ---------------------------------------------------------------------------
 
 
-def test_payload_has_all_six_roots():
+def test_payload_has_the_four_value_roots():
     payload = charter_payload()
-    assert payload["n_dims"] == 6
-    assert len(payload["roots"]) == 6
+    assert payload["n_dims"] == 4
+    assert len(payload["roots"]) == 4
     ids = {r["id"] for r in payload["roots"]}
     assert ids == {
         "life_precious",
         "self_preservation",
         "promotion_of_intelligence",
         "evolution",
-        "correctness",
-        "simplicity",
     }
     # roots are ordered by axis_index
     axes = [r["axis_index"] for r in payload["roots"]]
-    assert axes == sorted(axes) == [0, 1, 2, 3, 4, 5]
+    assert axes == sorted(axes) == [0, 1, 2, 3]
 
 
 def test_hash_matches_sha256_of_bytes():

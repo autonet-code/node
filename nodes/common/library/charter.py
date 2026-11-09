@@ -2,15 +2,17 @@
 
 A jurisdiction's DAO Registry holds its charter text under
 ``jurisdiction.<id>.charter``: compact JSON ``{"axes":[{"id","thesis"},...]}``.
-Each DAO defines its own axes; ``correctness`` and ``simplicity`` are
-mandatory (discovery ranks on them). The axis order in the text is the
-coordinate order: axis ``i`` is charter coordinate ``i``.
+The axes are the DAO's values only, each scored on its own and optional
+in a review (Decision 2026-11-09); the fixed review fields (correctness,
+simplicity, novelty, malware) are the same in every jurisdiction and live
+in ``review_fields``. The axis order in the text is the order ToolBond
+encodes scores in.
 
 One jurisdiction runs per process, so one charter is active per process.
 ``set_active_charter`` installs it at join, before any world is built; the
 default is the v1 six-axis charter. A charter change takes effect at the
 next epoch through a daemon restart (the close driver detects it pinned to
-the previous anchor), never by swapping the charter under a live world.
+the previous anchor), never by swapping the charter under a live close.
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
-MANDATORY_AXES = ("correctness", "simplicity")
 # Same rules werule and the on-chain ToolBond enforce.
 MAX_AXES = 16
 _AXIS_ID_RE = re.compile(r"^[a-z0-9_]+$")
@@ -110,10 +111,6 @@ class Charter:
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         if dupes:
             raise ValueError(f"charter has duplicate axis ids: {', '.join(dupes)}")
-        missing = [m for m in MANDATORY_AXES if m not in ids]
-        if missing:
-            raise ValueError(
-                "charter lacks the mandatory axes: " + ", ".join(missing))
         # ToolBond counts axes on chain by counting "id": in the text, which
         # is only reliable for the compact form; refuse anything else so a
         # hand-written proposal can't make the contract and daemons disagree.
@@ -129,14 +126,13 @@ def _serialize(axes: Tuple[Tuple[str, str], ...]) -> str:
     )
 
 
-# The v1 charter: 4 alignment axes plus the 2 mandatory usefulness axes.
+# The default charter: 4 value axes. trustless-contracts' Autonet module
+# build metadata holds the same text (tests/test_charter_build_metadata.py).
 DEFAULT_CHARTER = Charter(axes=(
     ("life_precious", "Life is precious and should be preserved."),
     ("self_preservation", "The system should preserve its own continuity."),
     ("promotion_of_intelligence", "Intelligence in any form should be promoted."),
     ("evolution", "Forward advancement of capability is desirable."),
-    ("correctness", "Work should achieve what it claims and avoid bugs."),
-    ("simplicity", "Solutions should be minimal and direct, not over-engineered."),
 ))
 
 _lock = threading.Lock()
@@ -149,7 +145,7 @@ def active_charter() -> Charter:
 
 
 def set_active_charter(charter: Charter) -> None:
-    """Install the process-wide charter. Call before building any world."""
+    """Install the process-wide charter. Call before the first close."""
     global _active
     if not isinstance(charter, Charter):
         raise TypeError("set_active_charter expects a Charter")

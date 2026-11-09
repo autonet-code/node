@@ -43,7 +43,6 @@ REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
 E18 = 10 ** 18
 SUPPLY = 1000 * E18
 AXES = list(DEFAULT_CHARTER.ids)
-CI = AXES.index("correctness")
 
 
 def _rev(who: str, acc: Any = E18) -> Dict[str, Any]:
@@ -176,9 +175,9 @@ class TestReviewSnapshotFold:
     def _round1(self):
         return [
             _params(),
-            _reviewed(5, AUD_A, weight=300, harm=10, stake=7, index=0, correctness=90),
+            _reviewed(5, AUD_A, weight=300, harm=10, stake=7, index=0, life_precious=90),
             _reviewed(5, AUD_B, weight=200, harm=50, stake=0, index=1,
-                      correctness=40, simplicity=-60),
+                      life_precious=40, evolution=-60),
             _finalized(9),
         ]
 
@@ -186,8 +185,8 @@ class TestReviewSnapshotFold:
         snap = _fold(self._round1())
         tool = snap["tools"][DIGEST]
         assert snap["reviewer_share_bps"] == 3000
-        assert tool["axes"]["correctness"] == {"sum": 300 * 90 + 200 * 40, "mass": 500}
-        assert tool["axes"]["simplicity"] == {"sum": -200 * 60, "mass": 200}
+        assert tool["axes"]["life_precious"] == {"sum": 300 * 90 + 200 * 40, "mass": 500}
+        assert tool["axes"]["evolution"] == {"sum": -200 * 60, "mass": 200}
         assert tool["harm"] == {"sum": 300 * 10 + 200 * 50, "mass": 500}
 
     def test_pinned_block_excludes_later_finalize(self):
@@ -197,17 +196,17 @@ class TestReviewSnapshotFold:
 
     def test_window_rounds_carry_stake_accuracy_and_prior_mass(self):
         recs = self._round1() + [
-            _reviewed(20, AUD_A, epoch=2, weight=100, stake=5, correctness=80),
+            _reviewed(20, AUD_A, epoch=2, weight=100, stake=5, life_precious=80),
             _finalized(25, epoch=2),
         ]
         acc = {(DIGEST, 2, 0): 9 * E18 // 10}
         snap = _fold(recs, block=30, since=10, acc=acc)
         assert [r["epoch"] for r in snap["rounds"][DIGEST]] == [2]
         rnd = snap["rounds"][DIGEST][0]
-        assert rnd["prior_mass"] == {"correctness": 500, "harm": 500, "simplicity": 200}
+        assert rnd["prior_mass"] == {"life_precious": 500, "harm": 500, "evolution": 200}
         assert rnd["reviews"] == [{"reviewer": AUD_A, "stake": 5, "accuracy": 9 * E18 // 10,
-                                   "axes": ["correctness"], "harm": False}]
-        assert snap["tools"][DIGEST]["axes"]["correctness"]["mass"] == 600
+                                   "axes": ["life_precious"], "harm": False}]
+        assert snap["tools"][DIGEST]["axes"]["life_precious"]["mass"] == 600
 
     def test_uninformative_accuracy_reads_as_none(self):
         snap = _fold(self._round1(), since=0, acc={(DIGEST, 1, 0): 2 ** 64 - 1,
@@ -217,11 +216,11 @@ class TestReviewSnapshotFold:
 
     def test_unknown_axis_key_is_dropped(self):
         epochs = {1: {"axis_ids": [keccak(text="retired").hex()] + KEYS[1:], "supply": 1}}
-        recs = [_reviewed(5, AUD_A, weight=10, life_precious=50, correctness=20),
+        recs = [_reviewed(5, AUD_A, weight=10, life_precious=50, evolution=20),
                 _finalized(9)]
         snap = tool_review_snapshot_from_logs(recs, block=10, since_block=0, epochs=epochs,
                                               accuracies={}, axis_ids=AXES)
-        assert set(snap["tools"][DIGEST]["axes"]) == {"correctness"}
+        assert set(snap["tools"][DIGEST]["axes"]) == {"evolution"}
 
     def test_overruled_round_counts_at_the_daos_harm(self):
         # ToolBond baab631: an overruled round's harm counts at the DAO's
@@ -249,7 +248,7 @@ class TestReviewSnapshotFold:
         revs = snap["rounds"][DIGEST][0]["reviews"]
         assert [r["accuracy"] for r in revs] == [E18, None]
         assert snap["rounds"][DIGEST][0]["supply"] == SUPPLY
-        assert snap["tools"][DIGEST]["axes"]["correctness"]["mass"] == 500
+        assert snap["tools"][DIGEST]["axes"]["life_precious"]["mass"] == 500
 
     def test_default_bps_without_params_event(self):
         snap = _fold(self._round1()[1:])

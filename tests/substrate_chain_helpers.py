@@ -202,16 +202,22 @@ def tool_registration_batch(rpb: str, author: str, digest: str, *,
 def review_snapshot(digests, reviewer: str = REVIEWER, *,
                     supply: int = 10 ** 21) -> dict:
     """A ToolBond review snapshot with one concluding round per tool: one
-    reviewer rates it 100 on correctness, accuracy 1, no harm."""
+    reviewer rates every field and charter axis at the top, no malware,
+    accuracy 1 (Decision 2026-11-09 shape)."""
+    from nodes.common.library.charter import active_charter
     e18 = 10 ** 18
+
+    def cell(v: int) -> dict:
+        return {"sum": v * e18, "mass": e18}
+    entry = {"fields": {"correctness": cell(100), "simplicity": cell(100),
+                        "novelty": cell(100), "malware": cell(0)},
+             "axes": {a: cell(100) for a in active_charter().ids}}
     return {
         "supply": supply, "reviewer_share_bps": 4000,
-        "tools": {d: {"axes": {"correctness": {"sum": 100 * e18, "mass": e18}},
-                      "harm": {"sum": 0, "mass": 0}} for d in digests},
-        "rounds": {d: [{"epoch": 1, "supply": supply, "prior_mass": {},
-                        "reviews": [{"reviewer": reviewer, "stake": 0,
-                                     "accuracy": e18, "axes": ["correctness"],
-                                     "harm": False}]}] for d in digests},
+        "tools": {d: entry for d in digests},
+        "rounds": {d: [{"epoch": 1, "supply": supply,
+                        "reviews": [{"reviewer": reviewer, "accuracy": e18}]}]
+                   for d in digests},
     }
 
 

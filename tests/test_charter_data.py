@@ -28,9 +28,7 @@ V1_TEXT = (
     '{"id":"life_precious","thesis":"Life is precious and should be preserved."},'
     '{"id":"self_preservation","thesis":"The system should preserve its own continuity."},'
     '{"id":"promotion_of_intelligence","thesis":"Intelligence in any form should be promoted."},'
-    '{"id":"evolution","thesis":"Forward advancement of capability is desirable."},'
-    '{"id":"correctness","thesis":"Work should achieve what it claims and avoid bugs."},'
-    '{"id":"simplicity","thesis":"Solutions should be minimal and direct, not over-engineered."}'
+    '{"id":"evolution","thesis":"Forward advancement of capability is desirable."}'
     ']}'
 )
 
@@ -45,8 +43,8 @@ SEVEN = _text([
     {"id": "self_preservation", "thesis": "c"},
     {"id": "promotion_of_intelligence", "thesis": "d"},
     {"id": "evolution", "thesis": "e"},
-    {"id": "correctness", "thesis": "f"},
-    {"id": "simplicity", "thesis": "g"},
+    {"id": "honesty", "thesis": "f"},
+    {"id": "thrift", "thesis": "g"},
 ])
 
 
@@ -70,7 +68,7 @@ class TestFromText:
         c = Charter.from_text(SEVEN)
         assert c.n_dims == 7
         assert c.ids[1] == "kindness"
-        assert c.axis_index["correctness"] == 5
+        assert c.axis_index["honesty"] == 5
         assert c.text == SEVEN
         assert c.entries()[1] == {"id": "kindness", "thesis": "b",
                                   "axis_index": 1, "veto_floor": None}
@@ -79,9 +77,10 @@ class TestFromText:
         with pytest.raises(ValueError, match="compact"):
             Charter.from_text(json.dumps(json.loads(SEVEN), indent=1))
 
-    def test_missing_mandatory_refused(self):
-        with pytest.raises(ValueError, match="mandatory"):
-            Charter.from_text(_text([{"id": "correctness", "thesis": "x"}]))
+    def test_no_mandatory_axes(self):
+        """Correctness and simplicity left the charter (Decision
+        2026-11-09): a charter of the DAO's values alone is valid."""
+        assert Charter.from_text(_text([{"id": "kindness", "thesis": "x"}])).n_dims == 1
 
     def test_duplicate_ids_refused(self):
         with pytest.raises(ValueError, match="duplicate"):
@@ -134,12 +133,12 @@ class TestFromText:
 # ---------------------------------------------------------------------------
 
 
-def test_default_text_is_v1_json():
+def test_default_text_is_the_four_value_axes():
     assert DEFAULT_CHARTER.text == V1_TEXT
     assert Charter.from_text(V1_TEXT) == DEFAULT_CHARTER
     assert [(c["id"], c["thesis"]) for c in DEFAULT_CHARTER.entries()] == \
         list(DEFAULT_CHARTER.axes)
-    assert DEFAULT_CHARTER.n_dims == 6
+    assert DEFAULT_CHARTER.n_dims == 4
 
 
 def test_hash_is_sha256_of_text():
@@ -172,7 +171,7 @@ def test_ratings_under_custom_charter(seven_axis):
     regs = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
     snap = {"supply": 100, "tools": {DIGEST: {
         "axes": {"kindness": {"sum": 60 * 10, "mass": 10},
-                 "honesty": {"sum": 50, "mass": 1}},
+                 "retired": {"sum": 50, "mass": 1}},
         "fields": {"correctness": {"sum": 80 * 20, "mass": 20}}}}}
     out = compute_tool_mint([], registrations=regs, review_snapshot=snap)
     r = out["ratings_next"][DIGEST]
