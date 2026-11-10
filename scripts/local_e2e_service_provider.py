@@ -33,6 +33,12 @@ pays on the same channel), the seller's settlement sweep closes the channel
 with its best voucher once the deposit no longer covers the price, and the
 buyer's sweep takes the remainder back after the challenge window.
 
+Then the review (stage 12, Decision 2026-11-10): the buyer's daemon kept
+the seller's signed receipt of the served request, the child reviews it
+with the review_service agent tool, the event rides a batch into a real
+federated close, and the close's carry bundle (the anchored state) holds
+the service's rating, which the buyer's catalog search shows.
+
 The LLM seam is the ONE thing mocked: the selling daemon's provider manager
 builds a canned-response fake for the upstream provider its service names,
 so this needs no real model.
@@ -1178,9 +1184,106 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         failed = True
 
     # ------------------------------------------------------------------
-    # Stage 12 — teardown
+    # Stage 12: the buyer reviews a paid request; the next close rates it
+    # (service reviews in the epoch-close, Decision 2026-11-10)
     # ------------------------------------------------------------------
-    s12 = board.stage(12, "teardown")
+    s12 = board.stage(12, "the buyer reviews a paid request; the next "
+                          "close's anchored state carries the rating")
+    try:
+        if s9.status != "PASS":
+            raise RuntimeError("stage 9 did not complete")
+        from unittest.mock import MagicMock
+
+        from atn import service_catalog as sc_mod
+        from atn.agent_tools import _review_service
+        from nodes.common.authoritative_encoding import cid_for_blob, decode_carry_bundle
+        from nodes.common.event_gossip import EventBatch, EventGossip, Keypair
+        from nodes.common.federated_close_driver import FederatedCloseDriver
+        from nodes.common.service_reviews import service_key
+
+        receipts = rt_buyer.service_receipts
+        jurisdiction = "0xe2e-service-reviews"
+        sent: List[Dict[str, Any]] = []
+        receipts.attach(jurisdiction, sent.append)
+
+        # The seller's signed reply left a receipt on the buyer's daemon:
+        # the payer the seller's gate verified, what it charged, no result.
+        rid = str(served["request_id"])
+        kept = receipts.get(rid)
+        assert kept and kept["charged"] is True, kept
+        assert kept["payer"] == child_addr.lower(), (kept["payer"], child_addr)
+        assert kept["provider"] == seller_addr.lower()
+        assert int(kept["amount"]) == price, kept
+        assert CANNED_REPLY not in json.dumps(kept)
+        # The failed request's receipt says it charged nothing: no review.
+        refused = await _review_service(rt_buyer, {
+            "_caller_id": "child-1", "request_id": str(failed1["request_id"]),
+            "correctness": -1, "simplicity": 0, "novelty": 0, "malware": False})
+        assert "not charged" in str(refused.get("error")), refused
+
+        review = await _review_service(rt_buyer, {
+            "_caller_id": "child-1", "request_id": rid, "correctness": 0.9,
+            "simplicity": 0.7, "novelty": 0.2, "malware": False,
+            "note": "answered as described"})
+        assert review.get("ok"), review
+        assert len(sent) == 1 and sent[0]["reviewer"] == child_addr.lower()
+
+        # The event rides the buyer's batch into the next close.
+        kp = Keypair.generate()
+        batch = EventBatch(rpb_address=jurisdiction, sender_pubkey=kp.public_key,
+                           batch_seq=1, events=list(sent), prev_batch_hash=b"",
+                           timestamp=time.time())
+        gossip = MagicMock(spec=EventGossip)
+        gossip.known_senders.return_value = [kp.public_key]
+        gossip.sender_pubkey = kp.public_key
+        gossip.drain_epoch_batches.return_value = [batch]
+        close_dir = Path(tempfile.mkdtemp(prefix="e2e_svc_close_"))
+        drv = FederatedCloseDriver(
+            gossip=gossip,
+            tool_registrations_path=close_dir / "tool_registrations.json",
+            tool_rounds_path=close_dir / "tool_rounds.json",
+            tool_ratings_path=close_dir / "tool_ratings.json",
+            service_reviews_path=close_dir / "service_reviews.json",
+            service_ratings_path=close_dir / "service_ratings.json")
+        fed = drv.run({"epoch_id": "e2e-service-reviews-1"})
+        assert fed is not None, "the close returned nothing"
+        assert fed.close_result["authoritative_payload"]["carry_cid"] == \
+            cid_for_blob(fed.carry_bundle_blob)
+        carry = decode_carry_bundle(fed.carry_bundle_blob)["carry"]
+        key = service_key(seller_addr, spec_digest)
+        rating = carry["service_ratings"].get(key)
+        assert rating, carry["service_ratings"]
+        assert rating["payers"] == 1 and rating["correctness"] == 0.9, rating
+        assert rating["simplicity"] == 0.7 and rating["malware"] == 0.0, rating
+        assert rating["charged"] == price, rating
+        assert carry["service_reviews"][key][child_addr.lower()]["note"] == \
+            "answered as described"
+        assert fed.close_result["agent_mint"] == {}
+
+        # Search shows it: the buyer's catalog reads the close's rating.
+        catalog = sc_mod.catalog_for(rt_buyer)
+        synced = await asyncio.to_thread(catalog.sync_chain)
+        assert not synced.get("error"), synced
+        catalog.note_spec(spec_digest, rt_seller.service_store.get(spec_digest).spec)
+        catalog.rating_provider = drv.service_rating
+        rows = [r for r in catalog.search("") if r["digest"] == spec_digest]
+        assert rows and rows[0]["rating"]["payers"] == 1, rows
+        s12.note("rating", {k: rating[k] for k in ("payers", "correctness", "charged")})
+        s12.note("carry_cid", fed.carry_cid[:16])
+        step(f"the child reviewed request {rid[:10]}; the close's carry bundle "
+             f"rates the service ({rating['payers']} payer, correctness "
+             f"{rating['correctness']}) and search shows it")
+        s12.status = "PASS"
+    except Exception as e:
+        s12.status = "FAIL"
+        s12.note("error", repr(e))
+        log(traceback.format_exc())
+        failed = True
+
+    # ------------------------------------------------------------------
+    # Stage 13: teardown
+    # ------------------------------------------------------------------
+    s13 = board.stage(13, "teardown")
     try:
         if ws_server is not None:
             await ws_server.stop()
@@ -1192,10 +1295,10 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     pass
         kill_hardhat(hh_proc)
         hh_proc = None
-        s12.status = "PASS"
+        s13.status = "PASS"
     except Exception as e:
-        s12.status = "FAIL"
-        s12.note("error", repr(e))
+        s13.status = "FAIL"
+        s13.note("error", repr(e))
         log(traceback.format_exc())
         failed = True
     finally:
