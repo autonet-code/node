@@ -344,11 +344,11 @@ _REVIEW_COMPONENTS = [
     {"name": "reviewer", "type": "address"}, {"name": "correctness", "type": "int8"},
     {"name": "simplicity", "type": "uint8"}, {"name": "novelty", "type": "uint8"},
     {"name": "malware", "type": "uint8"}, {"name": "claimed", "type": "bool"},
-    {"name": "bountied", "type": "bool"}, {"name": "bondClaimed", "type": "bool"},
+    {"name": "bountied", "type": "bool"},
     {"name": "accuracy", "type": "uint64"}, {"name": "weight", "type": "uint128"},
     {"name": "scores", "type": "bytes16"},
 ]
-_REVIEW_ACCURACY = 8   # index of accuracy in the reviewAt tuple
+_REVIEW_ACCURACY = 7   # index of accuracy in the reviewAt tuple
 
 _TOOL_BOND_VIEWS_ABI = [
     {"name": "epochInfo", "type": "function", "stateMutability": "view",

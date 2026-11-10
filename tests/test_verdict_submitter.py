@@ -108,8 +108,9 @@ def test_a_conclude_lost_to_another_daemon_counts_as_concluded():
 
 
 def test_the_verdict_abi_matches_toolbond():
-    """conclude, verdicts, getRound and the review calls as the daemon makes
-    them are trustless-contracts ToolBond's (8dcc1be)."""
+    """conclude, verdicts, getRound and the review calls (the Review struct
+    too) as the daemon makes them are trustless-contracts ToolBond's
+    (8dcc1be)."""
     import json
     from pathlib import Path
 
@@ -126,7 +127,17 @@ def test_the_verdict_abi_matches_toolbond():
     def shape(e):
         return ([i["type"] for i in e["inputs"]],
                 [o["type"] for o in e.get("outputs", [])])
+    def flat(e):        # tuple outputs compared field by field
+        return ([i["type"] for i in e["inputs"]],
+                [[c["type"] for c in o.get("components", [])] or o["type"]
+                 for o in e.get("outputs", [])])
+    from nodes.common.voice_state import _TOOL_BOND_VIEWS_ABI
     mine = {e["name"]: e for e in TOOL_BOND_VERDICT_ABI + TOOL_BOND_REVIEW_ABI}
     for name in ("conclude", "verdicts", "getRound", "claim", "finalize"):
         assert shape(mine[name]) == shape(fns[name]), name
+    for name in ("reviewAt", "reviewOf"):
+        assert flat(mine[name]) == flat(fns[name]), name
+    views = {e["name"]: e for e in _TOOL_BOND_VIEWS_ABI}
+    for name in ("reviewAt", "epochInfo"):
+        assert flat(views[name]) == flat(fns[name]), name
     assert "settleMalware" not in fns and "claimBondShare" not in fns

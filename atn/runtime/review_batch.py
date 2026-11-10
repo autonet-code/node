@@ -84,7 +84,7 @@ def _fn(name: str, inputs: list, outputs: list = (), mutability: str = "nonpayab
 REVIEW_TUPLE = [
     ("reviewer", "address"), ("correctness", "int8"), ("simplicity", "uint8"),
     ("novelty", "uint8"), ("malware", "uint8"), ("claimed", "bool"),
-    ("bountied", "bool"), ("bondClaimed", "bool"), ("accuracy", "uint64"),
+    ("bountied", "bool"), ("accuracy", "uint64"),
     ("weight", "uint128"), ("scores", "bytes16"),
 ]
 
@@ -419,7 +419,7 @@ class ReviewBondClient:
                                      Web3.to_checksum_address(reviewer)).call()
             return {"reviewer": v[0], "correctness": int(v[1]), "simplicity": int(v[2]),
                     "novelty": int(v[3]), "malware": int(v[4]), "claimed": bool(v[5]),
-                    "accuracy": int(v[8]), "weight": int(v[9])}
+                    "accuracy": int(v[7]), "weight": int(v[8])}
         return await self._read(fn)
 
     async def household_rep(self, agent: str, epoch: Optional[int] = None) -> Optional[int]:
