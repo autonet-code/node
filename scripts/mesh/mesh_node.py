@@ -56,6 +56,36 @@ for noisy in ("libp2p", "multiaddr", "trio_websocket"):
 log = logging.getLogger("mesh-node")
 
 
+class _FreeEcho:
+    """A free, unmetered stream service that echoes every byte (the
+    transport under test is the mesh's, not the payment gate's)."""
+
+    async def accept(self, open_msg: dict):
+        from nodes.common.service_stream import Accept
+        return Accept(reply={"ok": True, "charged": False,
+                             "result": {"units": None}}, units=None)
+
+    async def check_voucher(self, open_msg: dict, frame: dict):
+        from nodes.common.service_stream import VoucherCheck
+        return VoucherCheck(ok=False, error="free stream")
+
+    async def keep(self, open_msg, token):
+        return None
+
+    async def release(self, open_msg, token):
+        return None
+
+    async def sign(self, open_msg, request_id, reply):
+        return reply
+
+    async def serve(self, stream) -> None:
+        while True:
+            data = await stream.receive()
+            if not data:
+                return
+            await stream.send(data)
+
+
 class Node:
     def __init__(self, host: AutonetHost, store: BlobStore):
         self.host = host
@@ -145,10 +175,58 @@ class Node:
         log.info("fetched tool %s from %s via the DHT: %s", event["name"], event["from"],
                  [(r["ok"], r["providers"][:3], r["seconds"]) for r in results])
 
+    async def stream(self, peer: str, nbytes: int, timeout: float = 120.0) -> dict:
+        """Open a service stream to ``peer`` (docs/services_market.md,
+        Decision 2026-11-10) and echo ``nbytes`` through it: the path it
+        took, the remote address of the connection, and whether every byte
+        came back."""
+        t0 = time.time()
+        out = {"peer": peer, "ok": False, "path": None, "bytes": nbytes}
+        opening = {"type": "service_request", "msg_id": "harness",
+                   "spec_digest": "00" * 32, "request_id": f"h-{int(t0 * 1000)}",
+                   "args": {}}
+        payload = bytes(range(256)) * (nbytes // 256 + 1)
+        payload = payload[:nbytes]
+        try:
+            with trio.fail_after(timeout):
+                async with self.host.service_stream(peer, opening, timeout=60) as st:
+                    out["path"] = st.path
+                    back = bytearray()
+
+                    async def reader():
+                        while len(back) < nbytes:
+                            chunk = await st.receive()
+                            if not chunk:
+                                return
+                            back.extend(chunk)
+                    async with trio.open_nursery() as n:
+                        n.start_soon(reader)
+                        for off in range(0, nbytes, 60000):
+                            await st.send(payload[off:off + 60000])
+                    out["ok"] = bytes(back) == payload
+        except BaseException as e:  # noqa: BLE001 (reported to the harness)
+            out["error"] = repr(e)[:300]
+        out["seconds"] = round(time.time() - t0, 1)
+        try:
+            from libp2p.peer.id import ID
+            remote = []
+            for c in self.host.host.get_network().get_connections(ID.from_base58(peer)):
+                try:
+                    remote.append(list(c.muxed_conn.get_remote_address()))
+                except Exception:
+                    pass
+            out["remote"] = remote
+        except Exception:
+            out["remote"] = []
+        return out
+
     async def command(self, req: dict) -> dict:
         cmd = req.get("cmd")
         if cmd == "status":
             return self.status()
+        if cmd == "stream":
+            return await self.stream(str(req.get("peer") or ""),
+                                     int(req.get("bytes") or 1 << 20))
         if cmd == "publish_tool":
             return await self.publish_tool(str(req.get("name") or "tool"))
         if cmd == "gossip":
@@ -203,6 +281,7 @@ async def main() -> None:
         server = host_blob_server(host)
         server.add_source(store.get_bytes_local)
         node = Node(host, store)
+        host.set_service_stream_handler(_FreeEcho())
         await host.subscribe_topic(TOPIC, node.on_event)
         log.info("mesh node %s up: %s", host.peer_id, host.addrs)
         async with trio.open_nursery() as n:
