@@ -42,6 +42,39 @@ def _chain_listing(monkeypatch):
     monkeypatch.setattr(WebSocketBridge, "_chain_service", _chain)
 
 
+async def _stub_catalog(rt, monkeypatch, listings):
+    """The daemon's service catalog holding ``listings`` as synced registry
+    entries, each read fresh by ``service_client.read_service``."""
+    from atn import service_client
+    from atn.service_catalog import ServiceCatalog
+
+    cat = ServiceCatalog(rt, None)
+    by_id = {}
+    for s in listings:
+        entry = {"service_id": int(s["service_id"]),
+                 "provider": s["provider"],
+                 "spec_digest": str(s["spec_digest"]).lower().removeprefix("0x"),
+                 "ask_amount": int(s.get("ask_amount") or 0),
+                 "active": bool(s.get("active"))}
+        cat._entries[entry["service_id"]] = entry
+        cat._specs[entry["spec_digest"]] = {
+            "kind": "service_spec", "name": f"svc{entry['service_id']}",
+            "description": "d", "input_schema": SCHEMA, "author": "a",
+            "author_pubkey": entry["provider"]}
+        by_id[entry["service_id"]] = entry
+    cat._last_block = 1
+    # The stub specs stand for ones signed by their providers.
+    import atn.service_catalog as sc
+    monkeypatch.setattr(sc, "signed_by_author", lambda spec: True)
+    rt.__dict__["service_catalog"] = cat
+
+    async def _read(config, service_id):
+        e = by_id.get(int(service_id))
+        return dict(e) if e else {"error": f"no on-chain service #{service_id}"}
+    monkeypatch.setattr(service_client, "read_service", _read)
+    return cat
+
+
 def _make_runtime(tmp_path: Path):
     from atn.config import ATNConfig
     from atn.runtime import Runtime
@@ -1140,8 +1173,11 @@ class TestInvokeServicePayment:
         svc = rt.service_store.register(
             name="owner_svc", description="d", input_schema=SCHEMA,
             author="user", backing_tool=tool["digest"])
-        # The key is omitted entirely, not stored empty.
-        assert not rt.service_store.get(svc["digest"]).spec.get("author_pubkey")
+        # The spec names and is signed by the address it is registered
+        # under: the operator's (the catalog's genuine-entry rule).
+        from atn.service_spec import signed_by_author
+        spec = rt.service_store.get(svc["digest"]).spec
+        assert signed_by_author(spec)
         self._configure_chain(rt)
 
         from atn import service_client
@@ -1266,8 +1302,9 @@ class TestInvokeServicePayment:
     @pytest.mark.asyncio
     async def test_foreign_digest_resolves_provider_and_dials(
             self, tmp_path, monkeypatch):
-        """A digest this daemon does not publish is resolved by scanning the
-        on-chain registry for its provider + ask, then bought cross-daemon."""
+        """A digest this daemon does not publish is resolved through the
+        catalog to its registry entry, read fresh for its provider and ask,
+        then bought cross-daemon."""
         rt = _make_runtime(tmp_path)
         self._configure_chain(rt)
         rt._config.rpb.service_registry_address = "0x" + "44" * 20
@@ -1287,7 +1324,7 @@ class TestInvokeServicePayment:
                  "active": True},
             ]
 
-        monkeypatch.setattr(on_chain.ServiceMarketClient, "list_services", _list)
+        await _stub_catalog(rt, monkeypatch, await _list(None))
 
         paid: list[tuple] = []
 
@@ -1339,7 +1376,7 @@ class TestInvokeServicePayment:
         async def _list(self):
             return []
 
-        monkeypatch.setattr(on_chain.ServiceMarketClient, "list_services", _list)
+        await _stub_catalog(rt, monkeypatch, await _list(None))
         out = await _invoke(rt, "ab" * 32, {"x": "1"})
         assert out["ok"] is False
         assert "not registered on chain" in out["error"]
@@ -1358,7 +1395,7 @@ class TestInvokeServicePayment:
                      "spec_digest": foreign, "ask_amount": "1",
                      "active": False}]
 
-        monkeypatch.setattr(on_chain.ServiceMarketClient, "list_services", _list)
+        await _stub_catalog(rt, monkeypatch, await _list(None))
         out = await _invoke(rt, foreign, {"x": "1"})
         assert out["ok"] is False
         assert "retired on chain" in out["error"]

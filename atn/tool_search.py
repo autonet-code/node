@@ -192,10 +192,14 @@ class ToolSearchIndex:
         *,
         embed: Callable[[list[str]], Optional[np.ndarray]] = minilm.embed_texts,
         model_key: Callable[[], str] = minilm.model_key,
+        text_of: Callable[[dict[str, Any]], str] = manifest_embedding_text,
     ) -> None:
         self.path = Path(path) if path is not None else None
         self._embed = embed
         self._model_key = model_key
+        # What gets embedded per document: a tool manifest's text by
+        # default; the service catalog passes service_embedding_text.
+        self._text_of = text_of
         self._lock = threading.RLock()
         self._texts: dict[str, str] = {}          # digest -> embedding text
         self._tokens: dict[str, list[str]] = {}   # digest -> keyword doc
@@ -212,7 +216,7 @@ class ToolSearchIndex:
         if digest in self._tokens:
             return
         with self._lock:
-            self._texts[digest] = manifest_embedding_text(manifest)
+            self._texts[digest] = self._text_of(manifest)
             self._tokens[digest] = keyword_tokens(manifest)
             self._names[digest] = str(manifest.get("name") or "")
 

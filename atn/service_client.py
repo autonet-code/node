@@ -101,6 +101,22 @@ def set_p2p_host(host: Any) -> None:
     _p2p_host = host
 
 
+# The daemon's service catalog (atn/service_catalog.py), when one runs: a
+# service's registry number comes from it instead of a scan of every entry.
+_catalog: Any = None
+
+
+def set_catalog(catalog: Any) -> None:
+    global _catalog
+    _catalog = catalog
+
+
+def clear_catalog(catalog: Any) -> None:
+    global _catalog
+    if _catalog is catalog:
+        _catalog = None
+
+
 def clear_p2p_host(host: Any) -> None:
     """Unregister ``host`` (only if it is still the registered one)."""
     global _p2p_host
@@ -441,6 +457,22 @@ async def lookup_service_ask(
                          "service_registry_address or rpc_url)."}
     target_digest = normalize_digest(spec_digest)
     target_provider = str(provider_address or "").strip().lower()
+    # The catalog knows the entry's number: one read of that entry, fresh
+    # from the chain, instead of a scan of every entry.
+    cat = _catalog
+    entry = (cat.entry_for(target_digest, target_provider)
+             if cat is not None and getattr(cat, "synced", False) else None)
+    if entry is not None:
+        fresh = await read_service(config, entry["service_id"])
+        if (not fresh.get("error")
+                and normalize_digest(str(fresh.get("spec_digest") or ""))
+                == target_digest
+                and (not target_provider
+                     or str(fresh.get("provider") or "").lower() == target_provider)):
+            return {"service_id": fresh.get("service_id"),
+                    "provider": fresh.get("provider"),
+                    "ask_amount": int(fresh.get("ask_amount") or 0),
+                    "active": bool(fresh.get("active"))}
     try:
         services = await smc.list_services()
     except Exception as exc:  # noqa: BLE001

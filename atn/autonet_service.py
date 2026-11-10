@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, TYPE_CHECKING
@@ -211,6 +212,7 @@ class AutonetBridge:
         # Background drain of remote tool manifests into the discovery
         # index (network tool search). Spawned once gossip is wired.
         self._manifest_pull_task: asyncio.Task | None = None
+        self._service_catalog_task: asyncio.Task | None = None
         # Staked review driver (atn/review_driver.py): commits, reveals,
         # finalizes and claims this daemon's agents' ToolBond review
         # batches. Runs while the bridge runs.
@@ -1413,6 +1415,70 @@ class AutonetBridge:
             self._manifest_pull_task = asyncio.create_task(
                 self._pull_remote_manifests(library, tool_store))
 
+            # Services, published and found the way tools are (Decision
+            # 2026-11-10): specs gossiped whole on their own topic, kept
+            # once the chain names them, searched locally.
+            if self._service_catalog_task is None:
+                self._service_catalog_task = asyncio.create_task(
+                    self._run_service_catalog(str(library.rpb_address)))
+
+    async def _run_service_catalog(self, jurisdiction_key: str) -> None:
+        """Follow the jurisdiction's services: subscribe to their gossip,
+        sync the catalog with the ServiceRegistry every ``SYNC_INTERVAL``,
+        fetch the specs no announcement brought, and announce this
+        daemon's own registered specs (at once on registration, then every
+        ``ANNOUNCE_INTERVAL``)."""
+        from . import service_catalog as sc
+        from . import service_client
+
+        runtime = self._runtime
+        if runtime is None:
+            return
+        catalog = sc.catalog_for(runtime)
+        service_client.set_catalog(catalog)
+        topic = sc.topic_for(jurisdiction_key)
+        host = self._p2p_host
+        if host is not None:
+            host.subscribe_topic_threadsafe(
+                topic, lambda _t, data: catalog.accept_announcement(data))
+        store = getattr(runtime, "service_store", None)
+
+        def _announce(record) -> None:
+            h = self._p2p_host
+            if h is not None and record.service_id is not None:
+                h.publish_topic_threadsafe(
+                    topic, sc.announcement(record.spec, record.service_id))
+
+        if store is not None:
+            store.on_registered = _announce
+        last_announce: float | None = None
+        try:
+            while True:
+                try:
+                    res = await asyncio.to_thread(catalog.sync_chain)
+                    if res.get("error"):
+                        log.debug("service catalog sync: %s", res["error"])
+                    if store is not None:
+                        kept = await sc.fetch_missing(catalog, store.spec_for)
+                        if kept:
+                            log.info("fetched %d service spec(s)", kept)
+                    h = self._p2p_host
+                    now = time.monotonic()
+                    if h is not None and (last_announce is None
+                                          or now - last_announce >= sc.ANNOUNCE_INTERVAL):
+                        for msg in catalog.own_announcements():
+                            h.publish_topic_threadsafe(topic, msg)
+                        last_announce = now
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.debug("service catalog cycle failed", exc_info=True)
+                await asyncio.sleep(sc.SYNC_INTERVAL)
+        finally:
+            service_client.clear_catalog(catalog)
+            if store is not None and store.on_registered is _announce:
+                store.on_registered = None
+
     async def _pull_remote_manifests(self, library, tool_store,
                                      interval: float = 10.0,
                                      batch: int = 64,
@@ -1550,6 +1616,13 @@ class AutonetBridge:
                 except asyncio.CancelledError:
                     pass
             self._manifest_pull_task = None
+            if self._service_catalog_task and not self._service_catalog_task.done():
+                self._service_catalog_task.cancel()
+                try:
+                    await self._service_catalog_task
+                except asyncio.CancelledError:
+                    pass
+            self._service_catalog_task = None
             await self._stop_review_driver()
             if self._task and not self._task.done():
                 self._task.cancel()

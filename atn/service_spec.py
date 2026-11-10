@@ -178,6 +178,29 @@ def normalize_inference(inference: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def spec_signer(payload: Dict[str, Any]) -> str:
+    """The address that signed ``payload`` (``author_sig`` over
+    ``canonical_service_bytes``), or "" when unsigned or invalid."""
+    sig = str(payload.get(_SIG_FIELD) or "")
+    if not sig:
+        return ""
+    try:
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        return str(Account.recover_message(
+            encode_defunct(canonical_service_bytes(payload)),
+            signature=sig if sig.startswith("0x") else "0x" + sig))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def signed_by_author(payload: Dict[str, Any]) -> bool:
+    """Whether the spec is signed by the address it names
+    (``author_pubkey``)."""
+    author = str(payload.get("author_pubkey") or "").lower()
+    return bool(author) and spec_signer(payload).lower() == author
+
+
 def is_service_spec(payload: Any) -> bool:
     return isinstance(payload, dict) and payload.get("kind") == SERVICE_SPEC_KIND
 

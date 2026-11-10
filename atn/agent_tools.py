@@ -3435,9 +3435,10 @@ def _caller_identity(runtime: Runtime, caller_id: str | None):
 
 
 async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """List on-chain services (most-recent first), optionally substring-filtered
-    against locally-known spec metadata."""
-    query = str(input.get("query") or "").strip().lower()
+    """Search the jurisdiction's active services (Decision 2026-11-10): the
+    daemon's catalog, keyword + semantic like tools, newest first without a
+    query. Price, provider and active flag are the chain's."""
+    query = str(input.get("query") or "").strip()
     try:
         limit = max(1, min(int(input.get("limit") or 25), 200))
     except (TypeError, ValueError):
@@ -3449,48 +3450,29 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         from .config import not_joined_state
         return not_joined_state()
 
-    from .on_chain import ServiceMarketClient
-    smc = ServiceMarketClient(runtime._config.rpb)
-    if not smc.registry_available:
-        return {"error": "ServiceRegistry not configured "
-                         "(missing service_registry_address or rpc_url)."}
-
-    services = await smc.list_services()
-    # Most-recent first (list_services returns ascending serviceId).
-    services = list(reversed(services))
-
+    from . import service_catalog as sc
+    catalog = sc.catalog_for(runtime)
+    synced = await sc.ensure_synced(catalog)
+    if synced.get("error") and not catalog.synced:
+        return {"error": synced["error"]}
+    # Registered services whose spec is not here yet: fetch the ones due
+    # now (bounded, with the catalog's backoff) from whoever holds them.
     store = getattr(runtime, "service_store", None)
-    services = [s for s in services if s.get("active")][:max(limit * 4, 100)]
-    # The spec says what a service is and what to send it: ours, or fetched
-    # (concurrently) from whoever holds it: the provider, a buyer, a relay.
-    specs = await asyncio.gather(*(
-        store.spec_for(str(s.get("spec_digest") or "")) for s in services
-    )) if store is not None else [None] * len(services)
-    rows: list[dict[str, Any]] = []
-    for s, spec in zip(services, specs):
-        digest = str(s.get("spec_digest") or "")
-        spec = spec or {}
-        name = str(spec.get("name") or "")
-        description = str(spec.get("description") or "")
-        if query:
-            hay = f"{name} {description} {digest} {s.get('provider','')}".lower()
-            if query not in hay:
-                continue
-        rows.append({
-            "service_id": s.get("service_id"),
-            "provider": s.get("provider"),
-            "ask": s.get("ask_amount"),
-            "spec_digest": digest,
-            "active": s.get("active"),
-            "name": name,
-            "description": description,
-            "input_schema": spec.get("input_schema"),
-            "output_schema": spec.get("output_schema"),
-            "spec_available": bool(spec),
-        })
-        if len(rows) >= limit:
-            break
-    return {"services": rows, "count": len(rows)}
+    if store is not None:
+        await sc.fetch_missing(catalog, store.spec_for, limit=limit)
+    rows = await asyncio.to_thread(catalog.search, query, limit)
+    return {"services": [{
+        "service_id": r["service_id"],
+        "provider": r["provider"],
+        "ask": r["ask_amount"],
+        "spec_digest": r["digest"],
+        "active": r["active"],
+        "name": r["name"],
+        "description": r["description"],
+        "input_schema": r["input_schema"],
+        "output_schema": r["output_schema"],
+        "spec_available": r["known_spec"],
+    } for r in rows], "count": len(rows)}
 
 
 async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:

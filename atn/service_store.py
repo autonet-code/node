@@ -129,6 +129,9 @@ class ServiceStore:
         self._seen_path = self._dir / "served_requests.json"
         self._voucher_path = self._dir / "channel_vouchers.json"
         self._records: dict[str, ServiceRecord] = {}
+        # Called with the record once the chain numbers a registration: the
+        # daemon's service catalog announces the spec on gossip from here.
+        self.on_registered: Any = None
         self._blobs: Any = None  # lazy; None until substrate package needed
         self._request_seq = 0
         self._seen_requests: set[str] = set()
@@ -215,6 +218,12 @@ class ServiceStore:
             return False
         record.service_id = int(service_id)
         self._persist()
+        hook = self.on_registered
+        if hook is not None:
+            try:
+                hook(record)
+            except Exception:  # noqa: BLE001 - announcing never fails a registration
+                log.debug("service registration hook failed", exc_info=True)
         return True
 
     def retire(self, digest: str) -> bool:
@@ -468,16 +477,35 @@ class ServiceStore:
     # Internals
     # ------------------------------------------------------------------
 
-    def _author_address(self, author: str) -> str:
-        """The payable 0x the spec stamps as ``author_pubkey``.
+    def _signing_key(self, author: str) -> str:
+        """The key that signs ``author``'s specs and registers them: the
+        operator key for the owner surface, the agent's stored key for an
+        agent (an external agent's is the operator's). Empty when none is
+        held (a dev daemon without a vault)."""
+        registry = getattr(self._runtime, "registry", None)
+        if registry is None:
+            return ""
+        try:
+            if not author or author == OWNER_AUTHOR:
+                return str(registry.daemon_operator_key() or "").strip()
+            return str(registry.get_agent_key(author) or "").strip()
+        except Exception:  # noqa: BLE001 - no vault: unsigned
+            return ""
 
-        The owner ("user") has no agent identity, so an owner-published
-        service used to stamp an EMPTY address: the payer path fell back
-        to the owner wallet and paid, while the provider gate (which has
-        no such fallback) refused to verify — money moved and nothing was
-        served. Mirrors ``ToolStore._consensus_identity``: the owner, and
-        any author whose agent carries no address, resolve to the owner
-        wallet."""
+    def _author_address(self, author: str) -> str:
+        """The address the spec names as ``author_pubkey``: the signer of
+        the spec and the address that registers it on chain, so the
+        catalog takes a registry entry as genuine only when its provider
+        is this address (anyone can register a copy of a public spec).
+        Without a signing key: the agent's identity address, else the
+        owner wallet."""
+        key = self._signing_key(author)
+        if key:
+            try:
+                from eth_account import Account
+                return str(Account.from_key(key).address)
+            except Exception:  # noqa: BLE001
+                pass
         if author != OWNER_AUTHOR:
             defn = self._runtime.get_agent(author)
             identity = getattr(defn, "identity", None) if defn else None
@@ -498,10 +526,7 @@ class ServiceStore:
         eth_account dependency is optional — an unsigned spec is valid,
         it just carries no cryptographic authorship proof. Mirrors
         ToolStore._sign."""
-        key = None
-        registry = getattr(self._runtime, "registry", None)
-        if registry is not None and hasattr(registry, "get_agent_key"):
-            key = registry.get_agent_key(author)
+        key = self._signing_key(author)
         if not key:
             return
         try:

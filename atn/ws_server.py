@@ -2071,7 +2071,7 @@ class WebSocketBridge:
         # way for a human to browse the marketplace at all. Mirrors the
         # agent-side `find_services` tool (agent_tools.py).
         if msg_type == "market_services":
-            query = str(msg.get("query") or "").strip().lower()
+            query = str(msg.get("query") or "").strip()
             try:
                 limit = max(1, min(int(msg.get("limit") or 100), 200))
             except (TypeError, ValueError):
@@ -2080,64 +2080,19 @@ class WebSocketBridge:
                 from .config import not_joined_state
                 return {"msg_id": msg_id, "ok": True,
                         "result": not_joined_state()}
-            try:
-                from .on_chain import ServiceMarketClient
-                smc = ServiceMarketClient(self.runtime._config.rpb)
-                if not smc.registry_available:
-                    return {"msg_id": msg_id, "ok": False,
-                            "error": "ServiceRegistry not configured "
-                                     "(missing service_registry_address or "
-                                     "rpc_url)."}
-                listings = list(reversed(await smc.list_services()))
-            except Exception as exc:                      # noqa: BLE001
-                log.warning("market_services failed: %s", exc)
-                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
-
+            # The daemon's catalog (Decision 2026-11-10): every service in
+            # the jurisdiction, specs gossiped or fetched, searched locally
+            # with the tools' ranking. No registry scan per search.
+            from . import service_catalog as sc
+            catalog = sc.catalog_for(self.runtime)
+            synced = await sc.ensure_synced(catalog)
+            if synced.get("error") and not catalog.synced:
+                return {"msg_id": msg_id, "ok": False, "error": synced["error"]}
             store = getattr(self.runtime, "service_store", None)
-            rows: list[dict[str, Any]] = []
-            for s in listings:
-                digest = str(s.get("spec_digest") or "")
-                name = ""
-                description = ""
-                image_uri = ""
-                inference: dict[str, Any] = {}
-                owned = False
-                # Enrich from the local store when we happen to know the
-                # spec: a service authored elsewhere is an opaque digest
-                # until its spec is fetched (blob rail, not wired here) —
-                # so its banner image stays empty and the UI falls back to
-                # the default colour banner.
-                rec = store.get(digest) if store is not None else None
-                if rec is not None:
-                    name = rec.name
-                    description = str(rec.spec.get("description") or "")
-                    image_uri = rec.image_uri
-                    inference = rec.inference
-                    owned = True
-                if query:
-                    hay = (f"{name} {description} {digest} "
-                           f"{s.get('provider', '')}").lower()
-                    if query not in hay:
-                        continue
-                rows.append({
-                    "service_id": s.get("service_id"),
-                    "provider": s.get("provider"),
-                    "ask": {"amount": str(s.get("ask_amount") or 0),
-                            "unit": "per_item"},
-                    "digest": digest,
-                    "active": s.get("active"),
-                    "name": name or f"service {digest[:10]}",
-                    "description": description,
-                    "image_uri": image_uri,
-                    # Only knowable for specs this daemon happens to hold —
-                    # a foreign digest stays an opaque listing until its
-                    # spec blob is fetched.
-                    "inference": inference,
-                    "owned": owned,
-                    "known_spec": rec is not None,
-                })
-                if len(rows) >= limit:
-                    break
+            if store is not None:
+                await sc.fetch_missing(catalog, store.spec_for, limit=limit)
+            rows = await asyncio.to_thread(
+                catalog.search, query, limit, include_inactive=True)
             return {"msg_id": msg_id, "ok": True,
                     "result": {"services": rows, "count": len(rows)}}
 
@@ -4893,8 +4848,9 @@ class WebSocketBridge:
     ) -> dict[str, Any]:
         """Buy from a service published by ANOTHER daemon.
 
-        The digest alone does not say who serves it, so the provider is
-        found by scanning the on-chain registry. Without chain config
+        The digest alone does not say who serves it: the catalog names the
+        registry entry, read fresh from the chain for its provider, price
+        and active flag (Decision 2026-11-10). Without chain config
         there is no registry to scan and no endpoint to dial, which is a
         hard failure rather than a degrade — unlike the local path there
         is no counterparty to reach at all.
@@ -4910,19 +4866,23 @@ class WebSocketBridge:
                              "not published by this daemon, and the "
                              "ServiceRegistry is not configured here, so a "
                              "foreign provider cannot be resolved."}
-        try:
-            listings = await self._offload(smc.list_services)
-        except Exception as exc:                            # noqa: BLE001
-            return {"msg_id": msg_id, "ok": False,
-                    "error": f"ServiceRegistry read failed: {exc}"}
-
-        target = service_client.normalize_digest(digest)
+        from . import service_catalog as sc
+        catalog = sc.catalog_for(self.runtime)
+        await sc.ensure_synced(catalog)
+        entry = catalog.entry_for(digest)
+        if entry is None:
+            # The spec may not be here yet: fetch it, then look again.
+            store = getattr(self.runtime, "service_store", None)
+            if store is not None:
+                catalog.note_spec(digest, await store.spec_for(digest))
+                entry = catalog.entry_for(digest)
         match = None
-        for s in listings:
-            if service_client.normalize_digest(
-                    str(s.get("spec_digest") or "")) == target:
-                match = s
-                break
+        if entry is not None:
+            sid = int(entry["service_id"])
+            fresh = await self._offload(
+                lambda: service_client.read_service(config, sid))
+            if not fresh.get("error"):
+                match = fresh
         if match is None:
             return {"msg_id": msg_id, "ok": False,
                     "error": f"Unknown service digest: {digest[:16]} — not in "
