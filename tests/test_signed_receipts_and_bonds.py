@@ -106,3 +106,4 @@ def test_a_tool_mints_only_once_it_breaks_through():
     # ...but not 5% of REP, nor 5% of the holders.
     assert mint((500, 50)) == {}
     assert mint((100, 500)) == {}
+
