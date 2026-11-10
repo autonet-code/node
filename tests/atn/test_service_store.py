@@ -1768,65 +1768,66 @@ class TestInvokeServicePayment:
             self, tmp_path, monkeypatch):
         """A digest this daemon does not publish is resolved through the
         catalog to its registry entry, read fresh for its provider and ask,
-        then bought cross-daemon."""
+        then bought on the operator's channel to that provider (Decision
+        2026-11-10: no transaction per request)."""
         rt = _make_runtime(tmp_path)
         self._configure_chain(rt)
         rt._config.rpb.service_registry_address = "0x" + "44" * 20
+        rt._config.rpb.payment_channel_address = "0x" + "77" * 20
         foreign = "ab" * 32
         provider_addr = "0x" + "55" * 20
 
-        from atn import on_chain, service_client
+        from atn import on_chain, service_channels, service_client
 
-        async def _list(self):
-            return [
-                {"service_id": 1, "provider": "0x" + "66" * 20,
-                 "spec_digest": "cd" * 32, "ask_amount": "5", "active": True},
-                # Chain reads may return the 0x-prefixed form; the handler
-                # compares in normalized space.
-                {"service_id": 2, "provider": provider_addr,
-                 "spec_digest": "0x" + foreign, "ask_amount": "777",
-                 "active": True},
-            ]
-
-        await _stub_catalog(rt, monkeypatch, await _list(None))
-
-        paid: list[tuple] = []
-
-        async def _pay(config, key, recipient, amount, request_id=""):
-            paid.append((recipient, amount))
-            return {"tx_hash": "0xabc123", "request_id": request_id}
+        await _stub_catalog(rt, monkeypatch, [
+            {"service_id": 1, "provider": "0x" + "66" * 20,
+             "spec_digest": "cd" * 32, "ask_amount": "5", "active": True},
+            # Chain reads may return the 0x-prefixed form; the handler
+            # compares in normalized space.
+            {"service_id": 2, "provider": provider_addr,
+             "spec_digest": "0x" + foreign, "ask_amount": "777",
+             "active": True},
+        ])
 
         async def _endpoint(self, addr):
             return f"wss://seller.invalid/{addr[:6]}"
 
-        dialed: list[dict] = []
+        async def _no_direct(*a, **kw):
+            raise AssertionError("the owner's purchase must not pay directly")
 
-        async def _req(config, provider, digest, args, **kw):
-            dialed.append({"provider": provider, "digest": digest,
-                           "args": args, **kw})
-            return {"ok": True, "result": {"request_id": kw.get("request_id"),
-                                           "transcript": "done"}}
+        bought: list[dict] = []
 
-        monkeypatch.setattr(service_client, "pay_for_service", _pay)
+        async def _on_channel(book, smc, config, key, payer, provider, digest,
+                              args, ask, **kw):
+            bought.append({"provider": provider, "digest": digest, "ask": ask,
+                           "payer": payer, **kw})
+            return {"ok": True, "delivered": True, "charged": True,
+                    "paid": ask, "channel_id": 9, "request_id": "0x" + "0e" * 32,
+                    "result": {"transcript": "done"}}
+
+        monkeypatch.setattr(service_client, "pay_for_service", _no_direct)
         monkeypatch.setattr(on_chain.OnChainService, "get_agent_endpoint",
                             _endpoint)
-        monkeypatch.setattr(service_client, "request_service", _req)
+        monkeypatch.setattr(service_channels, "request_on_channel", _on_channel)
+        rt.__dict__["channel_book"] = object()
 
-        out = await _invoke(rt, foreign, {"audio": "x"})
-        assert out["ok"] is True
+        server = _server(rt)
+        out = await _invoke(rt, foreign, {"audio": "x"}, server=server)
+        assert out["ok"] is True, out
         assert out["result"]["output"] == {"transcript": "done"}
-        # Paid the CHAIN ask to the CHAIN provider (not a local spec's).
-        assert paid == [(provider_addr, 777)]
+        # Paid the CHAIN ask to the CHAIN provider (not a local spec's), as
+        # the operator, on a channel.
+        assert bought[0]["provider"] == provider_addr
+        assert bought[0]["ask"] == 777
+        assert bought[0]["payer"] == server._buyer_address()
+        assert bought[0]["endpoint"] == f"wss://seller.invalid/{provider_addr[:6]}"
         receipt = out["result"]["receipt"]
         assert receipt["paid"] is True
         assert receipt["amount"] == "777"
         assert receipt["token"] == "ATN"          # chain asks are ATN-only
         assert receipt["recipient"] == provider_addr
-        # The endpoint was resolved for us, so request_service doesn't
-        # re-read the chain, and the payment proof rode along.
-        assert dialed[0]["endpoint"] == f"wss://seller.invalid/{provider_addr[:6]}"
-        assert dialed[0]["tx_hash"] == "0xabc123"
-        assert dialed[0]["digest"] == foreign
+        assert receipt["channel_id"] == 9
+        assert receipt["tx_hash"] is None
 
     @pytest.mark.asyncio
     async def test_foreign_digest_not_on_chain_either(self, tmp_path,

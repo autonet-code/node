@@ -5044,27 +5044,6 @@ class WebSocketBridge:
         except (TypeError, ValueError):
             amount = 0
 
-        if prepaid is not None:
-            tx_hash = prepaid["tx_hash"]
-            request_id = prepaid["request_id"]
-            receipt = self._receipt(
-                paid=True, degraded=False, tx_hash=tx_hash,
-                amount=amount, recipient=provider_address)
-        else:
-            request_id = service_client.new_request_id()
-            payment = await self._pay_for_invoke(
-                recipient=provider_address, amount=amount,
-                request_id=request_id)
-            if payment.get("error"):
-                return {"msg_id": msg_id, "ok": False,
-                        "error": payment["error"]}
-            tx_hash = str(payment.get("tx_hash") or "")
-            request_id = str(payment.get("request_id") or request_id)
-            receipt = self._receipt(
-                paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
-                tx_hash=tx_hash, amount=amount,
-                recipient=provider_address)
-
         # Resolve the endpoint off the loop (blocking web3 read) and hand it
         # to request_service so it doesn't read the chain itself; the dial
         # and the wait are genuine async I/O and stay on the loop.
@@ -5078,13 +5057,50 @@ class WebSocketBridge:
                     "error": f"Could not resolve the provider's endpoint: {exc}",
                     "result": {"request_id": request_id, "receipt": receipt}}
 
-        reply = await service_client.request_service(
-            config, provider_address, digest, args,
-            tx_hash=tx_hash, request_id=request_id,
-            client_address=self._buyer_address(),
-            endpoint=str(endpoint or ""),
-            payer_key=self._buyer_key(),
-        )
+        if prepaid is not None or amount <= 0:
+            # The owner paid with its own wallet already (a direct
+            # payment), or the service is free.
+            tx_hash = prepaid["tx_hash"] if prepaid else ""
+            request_id = (prepaid["request_id"] if prepaid
+                          else service_client.new_request_id())
+            receipt = self._receipt(
+                paid=bool(prepaid), degraded=False, tx_hash=tx_hash or None,
+                amount=amount if prepaid else 0, recipient=provider_address)
+            reply = await service_client.request_service(
+                config, provider_address, digest, args,
+                tx_hash=tx_hash, request_id=request_id,
+                client_address=self._buyer_address(),
+                endpoint=str(endpoint or ""),
+                payer_key=self._buyer_key(),
+            )
+        else:
+            # The household buys on its operator's channel to the provider
+            # (Decision 2026-11-10: no transaction per request; not served
+            # = not paid), the same path its agents and the `service`
+            # model provider use.
+            from .service_channels import request_on_channel
+            book = getattr(self.runtime, "channel_book", None)
+            if not smc.channel_available or book is None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "PaymentChannel not configured on this "
+                                 "daemon, so the purchase cannot be paid; "
+                                 "nothing was sent."}
+            key, payer = self._buyer_key(), self._buyer_address()
+            if not key or not payer:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "no operator key is held, so the purchase "
+                                 "cannot be paid; nothing was sent."}
+            reply = await request_on_channel(
+                book, smc, config, key, payer, provider_address, digest,
+                args, amount, endpoint=str(endpoint or ""))
+            if reply.get("error") and not reply.get("delivered"):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Payment failed: {reply['error']}"}
+            request_id = str(reply.get("request_id") or "")
+            receipt = self._receipt(
+                paid=bool(reply.get("paid")), degraded=False, tx_hash=None,
+                amount=int(reply.get("paid") or 0), recipient=provider_address)
+            receipt["channel_id"] = reply.get("channel_id")
         return self._invoke_result(
             {"ok": bool(reply.get("ok")), "result": reply.get("result"),
              "error": reply.get("error")},

@@ -193,6 +193,7 @@ class ToolSearchIndex:
         embed: Callable[[list[str]], Optional[np.ndarray]] = minilm.embed_texts,
         model_key: Callable[[], str] = minilm.model_key,
         text_of: Callable[[dict[str, Any]], str] = manifest_embedding_text,
+        tokens_of: Optional[Callable[[dict[str, Any]], list[str]]] = None,
     ) -> None:
         self.path = Path(path) if path is not None else None
         self._embed = embed
@@ -200,6 +201,9 @@ class ToolSearchIndex:
         # What gets embedded per document: a tool manifest's text by
         # default; the service catalog passes service_embedding_text.
         self._text_of = text_of
+        # The keyword document per document: the manifest's by default; the
+        # service catalog adds a spec's unit of work and hardware.
+        self._tokens_of = tokens_of or keyword_tokens
         self._lock = threading.RLock()
         self._texts: dict[str, str] = {}          # digest -> embedding text
         self._tokens: dict[str, list[str]] = {}   # digest -> keyword doc
@@ -217,7 +221,7 @@ class ToolSearchIndex:
             return
         with self._lock:
             self._texts[digest] = self._text_of(manifest)
-            self._tokens[digest] = keyword_tokens(manifest)
+            self._tokens[digest] = self._tokens_of(manifest)
             self._names[digest] = str(manifest.get("name") or "")
 
     def known(self, digest: str) -> bool:

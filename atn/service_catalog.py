@@ -69,6 +69,15 @@ RETRY_CAP = 3600.0
 ANNOUNCEMENT_VERSION = 1
 
 
+def service_keyword_tokens(spec: dict[str, Any]) -> list[str]:
+    """A spec's keyword document: the tools' fields (name twice,
+    description, input-schema property names) plus its unit of work and
+    hardware, so "RTX 5090" or "per minute" match by keyword too."""
+    from .tool_search import keyword_tokens, tokenize
+    return (keyword_tokens(spec) + tokenize(str(spec.get("unit") or ""))
+            + tokenize(str(spec.get("hardware") or "")))
+
+
 def topic_for(jurisdiction_key: str) -> str:
     """The pubsub topic carrying one jurisdiction's service specs (relays
     subscribe to it too, so specs cross NAT'd daemons)."""
@@ -113,7 +122,8 @@ class ServiceCatalog:
             vec_path = None
             if self._path is not None:
                 vec_path = self._path.parent.parent / "search" / "service_vectors.jsonl"
-            self._index = ToolSearchIndex(vec_path, text_of=service_embedding_text)
+            self._index = ToolSearchIndex(vec_path, text_of=service_embedding_text,
+                                          tokens_of=service_keyword_tokens)
         for digest, spec in self._specs.items():
             self._index.note(digest, spec)
 

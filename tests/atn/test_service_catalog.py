@@ -55,8 +55,10 @@ class _Runtime:
 
 
 def _catalog(tmp_path: Path | None = None, own=()) -> ServiceCatalog:
+    from atn.service_catalog import service_keyword_tokens
     index = ToolSearchIndex(None, embed=lambda texts: None,
-                            text_of=service_embedding_text)
+                            text_of=service_embedding_text,
+                            tokens_of=service_keyword_tokens)
     path = tmp_path / "services" / "catalog.json" if tmp_path else None
     return ServiceCatalog(_Runtime(own), path, index=index)
 
@@ -402,3 +404,17 @@ class TestListingContext:
         cat.accept_announcement(announcement(spec, 1))
         row = cat.search("")[0]
         assert row["provider_household"] == "" and row["sanction"] is None
+
+
+def test_hardware_and_unit_match_by_keyword():
+    """With no search model loaded (keyword only), a query naming the
+    hardware finds the service."""
+    cat = _catalog()
+    gpu = _spec("render_frames", "video frame rendering",
+                unit="one minute of GPU time", hardware="one RTX 5090")
+    plain = _spec("transcribe_audio", "speech to text")
+    cat._entries[1] = _entry(1, gpu, ADDR_A)
+    cat._entries[2] = _entry(2, plain, ADDR_A)
+    for sid, sp in ((1, gpu), (2, plain)):
+        cat.accept_announcement(announcement(sp, sid))
+    assert [r["service_id"] for r in cat.search("rtx 5090")] == [1]

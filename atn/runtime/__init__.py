@@ -714,8 +714,9 @@ class Runtime:
         book = getattr(self, "channel_book", None)
         selling = store is not None and bool(store.channel_vouchers())
         buying = book is not None and bool(book.closing() or book.all_open())
-        if not selling and not buying:
-            return {"interval": 300.0}
+        # The interval follows the challenge window even when nothing is
+        # held: a voucher kept right after an idle sweep must still be
+        # collected inside a short client-close window.
         try:
             window = float(await asyncio.to_thread(
                 lambda: smc._channel_contract().functions
@@ -723,6 +724,8 @@ class Runtime:
             interval = max(30.0, min(300.0, window / 4.0))
         except Exception:   # noqa: BLE001
             interval = 60.0
+        if not selling and not buying:
+            return {"interval": interval}
         out: dict[str, Any] = {"interval": interval}
         if selling:
             idle = getattr(rpb, "channel_idle_close_s", DEFAULT_IDLE_CLOSE_S)

@@ -259,6 +259,45 @@ def settle_voucher(book: ChannelBook, payer: str, provider: str,
     return counts
 
 
+async def request_on_channel(book: ChannelBook, smc: Any, config: Any,
+                             payer_key: str, payer: str, provider: str,
+                             spec_digest: str, args: dict[str, Any], ask: int,
+                             *, deposit: int = 0, units: int = 1,
+                             **request_kwargs: Any) -> dict[str, Any]:
+    """Send one paid request on the payer's channel to ``provider``: a
+    voucher for ``units`` x ``ask`` reserved before it goes out, counted or
+    dropped by the provider's answer (``settle_voucher``). The reply gains
+    ``paid`` (what this request cost) and ``channel_id``; a voucher that
+    could not be made comes back as ``{"error", "delivered": False}``.
+    The reply carries the ``request_id`` it was sent under."""
+    from . import service_client
+
+    async with channel_lock(book, payer, provider):
+        voucher = await voucher_for(book, smc, payer_key, payer, provider,
+                                    ask, deposit, units=units)
+        if voucher.get("error"):
+            return {"error": voucher["error"], "delivered": False}
+        book.reserve(payer, provider, voucher["channel_id"],
+                     voucher["cumulative_amount"])
+        request_id = service_client.new_request_id()
+        try:
+            reply = await service_client.request_service(
+                config, provider, spec_digest, args,
+                request_id=request_id,
+                client_address=payer, payer_key=payer_key, voucher=voucher,
+                **request_kwargs)
+        except BaseException:
+            # Unknown whether it left: count it (never behind the provider).
+            book.commit(payer, provider, voucher["channel_id"],
+                        voucher["cumulative_amount"])
+            raise
+        paid = settle_voucher(book, payer, provider, voucher, reply)
+        reply["paid"] = int(ask) * int(units) if paid else 0
+        reply["channel_id"] = voucher["channel_id"]
+        reply.setdefault("request_id", request_id)
+        return reply
+
+
 async def close_channel(book: ChannelBook, smc: Any, payer_key: str, payer: str,
                         provider: str) -> dict[str, Any]:
     """Start closing the open channel to ``provider``; its remainder is

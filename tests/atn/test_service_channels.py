@@ -368,3 +368,33 @@ def test_market_client_methods_run_off_the_event_loop():
         return threading.get_ident()
     loop_thread = asyncio.run(main())
     assert seen and seen[0] != loop_thread
+
+
+@pytest.mark.asyncio
+async def test_request_on_channel_counts_only_what_the_provider_kept(tmp_path, monkeypatch):
+    """The shared buyer path (agents, the `service` model provider, the
+    owner's purchase in the app): a refused request costs nothing, a served
+    one costs its price, and the next voucher follows the book."""
+    from atn import service_client
+    from atn.service_channels import request_on_channel
+
+    book = ChannelBook(tmp_path / "channels.json")
+    m = FakeMarket()
+    answers = [{"ok": False, "delivered": True, "charged": False},
+               {"ok": True, "delivered": True, "charged": True}]
+    sent = []
+
+    async def fake(config, provider, digest, args, **kw):
+        sent.append(kw["voucher"]["cumulative_amount"])
+        return dict(answers.pop(0))
+    monkeypatch.setattr(service_client, "request_service", fake)
+
+    refused = await request_on_channel(book, m, None, "k", PAYER, PROVIDER,
+                                       "d" * 64, {}, 100)
+    assert refused["paid"] == 0 and refused["request_id"]
+    served = await request_on_channel(book, m, None, "k", PAYER, PROVIDER,
+                                      "d" * 64, {}, 100)
+    assert served["paid"] == 100
+    # The refused voucher was dropped, so the served one signed the same total.
+    assert sent == [100, 100]
+    assert int(book.get(PAYER, PROVIDER)["cumulative"]) == 100
