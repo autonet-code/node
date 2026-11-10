@@ -1,27 +1,34 @@
 """Consumer side of the inference-as-a-service rail (docs/services_market.md,
-Decision 2026-07-26 item 2).
+Decision 2026-07-26 item 2, paid on the channel since Decision 2026-11-10).
 
 Covers the ``service`` provider type end to end with a mocked transport and a
 mocked chain client:
 
-  - happy path: read ask (once) -> payForService -> service_request -> the
-    buffered completion mapped into ProviderResponse;
-  - payment failure with chain configured ABORTS the call (no request sent);
+  - happy path: read the ask -> a voucher on the payment channel (opened on
+    the first call) -> service_request -> the buffered completion mapped into
+    ProviderResponse;
+  - not served = not paid: a voucher counts when the provider's signed reply
+    says charged (or the outcome is unknown) and is dropped on charged: false;
+  - a call that cannot be paid with chain configured ABORTS (nothing sent);
   - no chain config: payment SKIPPED with a loud warning, request still sent
     (the provider-side gate degrades open in the same condition, which is what
     makes a local two-daemon demo work);
-  - the on-chain ask is cached across completions (one registry read);
+  - the price is read from the registry entry on every call;
   - provider_manager resolution + config surface.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from atn.providers.base import ProviderError
 from atn.providers.service import ServiceProvider
+from atn.service_channels import ChannelBook, channel_lock
 
 PROVIDER_ADDR = "0x1111111111111111111111111111111111111111"
 DIGEST = "ab" * 32
@@ -29,22 +36,28 @@ OWNER_KEY = "0x" + "11" * 32
 CLIENT_ADDR = "0x2222222222222222222222222222222222222222"
 
 
+def _addr(key: str) -> str:
+    from eth_account import Account
+    return Account.from_key(key).address
+
+
 class _Recorder:
     """Stand-in for atn.service_client: records calls, returns scripted values."""
 
-    def __init__(self, *, ask=None, pay=None, reply=None):
+    def __init__(self, *, ask=None, reply=None):
         self.ask_result = ask if ask is not None else {
             "service_id": 7, "provider": PROVIDER_ADDR,
             "ask_amount": 1000, "active": True,
         }
-        self.pay_result = pay if pay is not None else {
-            "tx_hash": "0xdeadbeef", "request_id": "0x" + "aa" * 32,
-        }
         # Provider-side success envelope: {request_id, content, model, usage,
-        # stop_reason, max_tokens}.
+        # stop_reason, max_tokens}, signed by the provider, which kept the
+        # payment (charged).
         self.reply_result = reply if reply is not None else {
             "ok": True,
             "endpoint": "wss://provider.example/ws",
+            "delivered": True,
+            "authenticated": True,
+            "charged": True,
             "result": {
                 "request_id": "0x" + "aa" * 32,
                 "content": "hello from the seller",
@@ -74,16 +87,15 @@ class _Recorder:
 
     async def pay_for_service(self, config, key, recipient, amount,
                               request_id=""):
-        self.pay_calls.append({
-            "key": key, "recipient": recipient, "amount": amount,
-            "request_id": request_id,
-        })
-        return dict(self.pay_result)
+        # The channel is the only rail now: a direct payment is a bug.
+        self.pay_calls.append({"key": key, "recipient": recipient,
+                               "amount": amount, "request_id": request_id})
+        return {"tx_hash": "0xdeadbeef", "request_id": request_id}
 
     async def request_service(self, config, provider_address, spec_digest,
                               args, *, tx_hash="", request_id="",
                               client_address="", endpoint="",
-                              timeout=None, payer_key=""):  # noqa: ARG002
+                              timeout=None, payer_key="", voucher=None):  # noqa: ARG002
         self.request_calls.append({
             "provider_address": provider_address,
             "spec_digest": spec_digest,
@@ -92,18 +104,66 @@ class _Recorder:
             "request_id": request_id,
             "client_address": client_address,
             "endpoint": endpoint,
+            "payer_key": payer_key,
+            "voucher": dict(voucher) if voucher else None,
         })
-        return dict(self.reply_result)
+        reply = self.reply_result
+        if isinstance(reply, BaseException):
+            raise reply
+        return dict(reply)
 
 
-def _make_provider(rec: _Recorder, monkeypatch, *, chain: bool = True,
-                   owner_key: str = OWNER_KEY) -> ServiceProvider:
+class _Market:
+    """Stand-in for ServiceMarketClient, the PaymentChannel side."""
+
+    channel_available = True
+
+    def __init__(self):
+        self.opened: list[dict] = []
+        self.closed: list[int] = []
+        self.signed: list[tuple] = []
+        self.state: dict[int, dict] = {}
+        self.open_result: dict | None = None
+
+    async def open_channel(self, key, provider, deposit):
+        if self.open_result is not None:
+            return dict(self.open_result)
+        cid = len(self.opened) + 1
+        self.opened.append({"key": key, "provider": provider, "deposit": deposit})
+        self.state[cid] = {"status": 1, "closes_at": 0}
+        return {"success": True, "channel_id": cid}
+
+    async def start_close(self, key, cid):
+        self.closed.append(cid)
+        self.state[cid] = {"status": 4, "closes_at": 0}
+        return {"success": True}
+
+    async def get_channel(self, cid):
+        return self.state.get(cid)
+
+    def sign_voucher(self, key, cid, cumulative):
+        self.signed.append((key, cid, cumulative))
+        return f"sig:{cid}:{cumulative}"
+
+
+def _patch(rec: _Recorder, monkeypatch, market: _Market | None = None) -> _Market:
+    import atn.on_chain as on_chain
     import atn.service_client as real_client
 
     for name in ("new_request_id", "lookup_service_ask", "read_service",
                  "pay_for_service", "request_service"):
         monkeypatch.setattr(real_client, name, getattr(rec, name))
+    market = market if market is not None else _Market()
+    monkeypatch.setattr(on_chain, "ServiceMarketClient", lambda cfg: market)
+    return market
 
+
+def _make_provider(rec: _Recorder, monkeypatch, *, chain: bool = True,
+                   owner_key: str = OWNER_KEY, market: _Market | None = None,
+                   book: ChannelBook | None = None) -> ServiceProvider:
+    prov_market = _patch(rec, monkeypatch, market)
+    book = book if book is not None else ChannelBook(
+        Path(tempfile.mkdtemp(prefix="svc-prov-")) / "service_channels.json")
     prov = ServiceProvider(
         config=MagicMock(),
         provider_address=PROVIDER_ADDR,
@@ -111,9 +171,17 @@ def _make_provider(rec: _Recorder, monkeypatch, *, chain: bool = True,
         model="bought-model",
         owner_private_key=owner_key,
         client_address=CLIENT_ADDR,
+        channel_book=book,
     )
     monkeypatch.setattr(prov, "_chain_configured", lambda: chain)
+    prov.test_market = prov_market          # type: ignore[attr-defined]
+    prov.test_book = book                   # type: ignore[attr-defined]
     return prov
+
+
+def _cumulative(prov: ServiceProvider, payer: str = "") -> int:
+    ch = prov.test_book.get(payer or _addr(OWNER_KEY), PROVIDER_ADDR)  # type: ignore[attr-defined]
+    return -1 if ch is None else int(ch["cumulative"])
 
 
 MESSAGES = [{"role": "user", "content": "hi"}]
@@ -125,27 +193,30 @@ MESSAGES = [{"role": "user", "content": "hi"}]
 
 class TestHappyPath:
     @pytest.mark.asyncio
-    async def test_pay_then_request_then_completion(self, monkeypatch):
+    async def test_voucher_then_request_then_completion(self, monkeypatch):
         rec = _Recorder()
         prov = _make_provider(rec, monkeypatch)
+        market = prov.test_market
 
         resp = await prov.send(messages=MESSAGES, system="be brief",
                                max_tokens=256)
 
-        # Ask read, then paid at that ask, to the provider address, with the
-        # OWNER key (spend is an owner-level act).
+        # The ask is read, then one channel is opened from the payer's key,
+        # escrowing ten calls' worth; nothing is paid directly.
         assert rec.ask_calls == [(PROVIDER_ADDR, DIGEST)]
-        assert len(rec.pay_calls) == 1
-        assert rec.pay_calls[0]["amount"] == 1000
-        assert rec.pay_calls[0]["recipient"] == PROVIDER_ADDR
-        assert rec.pay_calls[0]["key"] == OWNER_KEY
-        assert rec.pay_calls[0]["request_id"]  # fresh id supplied
+        assert rec.pay_calls == []
+        assert market.opened == [{"key": OWNER_KEY, "provider": PROVIDER_ADDR,
+                                  "deposit": 10_000}]
+        assert market.signed == [(OWNER_KEY, 1, 1000)]
 
-        # Request carries the payment proof and the wire args.
+        # The request carries the voucher for one unit and the wire args.
         assert len(rec.request_calls) == 1
         call = rec.request_calls[0]
-        assert call["tx_hash"] == "0xdeadbeef"
-        assert call["request_id"] == "0x" + "aa" * 32
+        assert call["voucher"] == {"channel_id": 1, "cumulative_amount": 1000,
+                                   "signature": "sig:1:1000"}
+        assert call["tx_hash"] == ""
+        assert call["request_id"]                 # fresh id supplied
+        assert call["payer_key"] == OWNER_KEY
         assert call["client_address"] == CLIENT_ADDR
         assert call["spec_digest"] == DIGEST
         assert call["args"]["max_tokens"] == 256
@@ -153,6 +224,11 @@ class TestHappyPath:
         assert call["args"]["system"] == "be brief"
         assert call["args"]["messages"] == [{"role": "user", "content": "hi"}]
         assert "temperature" not in call["args"]   # 0.0 default omitted
+
+        # Served and charged: the voucher counts.
+        assert _cumulative(prov) == 1000
+        assert prov.last_payment == {"channel_id": 1, "cumulative_amount": 1000,
+                                     "paid": 1000}
 
         # Completion mapped into the provider interface.
         assert resp.text == "hello from the seller"
@@ -162,24 +238,21 @@ class TestHappyPath:
         assert resp.stop_reason == "end_turn"
 
     @pytest.mark.asyncio
-    async def test_fresh_request_id_per_call(self, monkeypatch):
-        """Replay protection is provider-side on request_id — never reuse."""
+    async def test_one_channel_a_voucher_and_a_fresh_id_per_call(self, monkeypatch):
+        """Replay protection is provider-side on request_id: never reuse.
+        The running total grows by one ask per call on the same channel."""
         rec = _Recorder()
-        # Echo back whatever request_id the provider generated.
-        async def _pay(config, key, recipient, amount, request_id=""):
-            rec.pay_calls.append({"key": key, "recipient": recipient,
-                                  "amount": amount, "request_id": request_id})
-            return {"tx_hash": "0xfeed", "request_id": request_id}
-        rec.pay_for_service = _pay
         prov = _make_provider(rec, monkeypatch)
 
         await prov.send(messages=MESSAGES)
         await prov.send(messages=MESSAGES)
 
-        ids = [c["request_id"] for c in rec.pay_calls]
-        assert len(ids) == 2
-        assert ids[0] and ids[1] and ids[0] != ids[1]
-        assert [c["request_id"] for c in rec.request_calls] == ids
+        ids = [c["request_id"] for c in rec.request_calls]
+        assert len(ids) == 2 and ids[0] and ids[1] and ids[0] != ids[1]
+        assert [c["voucher"]["cumulative_amount"] for c in rec.request_calls] \
+            == [1000, 2000]
+        assert len(prov.test_market.opened) == 1
+        assert _cumulative(prov) == 2000
 
     @pytest.mark.asyncio
     async def test_stream_yields_whole_completion_once(self, monkeypatch):
@@ -204,16 +277,124 @@ class TestHappyPath:
         assert rec.request_calls[0]["endpoint"] == ""
         assert rec.request_calls[1]["endpoint"] == "wss://provider.example/ws"
 
+    @pytest.mark.asyncio
+    async def test_a_spent_channel_is_replaced(self, monkeypatch):
+        rec = _Recorder()
+        prov = _make_provider(rec, monkeypatch)
+        for _ in range(11):
+            await prov.send(messages=MESSAGES)
+        market = prov.test_market
+        # Ten calls fill the first deposit; the eleventh closes it (its
+        # remainder comes back by the refund sweep) and opens another.
+        assert market.closed == [1] and len(market.opened) == 2
+        assert rec.request_calls[-1]["voucher"]["channel_id"] == 2
+        assert rec.request_calls[-1]["voucher"]["cumulative_amount"] == 1000
+
 
 # ---------------------------------------------------------------------------
-# Payment failure aborts
+# Not served = not paid (Decision 2026-11-10)
+# ---------------------------------------------------------------------------
+
+class TestNotServedNotPaid:
+    @pytest.mark.asyncio
+    async def test_a_failed_call_is_not_paid(self, monkeypatch):
+        rec = _Recorder(reply={
+            "ok": False, "delivered": True, "authenticated": True,
+            "charged": False, "endpoint": "wss://x/ws",
+            "result": {"request_id": "0x1",
+                       "error": "inference failed: upstream 429"}})
+        prov = _make_provider(rec, monkeypatch)
+        with pytest.raises(ProviderError, match="upstream 429"):
+            await prov.send(messages=MESSAGES)
+        assert _cumulative(prov) == 0
+        assert prov.last_payment["paid"] == 0
+        # The next call signs the same running total again.
+        rec.reply_result = _Recorder().reply_result
+        await prov.send(messages=MESSAGES)
+        assert [c["voucher"]["cumulative_amount"] for c in rec.request_calls] \
+            == [1000, 1000]
+        assert _cumulative(prov) == 1000
+
+    @pytest.mark.asyncio
+    async def test_an_unanswered_call_counts(self, monkeypatch):
+        """It may have reached the provider, which may hold the voucher: the
+        book is never behind the provider."""
+        rec = _Recorder(reply={"error": "Provider did not reply within 300s.",
+                               "delivered": True, "endpoint": ""})
+        prov = _make_provider(rec, monkeypatch)
+        with pytest.raises(ProviderError, match="did not reply"):
+            await prov.send(messages=MESSAGES)
+        assert _cumulative(prov) == 1000
+        assert prov.last_payment["paid"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_an_undelivered_call_is_not_paid(self, monkeypatch):
+        rec = _Recorder(reply={"error": "Provider 0x1111 is unreachable",
+                               "delivered": False})
+        prov = _make_provider(rec, monkeypatch)
+        with pytest.raises(ProviderError, match="unreachable"):
+            await prov.send(messages=MESSAGES)
+        assert _cumulative(prov) == 0
+
+    @pytest.mark.asyncio
+    async def test_an_unsigned_not_charged_is_not_believed(self, monkeypatch):
+        """service_client leaves ``charged`` out of a reply the provider did
+        not sign: the outcome is unknown, so the voucher counts."""
+        rec = _Recorder(reply={"ok": False, "delivered": True,
+                               "authenticated": False,
+                               "error": "the reply is not signed by the provider"})
+        prov = _make_provider(rec, monkeypatch)
+        with pytest.raises(ProviderError, match="not signed"):
+            await prov.send(messages=MESSAGES)
+        assert _cumulative(prov) == 1000
+
+    @pytest.mark.asyncio
+    async def test_a_crash_mid_request_counts(self, monkeypatch):
+        rec = _Recorder(reply=RuntimeError("transport blew up"))
+        prov = _make_provider(rec, monkeypatch)
+        with pytest.raises(RuntimeError, match="blew up"):
+            await prov.send(messages=MESSAGES)
+        ch = prov.test_book.get(_addr(OWNER_KEY), PROVIDER_ADDR)
+        assert ch["cumulative"] == 1000 and "pending" not in ch
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_sign_one_voucher_at_a_time(self, monkeypatch):
+        rec = _Recorder()
+        real = rec.request_service
+
+        async def slow(*a, **kw):
+            await asyncio.sleep(0.05)
+            return await real(*a, **kw)
+        rec.request_service = slow
+        prov = _make_provider(rec, monkeypatch)
+        await asyncio.gather(prov.send(messages=MESSAGES),
+                             prov.send(messages=MESSAGES))
+        assert sorted(c["voucher"]["cumulative_amount"]
+                      for c in rec.request_calls) == [1000, 2000]
+        assert _cumulative(prov) == 2000
+
+    def test_the_agent_tools_share_the_lock(self, tmp_path):
+        """One lock per (payer, provider) on the book: the request_service
+        agent tool and this provider never sign on one channel at once."""
+        book = ChannelBook(tmp_path / "ch.json")
+        payer = _addr(OWNER_KEY)
+        assert channel_lock(book, payer, PROVIDER_ADDR) is \
+            channel_lock(book, payer.lower(), PROVIDER_ADDR.upper())
+        assert channel_lock(book, payer, PROVIDER_ADDR) is not \
+            channel_lock(ChannelBook(tmp_path / "other.json"), payer, PROVIDER_ADDR)
+
+
+# ---------------------------------------------------------------------------
+# A call that cannot be paid aborts
 # ---------------------------------------------------------------------------
 
 class TestPaymentFailureAborts:
     @pytest.mark.asyncio
-    async def test_failed_payment_aborts_before_request(self, monkeypatch):
-        rec = _Recorder(pay={"error": "Payment failed: insufficient balance"})
-        prov = _make_provider(rec, monkeypatch)
+    async def test_failed_channel_open_aborts_before_request(self, monkeypatch):
+        market = _Market()
+        market.open_result = {"success": False, "error": "insufficient balance"}
+        rec = _Recorder()
+        prov = _make_provider(rec, monkeypatch, market=market)
 
         with pytest.raises(ProviderError, match="payment failed"):
             await prov.send(messages=MESSAGES)
@@ -221,12 +402,22 @@ class TestPaymentFailureAborts:
         assert rec.request_calls == []
 
     @pytest.mark.asyncio
+    async def test_no_payment_channel_aborts_before_request(self, monkeypatch):
+        market = _Market()
+        market.channel_available = False
+        rec = _Recorder()
+        prov = _make_provider(rec, monkeypatch, market=market)
+        with pytest.raises(ProviderError, match="PaymentChannel not configured"):
+            await prov.send(messages=MESSAGES)
+        assert rec.request_calls == [] and rec.pay_calls == []
+
+    @pytest.mark.asyncio
     async def test_missing_owner_key_with_chain_aborts(self, monkeypatch):
         rec = _Recorder()
         prov = _make_provider(rec, monkeypatch, owner_key="")
-        with pytest.raises(ProviderError, match="owner signing key"):
+        with pytest.raises(ProviderError, match="signing key"):
             await prov.send(messages=MESSAGES)
-        assert rec.pay_calls == []
+        assert prov.test_market.opened == []
         assert rec.request_calls == []
 
     @pytest.mark.asyncio
@@ -235,7 +426,7 @@ class TestPaymentFailureAborts:
         prov = _make_provider(rec, monkeypatch)
         with pytest.raises(ProviderError, match="cannot read the on-chain ask"):
             await prov.send(messages=MESSAGES)
-        assert rec.pay_calls == []
+        assert prov.test_market.opened == []
         assert rec.request_calls == []
 
     @pytest.mark.asyncio
@@ -245,27 +436,18 @@ class TestPaymentFailureAborts:
         prov = _make_provider(rec, monkeypatch)
         with pytest.raises(ProviderError, match="retired"):
             await prov.send(messages=MESSAGES)
-        assert rec.pay_calls == []
+        assert prov.test_market.opened == []
 
     @pytest.mark.asyncio
     async def test_provider_side_error_surfaces(self, monkeypatch):
         rec = _Recorder(reply={"ok": False, "endpoint": "wss://x/ws",
+                               "delivered": True, "authenticated": True,
+                               "charged": False,
                                "error": "Payment validation failed: replay"})
         prov = _make_provider(rec, monkeypatch)
         with pytest.raises(ProviderError, match="Payment validation failed"):
             await prov.send(messages=MESSAGES)
-
-    @pytest.mark.asyncio
-    async def test_error_inside_result_envelope_surfaces(self, monkeypatch):
-        """Provider-side dispatch failures come back as {error} in result."""
-        rec = _Recorder(reply={
-            "ok": False, "endpoint": "wss://x/ws",
-            "result": {"request_id": "0x1",
-                       "error": "inference failed: upstream 429"},
-        })
-        prov = _make_provider(rec, monkeypatch)
-        with pytest.raises(ProviderError, match="upstream 429"):
-            await prov.send(messages=MESSAGES)
+        assert _cumulative(prov) == 0
 
     @pytest.mark.asyncio
     async def test_unconfigured_provider_raises(self):
@@ -289,27 +471,30 @@ class TestNoChainDegrade:
         with caplog.at_level(logging.WARNING, logger="atn.providers.service"):
             resp = await prov.send(messages=MESSAGES)
 
-        assert rec.pay_calls == []
+        assert rec.pay_calls == [] and prov.test_market.opened == []
         assert rec.ask_calls == []          # no ask read either — nothing to pay
         assert len(rec.request_calls) == 1
         # Request goes out WITHOUT payment proof.
         assert rec.request_calls[0]["tx_hash"] == ""
         assert rec.request_calls[0]["request_id"] == ""
+        assert rec.request_calls[0]["voucher"] is None
         assert resp.text == "hello from the seller"
+        assert prov.last_payment == {}
         # And it is LOUD.
         assert any("PAYMENT SKIPPED" in r.message or "PAYMENT SKIPPED" in r.getMessage()
                    for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_zero_ask_needs_no_payment(self, monkeypatch):
-        """A giveaway service (ask 0) is chain-configured but unpaid —
-        payForService rejects a zero amount, so there is nothing to sign."""
+        """A giveaway service (ask 0) is chain-configured but unpaid: no
+        channel, no voucher."""
         rec = _Recorder(ask={"service_id": 7, "provider": PROVIDER_ADDR,
                              "ask_amount": 0, "active": True})
         prov = _make_provider(rec, monkeypatch)
         resp = await prov.send(messages=MESSAGES)
-        assert rec.pay_calls == []
+        assert prov.test_market.opened == [] and rec.pay_calls == []
         assert len(rec.request_calls) == 1
+        assert rec.request_calls[0]["voucher"] is None
         assert resp.text == "hello from the seller"
 
 
@@ -393,7 +578,7 @@ class TestAskCaching:
     async def test_one_scan_then_the_price_is_read_each_call(self, monkeypatch):
         """The registry is scanned once for the service's number; the price
         is read from that entry on every call, so a change by
-        updateServiceAsk applies to the next payment (Decision 2026-11-10)."""
+        updateServiceAsk applies to the next voucher (Decision 2026-11-10)."""
         rec = _Recorder()
         prov = _make_provider(rec, monkeypatch)
 
@@ -404,7 +589,8 @@ class TestAskCaching:
 
         assert len(rec.ask_calls) == 1          # one registry scan
         assert rec.read_calls == [7, 7]         # then the entry, each call
-        assert [c["amount"] for c in rec.pay_calls] == [1000, 1000, 2500]
+        assert [c["voucher"]["cumulative_amount"] for c in rec.request_calls] \
+            == [1000, 2000, 4500]
         assert prov.cached_ask == 2500
 
     @pytest.mark.asyncio
@@ -415,7 +601,7 @@ class TestAskCaching:
         rec.ask_result = {**rec.ask_result, "active": False}
         with pytest.raises(Exception, match="retired on chain"):
             await prov.send(messages=MESSAGES)
-        assert len(rec.pay_calls) == 1
+        assert len(rec.request_calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +710,10 @@ class TestProviderManagerWiring:
         from eth_account import Account
         assert prov._owner_key == OWNER_KEY
         assert prov._client_address == Account.from_key(OWNER_KEY).address
+        # It pays on the daemon's one channel book (Runtime.channel_book's
+        # file), opened on the first paid call.
+        assert Path(prov._book) == \
+            Path(mgr._config.data_dir) / "service_channels.json"
 
     def test_pays_as_the_operator_without_a_configured_key(self):
         """A normal install has no configured daemon key: the vault-held
@@ -609,10 +799,7 @@ class TestAgentKeySigning:
     """The bound agent's OWN key signs — spend authority is token custody."""
 
     def _bound_provider(self, rec, monkeypatch, *, key=CHILD_KEY):
-        import atn.service_client as real_client
-        for name in ("new_request_id", "lookup_service_ask", "pay_for_service",
-                     "request_service"):
-            monkeypatch.setattr(real_client, name, getattr(rec, name))
+        market = _patch(rec, monkeypatch)
         prov = ServiceProvider(
             config=MagicMock(),
             provider_address=PROVIDER_ADDR,
@@ -621,8 +808,11 @@ class TestAgentKeySigning:
             client_address=CHILD_ADDR,
             payer_kind="agent",
             payer_id="parent-1.child-1",
+            channel_book=ChannelBook(
+                Path(tempfile.mkdtemp(prefix="svc-child-")) / "ch.json"),
         )
         monkeypatch.setattr(prov, "_chain_configured", lambda: True)
+        prov.test_market = market               # type: ignore[attr-defined]
         return prov
 
     @pytest.mark.asyncio
@@ -630,8 +820,11 @@ class TestAgentKeySigning:
         rec = _Recorder()
         prov = self._bound_provider(rec, monkeypatch)
         resp = await prov.send(messages=MESSAGES)
-        assert rec.pay_calls[0]["key"] == CHILD_KEY
-        assert rec.pay_calls[0]["key"] != OWNER_KEY
+        market = prov.test_market
+        # The child's own channel, opened and signed with its key.
+        assert market.opened[0]["key"] == CHILD_KEY
+        assert market.signed[0][0] == CHILD_KEY
+        assert rec.request_calls[0]["payer_key"] == CHILD_KEY
         # The child is the payer on the wire, not the daemon owner.
         assert rec.request_calls[0]["client_address"] == CHILD_ADDR
         assert resp.text == "hello from the seller"
@@ -650,7 +843,7 @@ class TestAgentKeySigning:
         prov = self._bound_provider(rec, monkeypatch, key="")
         with pytest.raises(ProviderError, match="child-1"):
             await prov.send(messages=MESSAGES)
-        assert rec.pay_calls == []
+        assert prov.test_market.opened == []
         assert rec.request_calls == []
 
     @pytest.mark.asyncio
@@ -659,7 +852,7 @@ class TestAgentKeySigning:
         rec = _Recorder()
         prov = _make_provider(rec, monkeypatch)
         await prov.send(messages=MESSAGES)
-        assert rec.pay_calls[0]["key"] == OWNER_KEY
+        assert prov.test_market.opened[0]["key"] == OWNER_KEY
         assert prov.payer_kind == "owner"
 
 

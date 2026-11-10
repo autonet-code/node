@@ -3643,16 +3643,6 @@ async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     )
 
 
-def _channel_lock(runtime: Runtime, payer: str, provider: str) -> asyncio.Lock:
-    """The lock that serializes vouchers on one (payer, provider) channel."""
-    locks = runtime.__dict__.setdefault("_channel_locks", {})
-    key = (str(payer or "").lower(), str(provider or "").lower())
-    lock = locks.get(key)
-    if lock is None:
-        lock = locks[key] = asyncio.Lock()
-    return lock
-
-
 async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Consumer cross-daemon call: send a service_request with the payment
     proof to the provider (libp2p by its on-chain peer id, else its on-chain
@@ -3734,7 +3724,7 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     # answer says otherwise. A provider that never gets it can never
     # collect it, and one that refuses or fails it keeps nothing.
     from .on_chain import ServiceMarketClient
-    from .service_channels import settle_voucher, voucher_for
+    from .service_channels import channel_lock, settle_voucher, voucher_for
 
     ask = entry if entry is not None else await service_client.lookup_service_ask(
         runtime._config.rpb, provider_address, spec_digest)
@@ -3744,14 +3734,15 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         return {"error": "that service is retired"}
     amount = int(ask.get("ask_amount") or 0)
     # Every external session pays from the operator's one channel per
-    # provider (Decision 2026-11-08): one voucher at a time, or two
-    # requests would sign the same running total.
+    # provider (Decision 2026-11-08), and so does the daemon-level `service`
+    # model provider: one voucher at a time, or two requests would sign the
+    # same running total.
     import contextlib
-    guard = (_channel_lock(runtime, client_addr, provider_address)
-             if amount > 0 else contextlib.nullcontext())
+    book = getattr(runtime, "channel_book", None)
+    guard = (channel_lock(book, client_addr, provider_address)
+             if amount > 0 and book is not None else contextlib.nullcontext())
     async with guard:
         voucher = None
-        book = getattr(runtime, "channel_book", None)
         if amount > 0:
             if not payer_key or not client_addr:
                 return {"error": "paying for a service needs an agent with its own "

@@ -5,10 +5,21 @@ inference as a marketplace service" (item 2). A purchased marketplace
 service backs an agent's PROVIDER: the agent does ordinary chat
 completions, and underneath each call is
 
-    read ask (cached)  →  payForService  →  service_request  →  completion
+    read ask  →  voucher on the payment channel  →  service_request
+              →  completion, the voucher counted only if it was served
 
 Indistinguishable from any other model from the agent's seat. Any wallet
 holding ATN can buy cognition — no sponsor relationship required.
+
+Payment is the payment channel (Decision 2026-11-10, the unit of work;
+metered on channels), exactly as the ``request_service`` agent tool pays:
+one channel per (payer, provider), opened on the first call with ten
+calls' worth, and one voucher per call (one call is one unit of the
+service). The voucher is written down as pending before the request goes
+out, counted when the provider's signed reply says ``charged: true`` or
+when the outcome is unknown, and dropped on ``charged: false``, so a failed
+call is not paid. The book and the per-channel lock are the daemon's one
+``ChannelBook`` (``atn/service_channels.py``), shared with the agent tools.
 
 Configured with the two facts that name a purchase:
 
@@ -19,10 +30,9 @@ Configured with the two facts that name a purchase:
 
 Two ways a purchase reaches an agent, differing ONLY in whose key signs:
 
-- **Daemon-level (owner) purchase** — ``providers.service`` in config.yaml,
-  signed with ``autonet.private_key``. Buying cognition for the fleet is an
-  owner act, the same doctrine as the sponsor pipe where the dependent
-  identity IS the owner wallet.
+- **Daemon-level purchase** — ``providers.service`` in config.yaml, paid as
+  the household's operator (the configured daemon key, else the vault-held
+  operator key; Decision 2026-11-08).
 - **Per-agent binding** (ratified 2026-07-26, employer-chooses-the-tool) —
   ``AgentDefinition.service_provider = {provider_address, spec_digest}``, set
   ONLY by the agent's PARENT, signed with the BOUND AGENT'S OWN key. A parent
@@ -44,14 +54,16 @@ its own substrate, and there is no self-set surface anywhere on this rail.
 - **Degrades honestly.** With NO chain config the payment is SKIPPED
   with a loud warning and the request still goes out — the provider-side
   gate degrades open in exactly the same condition, which is what makes
-  a local two-daemon demo possible. With chain configured, a failed
-  payment ABORTS the call.
+  a local two-daemon demo possible. With chain configured, a call that
+  cannot be paid (no key, no PaymentChannel, no channel opened) ABORTS
+  before anything is sent.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
 from .base import (
@@ -81,6 +93,7 @@ class ServiceProvider(Provider):
         signing_key: str = "",
         payer_kind: str = "owner",
         payer_id: str = "",
+        channel_book: Any = None,
     ) -> None:
         # ``config`` is the AutonetConfig (ATNConfig.rpb) — the chain surface.
         self._config = config
@@ -107,6 +120,15 @@ class ServiceProvider(Provider):
         self._service_id: int | None = None
         self._ask_amount: int | None = None
         self._endpoint: str = ""
+        # The daemon's one ChannelBook (atn/service_channels.py), shared with
+        # the request_service agent tool: the open channel per (payer,
+        # provider) and the running total signed on it. A path is opened on
+        # the first paid call (``book_at``: one book per path).
+        self._book = channel_book
+        # The last call's payment: {channel_id, cumulative_amount, paid},
+        # paid being the ask when the voucher counted and 0 when it was
+        # dropped; {} for an unpaid call (no chain, or a zero ask).
+        self._last_payment: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Provider interface
@@ -143,6 +165,13 @@ class ServiceProvider(Provider):
     def payer_id(self) -> str:
         """The bound agent's id when ``payer_kind == "agent"``, else ""."""
         return self._payer_id
+
+    @property
+    def last_payment(self) -> dict[str, Any]:
+        """The last call's voucher: ``{channel_id, cumulative_amount,
+        paid}`` (``paid`` 0 when it was not counted), ``{}`` when the call
+        was unpaid."""
+        return dict(self._last_payment)
 
     # ------------------------------------------------------------------
     # Chain helpers
@@ -219,15 +248,34 @@ class ServiceProvider(Provider):
                     self._provider_address, entry, "buy services from")["error"],
                 provider=self.name)
 
-    async def _pay(self, max_tokens: int) -> dict[str, Any]:
-        """Pay this call's ask. Returns the payment proof, or {} when the
-        payment was legitimately skipped (no chain config).
+    def _channel_book(self) -> Any:
+        """The ChannelBook, opened from its path on first use."""
+        if isinstance(self._book, (str, Path)):
+            from ..service_channels import book_at
+            self._book = book_at(Path(self._book))
+        return self._book
 
-        Raises ProviderError when chain IS configured and payment fails —
-        an unpaid request would just be refused by the provider's gate.
+    def _payer_address(self) -> str:
+        """The address that pays: the signing key's (the channel's client),
+        else the configured client address."""
+        if self._owner_key:
+            try:
+                from eth_account import Account
+                return str(Account.from_key(self._owner_key).address)
+            except Exception:  # noqa: BLE001 - a malformed key pays nothing
+                logger.debug("service provider: unusable signing key",
+                             exc_info=True)
+        return self._client_address
+
+    async def _price(self) -> int:
+        """This call's price in ATN base units, after every check that
+        refuses a call before anything is sent; 0 when nothing is paid
+        (no chain config, or a zero ask).
+
+        Raises ProviderError when chain IS configured and the call cannot
+        be paid: an unpaid request would just be refused by the provider's
+        gate.
         """
-        from .. import service_client
-
         if not self._chain_configured():
             logger.warning(
                 "SERVICE PROVIDER PAYMENT SKIPPED: no chain config "
@@ -238,7 +286,7 @@ class ServiceProvider(Provider):
                 self._provider_address[:10] or "(unset)",
                 self._spec_digest[:16] or "(unset)",
             )
-            return {}
+            return 0
 
         if not self._owner_key:
             if self._payer_kind == "agent":
@@ -250,48 +298,101 @@ class ServiceProvider(Provider):
                     provider=self.name,
                 )
             raise ProviderError(
-                "service provider: chain is configured but no owner signing "
-                "key is available (autonet.private_key) — the daemon-level "
-                "purchase is an owner-level act. For a child that pays from "
-                "its own wallet, set a per-agent service_provider binding.",
+                "service provider: chain is configured but no signing key is "
+                "available for the daemon-level purchase (the operator key, "
+                "or autonet.private_key). For a child that pays from its own "
+                "wallet, set a per-agent service_provider binding.",
                 provider=self.name,
             )
 
         # Agents may not buy from a sanctioned household
-        # (docs/accountability.md); this path pays like pay_for_service does.
+        # (docs/accountability.md); this path pays like request_service does.
         await self._refuse_if_sanctioned()
 
         ask = await self._resolve_ask()
         if ask <= 0:
-            # A zero ask means the provider is giving it away; nothing to
-            # sign, and payForService rejects a zero amount anyway.
+            # A zero ask means the provider is giving it away: no voucher.
             logger.info("service provider: ask is 0 — no payment needed")
-            return {}
+            return 0
+        return ask
 
-        # Fresh request id per call: the provider persists seen ids, so a
-        # reused one is a replay and is refused.
-        request_id = service_client.new_request_id()
-        paid = await service_client.pay_for_service(
-            self._config,
-            self._owner_key,
-            self._provider_address,
-            ask,
-            request_id=request_id,
-        )
-        if paid.get("error"):
+    async def _purchase(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Send one call and pay for it on the payment channel.
+
+        The voucher for one unit (one call) is written down as pending
+        before the request leaves, then counted or dropped by the
+        provider's signed word (``settle_voucher``): a failed or refused
+        call is not paid, one whose outcome is unknown is counted (the book
+        is never behind the provider). Vouchers on one channel are signed
+        one at a time, under the lock the agent tools take too.
+        """
+        from .. import service_client
+
+        kwargs: dict[str, Any] = {}
+        if self._timeout:
+            kwargs["timeout"] = self._timeout
+        self._last_payment = {}
+        ask = await self._price()
+        if ask <= 0:
+            return await service_client.request_service(
+                self._config, self._provider_address, self._spec_digest, args,
+                client_address=self._client_address, endpoint=self._endpoint,
+                payer_key=self._owner_key, **kwargs)
+
+        from ..on_chain import ServiceMarketClient
+        from ..service_channels import channel_lock, settle_voucher, voucher_for
+
+        smc = ServiceMarketClient(self._config)
+        book = self._channel_book()
+        if not smc.channel_available or book is None:
             raise ProviderError(
-                f"service provider: payment failed, aborting the call — "
-                f"{paid['error']}",
+                "service provider: PaymentChannel not configured on this "
+                "daemon (payment_channel_address), so the call cannot be "
+                "paid; aborting before anything is sent.",
                 provider=self.name,
             )
-        logger.info("service provider: %s paid %d for request %s (tx %s)",
+        payer = self._payer_address()
+        provider = self._provider_address
+        async with channel_lock(book, payer, provider):
+            voucher = await voucher_for(book, smc, self._owner_key, payer,
+                                        provider, ask)
+            if voucher.get("error"):
+                raise ProviderError(
+                    f"service provider: payment failed, aborting the call — "
+                    f"{voucher['error']}",
+                    provider=self.name,
+                )
+            # Written down before it goes out: a daemon stopped mid-request
+            # counts it at start, since the provider may hold it.
+            book.reserve(payer, provider, voucher["channel_id"],
+                         voucher["cumulative_amount"])
+            try:
+                reply = await service_client.request_service(
+                    self._config, provider, self._spec_digest, args,
+                    # Fresh per call: the provider's gate uses each id once.
+                    request_id=service_client.new_request_id(),
+                    client_address=self._client_address or payer,
+                    endpoint=self._endpoint,
+                    payer_key=self._owner_key,
+                    voucher=voucher,
+                    **kwargs,
+                )
+            except BaseException:
+                # Unknown whether it left: count it (never behind the
+                # provider).
+                book.commit(payer, provider, voucher["channel_id"],
+                            voucher["cumulative_amount"])
+                raise
+            paid = settle_voucher(book, payer, provider, voucher, reply)
+        self._last_payment = {"channel_id": int(voucher["channel_id"]),
+                              "cumulative_amount": int(voucher["cumulative_amount"]),
+                              "paid": ask if paid else 0}
+        logger.info("service provider: %s %s %d on channel %s (running total %d)",
                     f"agent {self._payer_id}" if self._payer_kind == "agent"
-                    else "owner",
-                    ask, request_id[:12], str(paid.get("tx_hash"))[:16])
-        return {
-            "tx_hash": str(paid.get("tx_hash") or ""),
-            "request_id": str(paid.get("request_id") or request_id),
-        }
+                    else "the operator",
+                    "paid" if paid else "was not charged", ask,
+                    voucher["channel_id"], voucher["cumulative_amount"])
+        return reply
 
     # ------------------------------------------------------------------
     # send
@@ -307,9 +408,7 @@ class ServiceProvider(Provider):
         tools: list[ToolDefinition] | None = None,
         temperature: float = 0.0,
     ) -> ProviderResponse:
-        """One completion: pay → service_request → buffered result."""
-        from .. import service_client
-
+        """One completion: voucher → service_request → buffered result."""
         if not self.is_available:
             raise ProviderError(
                 "service provider is not configured: both provider_address "
@@ -333,7 +432,6 @@ class ServiceProvider(Provider):
                 "service provider: 'messages' must be non-empty",
                 provider=self.name,
             )
-        proof = await self._pay(max_tokens)
 
         # Wire contract (docs/services_market.md, provider-side dispatch):
         # {messages (required, non-empty), max_tokens?, system?, temperature?}.
@@ -346,21 +444,7 @@ class ServiceProvider(Provider):
         if temperature:
             args["temperature"] = float(temperature)
 
-        kwargs: dict[str, Any] = {}
-        if self._timeout:
-            kwargs["timeout"] = self._timeout
-        reply = await service_client.request_service(
-            self._config,
-            self._provider_address,
-            self._spec_digest,
-            args,
-            tx_hash=proof.get("tx_hash", ""),
-            request_id=proof.get("request_id", ""),
-            client_address=self._client_address,
-            endpoint=self._endpoint,
-            payer_key=self._owner_key,
-            **kwargs,
-        )
+        reply = await self._purchase(args)
         # Cache the resolved endpoint for subsequent calls.
         if reply.get("endpoint"):
             self._endpoint = str(reply["endpoint"])

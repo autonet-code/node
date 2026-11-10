@@ -62,6 +62,38 @@ async def test_one_channel_many_requests(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_voucher_signs_for_n_units_in_one_step(tmp_path):
+    """Metered work (Decision 2026-11-10): the running total grows by
+    units x price in one signature, for a stream that meters several work
+    items inside one interaction."""
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100, units=3)
+    assert v["cumulative_amount"] == 300 and m.opened == [(PROVIDER, 1000)]
+    book.commit(PAYER, PROVIDER, 1, 300)
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100, units=7)
+    assert v == {"channel_id": 1, "cumulative_amount": 1000, "signature": "sig:1:1000"}
+    book.commit(PAYER, PROVIDER, 1, 1000)
+    # Spent: the next step opens a new channel.
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100, units=2)
+    assert v["channel_id"] == 2 and v["cumulative_amount"] == 200
+    assert m.closed == [1]
+    assert "error" in await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100,
+                                        units=0)
+
+
+@pytest.mark.asyncio
+async def test_a_new_channel_covers_a_step_larger_than_the_default(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100, units=25)
+    assert m.opened == [(PROVIDER, 2500)] and v["cumulative_amount"] == 2500
+    # A named deposit is used when it covers the step.
+    book2, m2 = ChannelBook(tmp_path / "ch2.json"), FakeMarket()
+    await voucher_for(book2, m2, "k", PAYER, PROVIDER, ask=100, deposit=400,
+                      units=4)
+    assert m2.opened == [(PROVIDER, 400)]
+
+
+@pytest.mark.asyncio
 async def test_undelivered_request_spends_nothing(tmp_path):
     book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
     v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100)

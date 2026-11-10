@@ -579,10 +579,9 @@ class ProviderManager:
         purchased marketplace inference service backs an agent's provider.
         Two sources for the same two facts, differing in WHOSE KEY PAYS:
 
-        **Daemon-level (owner) purchase** — ``binding=None``. Read from
-        config.yaml; the payment is signed with the daemon OWNER key
-        (``autonet.private_key``), matching the sponsor pipe's
-        dependent-is-the-owner-wallet doctrine:
+        **Daemon-level purchase** — ``binding=None``. Read from config.yaml;
+        the household pays as its operator (the configured daemon key, else
+        the vault-held operator key, Decision 2026-11-08):
 
             providers:
               service:
@@ -598,11 +597,18 @@ class ProviderManager:
         wallet. Spend authority is literal token custody — the parent controls
         the tap by controlling the refills, and never has to trust the child
         to honour a limit.
+
+        Both pay through the payment channel (Decision 2026-11-10): one
+        voucher per call on the daemon's one ChannelBook, the one the
+        ``request_service`` agent tool uses.
         """
         from ..providers.service import ServiceProvider
 
         pconfig = self._config.providers.get("service")
         extra = (pconfig.extra if pconfig else {}) or {}
+        # The runtime's book (Runtime.channel_book) lives at this path; the
+        # provider opens it on its first paid call (book_at: one per path).
+        book = Path(self._config.data_dir) / "service_channels.json"
 
         if binding:
             provider_address = str(binding.get("provider_address") or "").strip()
@@ -627,6 +633,7 @@ class ProviderManager:
                 timeout=float(extra.get("timeout") or 0.0),
                 payer_kind="agent",
                 payer_id=agent_id,
+                channel_book=book,
             )
 
         provider_address = str(
@@ -670,6 +677,7 @@ class ProviderManager:
             client_address=client,
             timeout=float(extra.get("timeout") or 0.0),
             payer_kind="owner",
+            channel_book=book,
         )
 
     def _resolve_agent_key(self, agent_id: str) -> str:
