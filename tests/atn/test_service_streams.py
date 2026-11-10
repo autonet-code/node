@@ -37,7 +37,8 @@ from tests.test_service_payment_gate import (
 
 def _spec(**kw):
     return build_service_spec(name="chat", description="a chat stream",
-                              input_schema=SCHEMA, author="user", **kw)
+                              input_schema=SCHEMA, author="user",
+                              unit="one minute of chat", **kw)
 
 
 def test_the_spec_names_its_application_protocol():
@@ -207,7 +208,7 @@ def _provider(tmp_path, monkeypatch, *, protocol=True, backing=None):
     srv = _echo_backend()
     res = rt.service_store.register(
         name="echo_stream", description="Bytes back.", input_schema=SCHEMA,
-        author="user",
+        author="user", unit="one KiB echoed",
         backing_tool=backing or f"tcp://127.0.0.1:{srv.getsockname()[1]}",
         protocol={"id": "echo/1", "description": "every byte comes back"}
         if protocol else None)
@@ -309,10 +310,11 @@ async def test_a_paid_stream_from_an_agent_port_to_the_providers_backend(
     issued = []
 
     async def voucher_for(book, smc, payer_key, payer_addr, provider_addr, ask,
-                          deposit=0):
+                          deposit=0, *, units=1):
         if book.get(payer_addr, provider_addr) is None:
             book.set_open(payer_addr, provider_addr, 7, 100 * ASK_AMOUNT)
-        cum = int(book.get(payer_addr, provider_addr)["cumulative"]) + int(ask)
+        cum = (int(book.get(payer_addr, provider_addr)["cumulative"])
+               + int(ask) * int(units))
         issued.append(cum)
         return {"channel_id": 7, "cumulative_amount": cum, "signature": "0xsig"}
     monkeypatch.setattr(sc, "voucher_for", voucher_for)
@@ -369,10 +371,11 @@ async def test_vouchers_follow_metered_usage_through_the_gate(tmp_path, monkeypa
     issued = []
 
     async def voucher_for(book, smc, payer_key, payer_addr, provider_addr, ask,
-                          deposit=0):
+                          deposit=0, *, units=1):
         if book.get(payer_addr, provider_addr) is None:
             book.set_open(payer_addr, provider_addr, 7, 100 * ASK_AMOUNT)
-        cum = int(book.get(payer_addr, provider_addr)["cumulative"]) + int(ask)
+        cum = (int(book.get(payer_addr, provider_addr)["cumulative"])
+               + int(ask) * int(units))
         issued.append(cum)
         return {"channel_id": 7, "cumulative_amount": cum, "signature": "0xsig"}
     monkeypatch.setattr(sc, "voucher_for", voucher_for)

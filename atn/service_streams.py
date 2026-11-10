@@ -408,8 +408,11 @@ class _Payer:
         self.paid = 0
 
     def _channel_lock(self) -> asyncio.Lock:
-        from .agent_tools import _channel_lock
-        return _channel_lock(self.runtime, self.payer, self.provider)
+        # The one lock per (payer, provider) channel that every buyer path
+        # shares (agents, the `service` model provider, the app), so no two
+        # sign the same running total.
+        from .service_channels import channel_lock
+        return channel_lock(self.runtime.channel_book, self.payer, self.provider)
 
     async def voucher(self, units: int, args: dict, request_id: str = "") -> dict:
         """The payment fields of the next voucher (asyncio), signed under
@@ -427,8 +430,8 @@ class _Payer:
         await lock.acquire()
         try:
             v = await voucher_for(book, smc, self.payer_key, self.payer,
-                                  self.provider, self.ask * max(1, int(units)),
-                                  self.deposit)
+                                  self.provider, self.ask, self.deposit,
+                                  units=max(1, int(units)))
             if v.get("error"):
                 lock.release()
                 return {"error": str(v["error"])}
