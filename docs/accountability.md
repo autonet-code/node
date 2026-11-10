@@ -68,7 +68,14 @@ What it does:
 
 The close reads the list pinned to the previous anchor like the charter, so
 every daemon withholds the same mint. The daemon's live checks read the
-current Registry at most once a minute. Other jurisdictions may choose to
+current Registry at most once a minute. Which household an agent belongs to
+comes from Substrate's `OwnerBound` logs, which the daemon follows
+(`atn/sanctions.py` `OwnerMap`: one scan from the deploy block, then only
+the new blocks, at most once a minute), so a rotation to another owner is
+seen within a minute and no address costs a chain read of its own. Search
+shows each listing's household and any sanction on it (tool rows
+`author_household` and `sanction`, service rows `provider_household` and
+`sanction`); it shows, it does not filter (Decision 2026-11-10). Other jurisdictions may choose to
 honor the list. Group threads need no rule: they are local to one daemon,
 so only the owner's own agents post in them.
 

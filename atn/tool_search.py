@@ -571,10 +571,19 @@ async def search_tools(runtime: Any, query: str, k: int = 8, *,
     rows = await annotate_probe_rows(runtime, rows)
     reviews = household_reviews(runtime)
     from nodes.common.pruned_tools import is_pruned
+    from .sanctions import listing_context
+    authors = await asyncio.to_thread(
+        lambda: {a: listing_context(runtime, a)
+                 for a in {str(r.get("author") or "") for r in rows}})
     for row in rows:
         row["household"] = household_relation(runtime, row["digest"], reviews)
         row["pruned"] = is_pruned(row["digest"])
         row["dependency_malware"] = dependency_malware(runtime, manifests, row["digest"])
+        # The author's household now and any sanction on it (the OwnerBound
+        # map; Decision 2026-11-10): shown, never a filter.
+        ctx = authors.get(str(row.get("author") or ""), {})
+        row["author_household"] = ctx.get("household", "")
+        row["sanction"] = ctx.get("sanction")
     return {"matches": rows, "semantic": semantic}
 
 

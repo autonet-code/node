@@ -332,3 +332,30 @@ class TestSearch:
         assert rows[0]["ask"] == {"amount": "10", "unit": "per_item"}
         assert rows[0]["provider"] == ADDR_A
         assert [r["service_id"] for r in cat.search("")] == [2, 1]   # newest first
+
+
+class TestListingContext:
+    def test_rows_show_the_providers_household_and_sanction(self):
+        """Search shows each listing's household now and any sanction on it,
+        from the daemon's owner map (no chain read per row)."""
+        from atn.sanctions import SanctionList
+
+        house = "0x" + "cc" * 20
+        cat = _catalog()
+        spec = _spec("transcribe", "speech to text")
+        cat._entries[1] = _entry(1, spec, ADDR_A)
+        cat.accept_announcement(announcement(spec, 1))
+        sl = SanctionList(lambda: {f"sanction.{house}": "{}"},
+                          {ADDR_A.lower(): house}.get)
+        cat._runtime.autonet = SimpleNamespace(sanctions=sl)
+        row = cat.search("speech")[0]
+        assert row["provider_household"] == house
+        assert row["sanction"]["household"] == house
+
+    def test_no_chain_leaves_the_context_empty(self):
+        cat = _catalog()
+        spec = _spec("transcribe", "speech to text")
+        cat._entries[1] = _entry(1, spec, ADDR_A)
+        cat.accept_announcement(announcement(spec, 1))
+        row = cat.search("")[0]
+        assert row["provider_household"] == "" and row["sanction"] is None

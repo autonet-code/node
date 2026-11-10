@@ -820,12 +820,36 @@ class TestServiceRequestDispatch:
 
         # And the normalization survives a reload — including a set persisted
         # by a pre-fix daemon that holds BOTH spellings of one id.
+        import time as _t
+        now = _t.time()
         (rt._config.data_dir / "services").mkdir(parents=True, exist_ok=True)
-        (rt._config.data_dir / "services" / "served_requests.json").write_text(
-            json.dumps(["0x" + rid, rid]), encoding="utf-8")
+        (rt._config.data_dir / "services" / "served_requests.jsonl").write_text(
+            json.dumps({"id": "0x" + rid, "ts": now}) + "\n"
+            + json.dumps({"id": rid, "ts": now}) + "\n", encoding="utf-8")
         reloaded = ServiceStore(rt, rt._config.data_dir / "services")
-        assert reloaded._seen_requests == {rid}
+        assert set(reloaded._seen_requests) == {rid}
         assert reloaded.has_served_request("0x" + rid.upper()) is True
+
+    @pytest.mark.asyncio
+    async def test_used_up_ids_are_appended_and_forgotten_past_the_horizon(
+            self, tmp_path):
+        """Marking an id appends one line (no rewrite of the whole set); an
+        id older than the replay horizon is forgotten on load, because the
+        gate refuses a payment that old anyway."""
+        import time as _t
+        rt = _make_runtime(tmp_path)
+        store = rt.service_store
+        path = rt._config.data_dir / "services" / "served_requests.jsonl"
+        store.mark_request_served("0x" + "01" * 32)
+        store.mark_request_served("0x" + "02" * 32)
+        assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+        old = _t.time() - store.REPLAY_HORIZON_S - 60
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": "03" * 32, "ts": old}) + "\n")
+        reloaded = ServiceStore(rt, rt._config.data_dir / "services")
+        assert set(reloaded._seen_requests) == {"01" * 32, "02" * 32}
+        # The stale line is compacted away on load.
+        assert len(path.read_text(encoding="utf-8").splitlines()) == 2
 
 
 # ---------------------------------------------------------------------------

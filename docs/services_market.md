@@ -94,6 +94,11 @@ paths broke the principles above in ways each piece hid. Fixed:
   model name), and `max_input_chars` (default 64,000, the messages as
   compact JSON plus the system prompt) bounds the input the per-call price
   covers.
+- **Used-up request ids** are kept for 30 days (`REPLAY_HORIZON_S`),
+  appended one line each to `served_requests.jsonl` and compacted when
+  stale lines pile up; the gate refuses a direct payment older than that
+  (the `ServicePayment` block time), so a forgotten id can never be
+  replayed.
 - **The request log** names only the payer the gate verified, counts
   refused attempts without attributing them, keeps its summary as rows
   are written (`requests_summary.json`) and rotates at 4 MiB.

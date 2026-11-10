@@ -5362,6 +5362,15 @@ class WebSocketBridge:
                 ))
                 if not res.get("verified"):
                     return {"ok": False, "reason": res.get("reason", "unverified")}
+                # A payment older than the replay horizon is refused, so the
+                # used-up request ids need only be kept that long.
+                from time import time as _now
+                paid_at = res.get("paid_at")
+                if (isinstance(paid_at, int) and paid_at > 0 and _now() - paid_at
+                        > store.REPLAY_HORIZON_S):
+                    return {"ok": False,
+                            "reason": "the payment is older than the provider's "
+                                      "replay horizon (30 days); pay again"}
                 # Consume the request_id AFTER a positive verify (replay guard).
                 store.mark_request_served(request_id)
             finally:

@@ -139,7 +139,7 @@ class ServiceStore:
         # direct-payment replay guard; the voucher ledger tracks the latest
         # accepted cumulative per channel (so the increment must exceed the
         # ask) plus the latest voucher signature the provider settles with.
-        self._seen_path = self._dir / "served_requests.json"
+        self._seen_path = self._dir / "served_requests.jsonl"
         self._voucher_path = self._dir / "channel_vouchers.json"
         self._records: dict[str, ServiceRecord] = {}
         # Called with the record once the chain numbers a registration: the
@@ -147,7 +147,11 @@ class ServiceStore:
         self.on_registered: Any = None
         self._blobs: Any = None  # lazy; None until substrate package needed
         self._request_seq = 0
-        self._seen_requests: set[str] = set()
+        # request id -> when it was used up. Kept for REPLAY_HORIZON_S: the
+        # gate refuses a direct payment older than that, so an older id can
+        # never be presented again and is forgotten.
+        self._seen_requests: dict[str, float] = {}
+        self._seen_lines = 0
         self._channel_vouchers: dict[str, dict[str, Any]] = {}
         # Vouchers the gate accepted for requests still being served, per
         # channel (memory only): kept when the dispatch succeeds, dropped
@@ -472,16 +476,36 @@ class ServiceStore:
         rid = str(request_id or "").strip().lower()
         return rid[2:] if rid.startswith("0x") else rid
 
+    # How long a used-up request id is remembered. The payment gate refuses a
+    # direct payment older than this (``ServicePayment`` block time), so a
+    # replay of an older one is refused there and its id need not be kept.
+    REPLAY_HORIZON_S = 30 * 86400
+
     def has_served_request(self, request_id: str) -> bool:
-        """True if this direct-payment request_id was already served (replay)."""
+        """True if this request_id was already used up (replay)."""
         return self.normalize_request_id(request_id) in self._seen_requests
 
     def mark_request_served(self, request_id: str) -> None:
-        """Record a direct-payment request_id as served (persisted). Idempotent."""
+        """Record a request_id as used up: one line appended to the log
+        (not a rewrite of the whole set). Idempotent."""
         rid = self.normalize_request_id(request_id)
         if not rid or rid in self._seen_requests:
             return
-        self._seen_requests.add(rid)
+        now = time.time()
+        self._seen_requests[rid] = now
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with self._seen_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": rid, "ts": now}) + "\n")
+        self._seen_lines += 1
+        if self._seen_lines > 2 * max(len(self._seen_requests), 1024):
+            self._compact_seen(now)
+
+    def _compact_seen(self, now: float) -> None:
+        """Forget ids past the replay horizon and rewrite the log with the
+        rest (rare: when the file holds twice the live ids)."""
+        cutoff = now - self.REPLAY_HORIZON_S
+        self._seen_requests = {r: t for r, t in self._seen_requests.items()
+                               if t >= cutoff}
         self._persist_seen()
 
     def kept_channel_cumulative(self, channel_id: str | int) -> int:
@@ -598,18 +622,26 @@ class ServiceStore:
 
     def _load_payment_state(self) -> None:
         if self._seen_path.exists():
+            cutoff = time.time() - self.REPLAY_HORIZON_S
+            lines = 0
             try:
-                data = json.loads(self._seen_path.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    # Normalize on load: a set persisted by a pre-2026-07-26
-                    # daemon may hold both spellings of one id, and must still
-                    # refuse both after the upgrade.
-                    self._seen_requests = {
-                        r for r in (self.normalize_request_id(x) for x in data)
-                        if r
-                    }
-            except (OSError, json.JSONDecodeError) as exc:
+                for line in self._seen_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    lines += 1
+                    try:
+                        row = json.loads(line)
+                        rid = self.normalize_request_id(row.get("id"))
+                        ts = float(row.get("ts") or 0.0)
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    if rid and ts >= cutoff:
+                        self._seen_requests[rid] = ts
+            except OSError as exc:
                 log.warning("ServiceStore could not read served requests: %s", exc)
+            self._seen_lines = lines
+            if lines > len(self._seen_requests):
+                self._persist_seen()
         if self._voucher_path.exists():
             try:
                 data = json.loads(self._voucher_path.read_text(encoding="utf-8"))
@@ -624,8 +656,10 @@ class ServiceStore:
         self._dir.mkdir(parents=True, exist_ok=True)
         tmp = self._seen_path.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(sorted(self._seen_requests), fh)
+            for rid, ts in sorted(self._seen_requests.items()):
+                fh.write(json.dumps({"id": rid, "ts": ts}) + "\n")
         os.replace(tmp, self._seen_path)
+        self._seen_lines = len(self._seen_requests)
 
     def _persist_vouchers(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)

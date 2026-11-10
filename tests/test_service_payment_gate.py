@@ -520,6 +520,38 @@ class TestSurveyHoles:
 # The chain is the only reference (Decision 2026-11-10)
 # ---------------------------------------------------------------------------
 
+class TestReplayHorizon:
+    @pytest.mark.asyncio
+    async def test_a_payment_older_than_the_horizon_is_refused(
+            self, tmp_path, monkeypatch):
+        """The provider forgets used-up ids after the replay horizon, so the
+        gate refuses a direct payment older than it."""
+        import time as _t
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        old = int(_t.time()) - rt.service_store.REPLAY_HORIZON_S - 3600
+        _patch_chain(monkeypatch, verify={"verified": True, "reason": "ok",
+                                          "paid_at": old})
+        server = WebSocketBridge(rt)
+        out = await server._validate_service_payment(
+            _signed({"tx_hash": "0xabc", "request_id": "0x" + "11" * 32},
+                    record), record)
+        assert out["ok"] is False and "replay horizon" in out["reason"]
+
+    @pytest.mark.asyncio
+    async def test_a_recent_payment_passes(self, tmp_path, monkeypatch):
+        import time as _t
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        _patch_chain(monkeypatch, verify={"verified": True, "reason": "ok",
+                                          "paid_at": int(_t.time()) - 60})
+        server = WebSocketBridge(rt)
+        out = await server._validate_service_payment(
+            _signed({"tx_hash": "0xabc", "request_id": "0x" + "12" * 32},
+                    record), record)
+        assert out["ok"] is True
+
+
 class TestChainIsTheReference:
     @pytest.mark.asyncio
     async def test_price_is_read_from_the_chain(self, tmp_path, monkeypatch):

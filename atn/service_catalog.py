@@ -376,7 +376,8 @@ class ServiceCatalog:
         q = str(query or "").strip()
         if not q:
             ordered = sorted(entries, key=lambda e: -int(e["service_id"]))
-            return [self._row(e, specs, own) for e in ordered[:limit]]
+            return self._with_context(
+                [self._row(e, specs, own) for e in ordered[:limit]])
         by_digest: dict[str, list[dict[str, Any]]] = {}
         for e in entries:
             by_digest.setdefault(_norm(e.get("spec_digest")), []).append(e)
@@ -390,7 +391,21 @@ class ServiceCatalog:
                 row["score"] = hit["score"]
                 rows.append(row)
                 if len(rows) >= limit:
-                    return rows
+                    return self._with_context(rows)
+        return self._with_context(rows)
+
+    def _with_context(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Each row's provider household now and any sanction on it (the
+        daemon's OwnerBound map; Decision 2026-11-10): shown, never a
+        filter. Blocking on a refresh, like ``search`` itself."""
+        from .sanctions import listing_context
+        seen: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            p = str(row.get("provider") or "")
+            if p not in seen:
+                seen[p] = listing_context(self._runtime, p)
+            row["provider_household"] = seen[p].get("household", "")
+            row["sanction"] = seen[p].get("sanction")
         return rows
 
     @staticmethod

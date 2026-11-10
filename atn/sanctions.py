@@ -11,6 +11,13 @@ The key names a household (an owner wallet). An agent address is checked
 against its own entry and its owner's, so a fresh agent key under a
 sanctioned owner is still sanctioned, and so is an agent the DAO named
 directly.
+
+Who owns which agent comes from ``OwnerMap``: Substrate's ``OwnerBound``
+logs, followed incrementally (one scan from the jurisdiction's deploy
+block, then only the new blocks, at most once a minute), so a rotation to
+another owner is seen within a minute and no address costs a chain read of
+its own (Decision 2026-11-10: search shows each listing's owner and
+sanction from the same map).
 """
 
 from __future__ import annotations
@@ -33,41 +40,79 @@ _REGISTRY_ABI = [
      "outputs": [{"internalType": "string[]", "name": "", "type": "string[]"}],
      "stateMutability": "view", "type": "function"},
 ]
-_OWNER_ABI = [
-    {"inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
-     "name": "getAgentOwner",
-     "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-     "stateMutability": "view", "type": "function"},
-]
-
-
-def _chain_past_owners(rpc_url: str, substrate: str,
-                       deploy_block: int | None = None) -> Callable[[str], list[str]]:
-    """Every owner an agent was rotated away from (OwnerBound prevOwner).
-
-    The scan starts at the jurisdiction's deploy block (searched when not
-    configured) and splits the range when the RPC caps eth_getLogs spans,
-    the same way the close reads its logs (voice_state._get_logs). Callers
-    run it off the event loop (asyncio.to_thread)."""
-    def past_owners(agent: str) -> list[str]:
+def _chain_owner_logs(rpc_url: str, substrate: str,
+                      deploy_block: int | None = None):
+    """``read(from_block) -> (bindings, last_block)``: Substrate's
+    ``OwnerBound`` logs from ``from_block`` (the deploy block, searched when
+    not configured, on the first read) to the latest block, each as
+    ``{agent, owner, prev_owner, block, index}``. Blocking: callers run it
+    off the event loop."""
+    def read(from_block: int | None) -> tuple[list[dict[str, Any]], int]:
         from web3 import Web3
         from nodes.common.voice_state import _VOICE_ABI, _get_logs
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
         address = Web3.to_checksum_address(substrate)
         c = w3.eth.contract(address=address, abi=_VOICE_ABI)
-        event = c.events.OwnerBound
-        filters = {"agent": Web3.to_checksum_address(agent)}
+        latest = int(w3.eth.block_number)
+        start = from_block if from_block is not None else deploy_block
+        if start is not None and start > latest:
+            return [], latest
+        logs = _get_logs(c.events.OwnerBound, w3, address, latest, start)
+        return [{"agent": str(lg["args"]["agent"]).lower(),
+                 "owner": str(lg["args"]["owner"]).lower(),
+                 "prev_owner": str(lg["args"]["prevOwner"]).lower(),
+                 "block": int(lg["blockNumber"]),
+                 "index": int(lg["logIndex"])} for lg in logs], latest
+    return read
 
-        class _Filtered:
-            @staticmethod
-            def get_logs(**kw):
-                return event.get_logs(argument_filters=filters, **kw)
 
-        logs = _get_logs(_Filtered, w3, address, int(w3.eth.block_number),
-                         start_block=deploy_block)
-        return [str(lg["args"]["prevOwner"]).lower() for lg in logs
-                if str(lg["args"]["prevOwner"]).lower() != _ZERO]
-    return past_owners
+class OwnerMap:
+    """Every agent's current owner and the owners it was rotated away from,
+    followed from ``OwnerBound`` logs: the first sync reads them all, later
+    syncs only the blocks since, at most once per ``refresh_s``. A failed
+    read keeps the map it has."""
+
+    def __init__(self, read_logs: Callable[[int | None],
+                                           tuple[list[dict[str, Any]], int]],
+                 *, clock: Callable[[], float] = time.time,
+                 refresh_s: float = _REFRESH_S) -> None:
+        self._read = read_logs
+        self._clock = clock
+        self._refresh_s = refresh_s
+        self._owner: dict[str, str] = {}
+        self._past: dict[str, list[str]] = {}
+        self._last_block: int | None = None
+        self._synced_at: float | None = None
+        self._lock = threading.Lock()
+
+    def sync(self) -> None:
+        with self._lock:
+            now = self._clock()
+            if self._synced_at is not None and now - self._synced_at < self._refresh_s:
+                return
+            self._synced_at = now
+            start = None if self._last_block is None else self._last_block + 1
+            try:
+                bindings, last = self._read(start)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("owner bindings read failed, keeping the last map: %s", exc)
+                return
+            for b in sorted(bindings, key=lambda b: (b["block"], b["index"])):
+                agent = b["agent"]
+                owner = "" if b["owner"] == _ZERO else b["owner"]
+                self._owner[agent] = owner
+                prev = b.get("prev_owner") or ""
+                if prev and prev != _ZERO and prev not in self._past.setdefault(agent, []):
+                    self._past[agent].append(prev)
+            self._last_block = last
+
+    def owner(self, agent: str) -> str:
+        self.sync()
+        return self._owner.get(str(agent or "").lower(), "")
+
+    def past(self, agent: str) -> list[str]:
+        self.sync()
+        return list(self._past.get(str(agent or "").lower(), []))
 
 
 def _chain_reader(rpc_url: str, dao_registry: str) -> Callable[[], dict[str, str]]:
@@ -82,17 +127,6 @@ def _chain_reader(rpc_url: str, dao_registry: str) -> Callable[[], dict[str, str
     return read
 
 
-def _chain_owner_lookup(rpc_url: str, substrate: str) -> Callable[[str], str]:
-    def owner_of(agent: str) -> str:
-        from web3 import Web3
-        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
-        c = w3.eth.contract(address=Web3.to_checksum_address(substrate),
-                            abi=_OWNER_ABI)
-        return str(c.functions.getAgentOwner(
-            Web3.to_checksum_address(agent)).call()).lower()
-    return owner_of
-
-
 class SanctionList:
     """The jurisdiction's sanctions in force, refreshed at most once a
     minute. A failed read keeps the last good list (and logs once)."""
@@ -100,9 +134,13 @@ class SanctionList:
     def __init__(self, read_registry: Callable[[], dict[str, str]] | None,
                  owner_of: Callable[[str], str] | None = None, *,
                  past_owners: Callable[[str], list[str]] | None = None,
+                 owners: OwnerMap | None = None,
                  clock: Callable[[], float] = time.time,
                  refresh_s: float = _REFRESH_S) -> None:
         self._read = read_registry
+        # ``owners`` (the OwnerBound map) is what a daemon uses; the
+        # per-address callables remain for tests and callers without logs.
+        self._owners_map = owners
         self._owner_of = owner_of
         self._past_owners = past_owners
         self._history: dict[str, list[str]] = {}
@@ -111,11 +149,11 @@ class SanctionList:
         self._refresh_s = refresh_s
         self._raw: dict[str, dict[str, Any]] = {}
         self._read_at: float | None = None
-        # A bound owner is kept; an empty one (an address not bound yet) is
-        # read again after ``refresh_s``, or binding it later would never
-        # bring its household's sanction into view.
+        # Per-address answers (callable path only) are read again after
+        # ``refresh_s``: an agent bound or rotated since must not keep the
+        # old answer.
         self._owners: dict[str, str] = {}
-        self._unbound_at: dict[str, float] = {}
+        self._owner_read_at: dict[str, float] = {}
         self._lock = threading.Lock()
 
     @classmethod
@@ -127,9 +165,8 @@ class SanctionList:
         if not rpc or not registry:
             return cls(None)
         return cls(_chain_reader(rpc, registry),
-                   _chain_owner_lookup(rpc, substrate) if substrate else None,
-                   past_owners=(_chain_past_owners(rpc, substrate, deploy_block)
-                                if substrate else None))
+                   owners=(OwnerMap(_chain_owner_logs(rpc, substrate, deploy_block))
+                           if substrate else None))
 
     def _refresh(self) -> None:
         if self._read is None:
@@ -166,23 +203,23 @@ class SanctionList:
             return {a: dict(e) for a, e in sorted(self._raw.items())
                     if sanction_in_force(e, now)}
 
+    def owner(self, address: str) -> str:
+        """The owner wallet (household) ``address`` is bound to now, or ""."""
+        return self._owner(str(address or "").strip().lower())
+
     def _owner(self, address: str) -> str:
+        if self._owners_map is not None:
+            return self._owners_map.owner(address)
         if self._owner_of is None:
             return ""
-        unbound_at = self._unbound_at.get(address)
-        if unbound_at is not None and self._clock() - unbound_at >= self._refresh_s:
-            # An address with no owner may be bound since: read it again.
-            self._owners.pop(address, None)
-            self._unbound_at.pop(address, None)
-        if address not in self._owners:
+        read_at = self._owner_read_at.get(address)
+        if read_at is None or self._clock() - read_at >= self._refresh_s:
             try:
                 owner = self._owner_of(address) or ""
             except Exception:
-                return ""
-            owner = "" if owner.lower() == _ZERO else owner.lower()
-            self._owners[address] = owner
-            if not owner:
-                self._unbound_at[address] = self._clock()
+                return self._owners.get(address, "")
+            self._owners[address] = "" if owner.lower() == _ZERO else owner.lower()
+            self._owner_read_at[address] = self._clock()
         return self._owners[address]
 
     def check(self, address: str) -> dict[str, Any] | None:
@@ -207,6 +244,8 @@ class SanctionList:
         return None
 
     def _past(self, address: str) -> list[str]:
+        if self._owners_map is not None:
+            return self._owners_map.past(address)
         if self._past_owners is None:
             return []
         if address not in self._history:
@@ -224,6 +263,29 @@ class SanctionList:
                 return []
             self._history_failed.pop(address, None)
         return self._history[address]
+
+
+def listing_context(runtime: Any, address: str) -> dict[str, Any]:
+    """What a search row shows about a listing's author or provider: the
+    household it belongs to now and the sanction covering it, if any
+    (``{household, sanction}``). Read from the daemon's sanction list and
+    its ``OwnerMap``, so a row costs no chain read of its own. Blocking on
+    a refresh: callers run it off the event loop."""
+    out: dict[str, Any] = {"household": "", "sanction": None}
+    addr = str(address or "").strip().lower()
+    bridge = getattr(runtime, "autonet", None)
+    try:
+        sl = getattr(bridge, "sanctions", None) if bridge is not None else None
+    except Exception:  # noqa: BLE001 - no chain config
+        sl = None
+    if sl is None or not addr.startswith("0x"):
+        return out
+    try:
+        out["household"] = sl.owner(addr) or ""
+        out["sanction"] = sl.check(addr)
+    except Exception:  # noqa: BLE001 - context is additive
+        pass
+    return out
 
 
 def refusal(address: str, entry: dict[str, Any], what: str) -> dict[str, Any]:

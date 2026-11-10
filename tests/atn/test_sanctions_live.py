@@ -67,9 +67,9 @@ def test_reads_at_most_once_a_minute_and_keeps_last_list_on_failure():
 
 
 def test_an_unbound_address_is_looked_up_again_after_a_minute():
-    """An address with no owner yet may be bound later: its empty owner is
-    kept only for the refresh period, so the owner's sanction comes into
-    view. A bound owner is kept."""
+    """An address with no owner yet may be bound later: its owner is kept
+    only for the refresh period, so the owner's sanction comes into view.
+    A bound owner is read again after a minute too (it may be rotated)."""
     clock, owners, lookups = Clock(), {}, []
 
     def owner_of(address):
@@ -83,7 +83,72 @@ def test_an_unbound_address_is_looked_up_again_after_a_minute():
     clock.t += 31
     assert sl.check(AGENT)["household"] == HOUSE and len(lookups) == 2
     clock.t += 3600
-    assert sl.check(AGENT)["household"] == HOUSE and len(lookups) == 2
+    assert sl.check(AGENT)["household"] == HOUSE and len(lookups) == 3
+
+
+def test_a_rotated_agent_is_checked_against_its_new_owner():
+    """Agent X moves from household A to household B, then the DAO
+    sanctions B: within a minute the check names B (Decision 2026-11-10)."""
+    clock = Clock()
+    owners = {AGENT: OTHER}
+    sanctions = {}
+    sl = SanctionList(lambda: dict(sanctions), owners.get, clock=clock)
+    assert sl.check(AGENT) is None
+    owners[AGENT] = HOUSE                       # rotated to HOUSE
+    sanctions[f"sanction.{HOUSE}"] = "{}"       # then HOUSE is sanctioned
+    clock.t += 61
+    assert sl.check(AGENT)["household"] == HOUSE
+
+
+def _binding(agent, owner, prev, block, index=0):
+    return {"agent": agent, "owner": owner, "prev_owner": prev,
+            "block": block, "index": index}
+
+
+def test_owner_map_follows_bindings_incrementally():
+    """One scan from the deploy block, then only the blocks since: a
+    rotation shows the new owner and keeps the old one in the history."""
+    from atn.sanctions import OwnerMap
+    zero = "0x" + "00" * 20
+    clock = Clock()
+    reads = []
+    chain = [_binding(AGENT, OTHER, zero, 10)]
+
+    def read(from_block):
+        reads.append(from_block)
+        lo = from_block if from_block is not None else 0
+        return [b for b in chain if b["block"] >= lo], 20 if len(reads) == 1 else 40
+
+    om = OwnerMap(read, clock=clock)
+    sl = SanctionList(lambda: {f"sanction.{OTHER}": "{}"}, owners=om, clock=clock)
+    assert sl.check(AGENT)["household"] == OTHER
+    chain.append(_binding(AGENT, HOUSE, OTHER, 30))
+    clock.t += 30
+    assert om.owner(AGENT) == OTHER             # not read again yet
+    clock.t += 31
+    assert om.owner(AGENT) == HOUSE
+    assert om.past(AGENT) == [OTHER]
+    assert reads == [None, 21]                  # deploy block, then from 21
+    # Rotating away from a sanctioned household does not lift it.
+    assert sl.check(AGENT)["household"] == OTHER
+
+
+def test_owner_map_keeps_its_map_when_a_read_fails():
+    from atn.sanctions import OwnerMap
+    zero = "0x" + "00" * 20
+    clock = Clock()
+    state = {"fail": False}
+
+    def read(from_block):
+        if state["fail"]:
+            raise ConnectionError("rpc down")
+        return [_binding(AGENT, HOUSE, zero, 5)], 9
+
+    om = OwnerMap(read, clock=clock)
+    assert om.owner(AGENT) == HOUSE
+    state["fail"] = True
+    clock.t += 61
+    assert om.owner(AGENT) == HOUSE
 
 
 def test_no_chain_means_nothing_is_sanctioned():
@@ -176,23 +241,26 @@ def test_the_service_inference_provider_refuses_a_sanctioned_provider():
     asyncio.run(prov._refuse_if_sanctioned())
 
 
-def test_owner_history_scan_splits_capped_log_ranges(monkeypatch):
-    """Issue #40: the OwnerBound scan starts at the deploy block and splits
-    the range when the RPC caps eth_getLogs spans, like the close does."""
+def test_owner_logs_scan_from_the_deploy_block_and_split_capped_ranges(monkeypatch):
+    """The owner map's one scan of OwnerBound logs starts at the configured
+    deploy block and splits the range when the RPC caps eth_getLogs spans,
+    like the close does; later reads start where the last one ended."""
     import web3
 
-    from atn.sanctions import _chain_past_owners
+    from atn.sanctions import _chain_owner_logs
 
     calls = []
 
     class _Event:
         @staticmethod
-        def get_logs(argument_filters=None, from_block=None, to_block=None):
-            calls.append((from_block, to_block, dict(argument_filters or {})))
+        def get_logs(from_block=None, to_block=None, **_kw):
+            calls.append((from_block, to_block))
             if to_block - from_block > 1000:
                 raise ValueError("block range too large")
             if from_block <= 4321 <= to_block:
-                return [{"args": {"prevOwner": HOUSE}}]
+                return [{"args": {"agent": AGENT, "owner": OTHER,
+                                  "prevOwner": HOUSE},
+                         "blockNumber": 4321, "logIndex": 2}]
             return []
 
     class _W3:
@@ -206,11 +274,16 @@ def test_owner_history_scan_splits_capped_log_ranges(monkeypatch):
         to_checksum_address = staticmethod(lambda a: a)
 
     monkeypatch.setattr(web3, "Web3", _W3)
-    past = _chain_past_owners("http://rpc", OTHER, deploy_block=1000)
-    assert past(AGENT) == [HOUSE]
-    assert min(lo for lo, _, _ in calls) == 1000
-    assert all(f == {"agent": AGENT} for _, _, f in calls)
-    assert any(hi - lo <= 1000 for lo, hi, _ in calls)
+    read = _chain_owner_logs("http://rpc", OTHER, deploy_block=1000)
+    bindings, last = read(None)
+    assert bindings == [{"agent": AGENT, "owner": OTHER, "prev_owner": HOUSE,
+                         "block": 4321, "index": 2}]
+    assert last == 5000
+    assert min(lo for lo, _ in calls) == 1000
+    assert any(hi - lo <= 1000 for lo, hi in calls)
+    calls.clear()
+    assert read(5001) == ([], 5000)       # nothing new: no log read at all
+    assert calls == []
 
 
 def test_a_failed_owner_history_scan_is_not_retried_on_every_check():

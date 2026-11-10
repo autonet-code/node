@@ -1561,7 +1561,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             if prov_client is not None:
                 req_log = tmp_prov / ".atn" / "services" / "requests.jsonl"
                 served_path = (tmp_prov / ".atn" / "services"
-                               / "served_requests.json")
+                               / "served_requests.jsonl")
                 assert req_log.exists(), (
                     f"provider recorded NO request log at {req_log}")
                 rows = [json.loads(ln) for ln in
@@ -1589,7 +1589,9 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 assert served_path.exists(), (
                     "the gate persisted NO served request ids — it DEGRADED "
                     "OPEN instead of verifying the payment on chain")
-                served = json.loads(served_path.read_text(encoding="utf-8"))
+                served = [json.loads(ln)["id"] for ln in
+                          served_path.read_text(encoding="utf-8").splitlines()
+                          if ln.strip()]
                 seen_norm = {str(r).lower().removeprefix("0x") for r in served}
                 assert rid in seen_norm, (
                     f"paid request id {rid[:18]} was never marked served "

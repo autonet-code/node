@@ -1698,6 +1698,16 @@ class OnChainService:
                     if ev_payer != w3.to_checksum_address(payer):
                         result["reason"] = "payer mismatch"
                         return result
+                # When it was paid: the gate refuses a payment older than its
+                # replay horizon, so a used-up request id need not be kept
+                # forever (ServiceStore.REPLAY_HORIZON_S).
+                try:
+                    block_no = (receipt.get("blockNumber") if isinstance(receipt, dict)
+                                else getattr(receipt, "blockNumber", None))
+                    if block_no is not None:
+                        result["paid_at"] = int(w3.eth.get_block(block_no)["timestamp"])
+                except Exception:  # noqa: BLE001 - the gate then has no age to check
+                    pass
                 result["verified"] = True
                 result["reason"] = "ok"
                 return result
