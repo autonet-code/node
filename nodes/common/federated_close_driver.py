@@ -574,6 +574,15 @@ class FederatedCloseDriver:
                 apply(list(self._tool_rounds.get("pruned") or []))
         except Exception as e:  # noqa: BLE001 - pruning never blocks the install
             logger.warning("applying the anchored pruned tools failed: %s", e)
+        # The anchored registrations, so the library fetches and indexes
+        # every registered manifest this daemon missed on gossip.
+        try:
+            library = getattr(self.gossip, "library", None)
+            note = getattr(library, "note_registrations", None)
+            if note is not None:
+                note(self._tool_registrations)
+        except Exception as e:  # noqa: BLE001 - discovery never blocks the install
+            logger.warning("noting the anchored registrations failed: %s", e)
 
     def pruned_tools(self) -> List[str]:
         """The tools the latest close (or installed anchor) pruned."""

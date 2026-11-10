@@ -1414,26 +1414,35 @@ class AutonetBridge:
                 self._pull_remote_manifests(library, tool_store))
 
     async def _pull_remote_manifests(self, library, tool_store,
-                                     interval: float = 30.0) -> None:
+                                     interval: float = 10.0,
+                                     batch: int = 64,
+                                     concurrency: int = 8) -> None:
         """Drain queued remote manifest digests into the discovery index.
 
         Digest-verified by ``ToolStore.fetch_bytes`` (sha256 mismatch is
-        dropped). Failures are non-fatal: an unfetched digest simply
-        stays unindexed and is re-queued by the next registration gossip.
+        dropped). Up to ``batch`` digests per cycle, ``concurrency`` at a
+        time. A failed fetch stays queued and is retried with a doubling
+        backoff (``LibraryService.take_pending_remote_manifests``); the
+        anchored registrations re-queue any manifest gossip missed.
         """
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _one(digest: str) -> bool:
+            async with sem:
+                manifest = await tool_store.fetch_payload(digest)
+            if not isinstance(manifest, dict):
+                return False
+            return bool(library.index_remote_manifest(manifest))
+
         while True:
             try:
                 await asyncio.sleep(interval)
-                digests = library.take_pending_remote_manifests(limit=16)
+                digests = library.take_pending_remote_manifests(limit=batch)
                 if not digests:
                     continue
-                indexed = 0
-                for digest in digests:
-                    manifest = await tool_store.fetch_payload(digest)
-                    if not isinstance(manifest, dict):
-                        continue
-                    if library.index_remote_manifest(manifest):
-                        indexed += 1
+                results = await asyncio.gather(
+                    *(_one(d) for d in digests), return_exceptions=True)
+                indexed = sum(1 for r in results if r is True)
                 if indexed:
                     log.info("indexed %d remote tool manifest(s) for "
                              "network discovery", indexed)

@@ -34,7 +34,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .blob_store import BlobStore
 from .library.artifact_index import ArtifactIndex
@@ -135,6 +135,11 @@ class LibraryService:
         # blob digest-verified and indexes it.
         self._pending_remote_manifests: "OrderedDict[str, Dict[str, str]]" = OrderedDict()
         self._pending_remote_manifests_cap = 2048
+        # digest -> (attempts, not before): a digest handed to the fetch
+        # worker is leased for a backoff that doubles per attempt (capped),
+        # and stays queued until it is indexed. A failed fetch is retried;
+        # the anchored registrations re-queue anything gossip missed.
+        self._manifest_fetch_lease: Dict[str, Tuple[int, float]] = {}
 
         # The latest federated close, for the economy graph.
         self._registrations: Dict[str, Dict[str, str]] = {}
@@ -330,16 +335,51 @@ class LibraryService:
     def blob_json(self, digest: str) -> Any:
         return self._blob_store.get_json(digest)
 
+    # A leased digest's first retry waits this long, doubling per attempt
+    # up to the cap: a holder that is offline now is tried again later,
+    # never given up on while the tool stays registered.
+    MANIFEST_RETRY_BASE = 60.0
+    MANIFEST_RETRY_CAP = 3600.0
+
     def take_pending_remote_manifests(self, limit: int = 32) -> List[str]:
-        """Pop up to ``limit`` queued remote manifest digests."""
+        """Up to ``limit`` remote manifest digests due for a fetch.
+
+        Sources: digests seen on ``tool_registered`` gossip, and every
+        anchored registration this daemon has not indexed (a manifest
+        missed on gossip, dropped by the queue cap, or registered before
+        this daemon joined). Each digest returned is leased: it is not
+        returned again until its backoff ends, and it stays queued until
+        ``index_remote_manifest`` indexes it."""
+        now = time.time()
         out: List[str] = []
         with self._lock:
-            while self._pending_remote_manifests and len(out) < limit:
-                digest, _meta = self._pending_remote_manifests.popitem(last=False)
-                if self._artifact_index.has(digest) or digest in self._pruned_tools:
+            for digest, meta in self._registrations.items():
+                if (digest in self._pending_remote_manifests
+                        or digest in self._pruned_tools
+                        or self._artifact_index.has(digest)):
                     continue
+                self._pending_remote_manifests[digest] = {
+                    str(k): str(v) for k, v in (meta or {}).items()}
+            for digest in list(self._pending_remote_manifests):
+                if len(out) >= limit:
+                    break
+                if self._artifact_index.has(digest) or digest in self._pruned_tools:
+                    self._pending_remote_manifests.pop(digest, None)
+                    self._manifest_fetch_lease.pop(digest, None)
+                    continue
+                attempts, due = self._manifest_fetch_lease.get(digest, (0, 0.0))
+                if due > now:
+                    continue
+                self._manifest_fetch_lease[digest] = (
+                    attempts + 1,
+                    now + min(self.MANIFEST_RETRY_BASE * (2 ** attempts),
+                              self.MANIFEST_RETRY_CAP))
                 out.append(digest)
         return out
+
+    def pending_remote_manifest_count(self) -> int:
+        with self._lock:
+            return len(self._pending_remote_manifests)
 
     def index_remote_manifest(self, manifest: Dict[str, Any]) -> Optional[str]:
         """Index a manifest fetched from a peer (the caller verified its
@@ -354,10 +394,13 @@ class LibraryService:
             if digest in self._pruned_tools:
                 return None
             try:
-                return self._artifact_index.add_artifact(manifest)
+                indexed = self._artifact_index.add_artifact(manifest)
             except Exception:
                 logger.warning("indexing remote manifest failed", exc_info=True)
                 return None
+            self._pending_remote_manifests.pop(digest, None)
+            self._manifest_fetch_lease.pop(digest, None)
+            return indexed
 
     # ------------------------------------------------------------------
     # The economy graph (display only)
@@ -385,6 +428,18 @@ class LibraryService:
                 "tool_mint": dict(close_result.get("tool_mint") or {}),
             })
             self._closes = self._closes[-CLOSES_KEEP:]
+            self._save_economy()
+
+    def note_registrations(self, registrations: Dict[str, Any]) -> None:
+        """Keep an installed anchor's tool registrations (a daemon that
+        follows the anchored state instead of closing): the economy graph
+        shows them and the discovery worker fetches the manifests this
+        daemon has not indexed."""
+        if not isinstance(registrations, dict):
+            return
+        with self._lock:
+            self._registrations = {str(k): dict(v) for k, v in registrations.items()
+                                   if isinstance(v, dict)}
             self._save_economy()
 
     def apply_pruned(self, digests: List[str]) -> Dict[str, int]:
@@ -416,6 +471,7 @@ class LibraryService:
             self._blob_owners = owners
             for d in new:
                 self._pending_remote_manifests.pop(d, None)
+                self._manifest_fetch_lease.pop(d, None)
             pruned_tools.replace(set(tools) | set(owners))
             self._save_pruned()
         if new or deleted:

@@ -90,6 +90,51 @@ class TestRemoteManifestDiscovery:
         assert svc.take_pending_remote_manifests() == [digest]
         assert svc.take_pending_remote_manifests() == []
 
+    def test_failed_fetch_is_retried_after_its_backoff(self, tmp_path, monkeypatch):
+        """A digest handed to the fetch worker stays queued until indexed:
+        when its holders were offline, it comes back once the doubling
+        backoff ends."""
+        import nodes.common.library_service as ls
+        now = [1000.0]
+        monkeypatch.setattr(ls.time, "time", lambda: now[0])
+        svc = LibraryService("0xDiscoverRetry", data_root=tmp_path)
+        digest = "b" * 64
+        svc.submit_events([_reg_event(digest)], origin="remote")
+        assert svc.take_pending_remote_manifests() == [digest]
+        now[0] += LibraryService.MANIFEST_RETRY_BASE - 1
+        assert svc.take_pending_remote_manifests() == []
+        now[0] += 2
+        assert svc.take_pending_remote_manifests() == [digest]   # retry 1
+        now[0] += LibraryService.MANIFEST_RETRY_BASE + 1
+        assert svc.take_pending_remote_manifests() == []          # backoff doubled
+        now[0] += LibraryService.MANIFEST_RETRY_BASE
+        assert svc.take_pending_remote_manifests() == [digest]   # retry 2
+
+    def test_anchored_registration_missed_on_gossip_is_queued(self, tmp_path):
+        """A tool registered before this daemon joined (or whose gossip it
+        missed) is in the anchored registrations: the worker fetches it."""
+        svc = LibraryService("0xDiscoverAnchored", data_root=tmp_path)
+        digest = "f" * 64
+        svc.note_federated_close({"tool_registrations": {
+            digest: {"author": "0xPeer", "trust_class": "pinned", "deps": ""}}})
+        assert svc.take_pending_remote_manifests() == [digest]
+
+    def test_indexed_digest_leaves_the_queue(self, tmp_path):
+        svc = LibraryService("0xDiscoverDone", data_root=tmp_path)
+        manifest = {
+            "kind": "tool_manifest", "name": "late_tool",
+            "description": "fetched after a failed first try",
+            "author": "0xPeer", "trust_class": "pinned",
+            "input_schema": {"type": "object", "properties": {}},
+            "code_digest": "a" * 64,
+        }
+        import hashlib, json
+        digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+        svc.submit_events([_reg_event(digest)], origin="remote")
+        assert svc.take_pending_remote_manifests() == [digest]
+        assert svc.index_remote_manifest(manifest) == digest
+        assert svc.pending_remote_manifest_count() == 0
+
     def test_local_origin_is_not_queued(self, tmp_path):
         svc = LibraryService("0xDiscover2", data_root=tmp_path)
         svc.submit_events([_reg_event("c" * 64)], origin="local")
