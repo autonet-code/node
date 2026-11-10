@@ -66,6 +66,26 @@ def test_reads_at_most_once_a_minute_and_keeps_last_list_on_failure():
     assert HOUSE in sl.entries()
 
 
+def test_an_unbound_address_is_looked_up_again_after_a_minute():
+    """An address with no owner yet may be bound later: its empty owner is
+    kept only for the refresh period, so the owner's sanction comes into
+    view. A bound owner is kept."""
+    clock, owners, lookups = Clock(), {}, []
+
+    def owner_of(address):
+        lookups.append(address)
+        return owners.get(address, "0x" + "00" * 20)
+    sl = SanctionList(lambda: {f"sanction.{HOUSE}": "{}"}, owner_of, clock=clock)
+    assert sl.check(AGENT) is None
+    owners[AGENT] = HOUSE                       # bound after the first look
+    clock.t += 30
+    assert sl.check(AGENT) is None and len(lookups) == 1
+    clock.t += 31
+    assert sl.check(AGENT)["household"] == HOUSE and len(lookups) == 2
+    clock.t += 3600
+    assert sl.check(AGENT)["household"] == HOUSE and len(lookups) == 2
+
+
 def test_no_chain_means_nothing_is_sanctioned():
     sl = SanctionList.from_config(SimpleNamespace(rpc_url="", dao_registry_address=""))
     assert sl.entries() == {} and sl.check(HOUSE) is None

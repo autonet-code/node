@@ -111,7 +111,11 @@ class SanctionList:
         self._refresh_s = refresh_s
         self._raw: dict[str, dict[str, Any]] = {}
         self._read_at: float | None = None
+        # A bound owner is kept; an empty one (an address not bound yet) is
+        # read again after ``refresh_s``, or binding it later would never
+        # bring its household's sanction into view.
         self._owners: dict[str, str] = {}
+        self._unbound_at: dict[str, float] = {}
         self._lock = threading.Lock()
 
     @classmethod
@@ -165,12 +169,20 @@ class SanctionList:
     def _owner(self, address: str) -> str:
         if self._owner_of is None:
             return ""
+        unbound_at = self._unbound_at.get(address)
+        if unbound_at is not None and self._clock() - unbound_at >= self._refresh_s:
+            # An address with no owner may be bound since: read it again.
+            self._owners.pop(address, None)
+            self._unbound_at.pop(address, None)
         if address not in self._owners:
             try:
                 owner = self._owner_of(address) or ""
             except Exception:
                 return ""
-            self._owners[address] = "" if owner == _ZERO else owner.lower()
+            owner = "" if owner.lower() == _ZERO else owner.lower()
+            self._owners[address] = owner
+            if not owner:
+                self._unbound_at[address] = self._clock()
         return self._owners[address]
 
     def check(self, address: str) -> dict[str, Any] | None:
