@@ -126,12 +126,16 @@ def test_a_gossiped_registration_cannot_change_what_a_digest_declares():
              "manifest_meta": {"trust_class": "other", "author": R1,
                                "deps": "ee" * 32, "sender": "victim"}}
     out = compute_tool_mint([spoof, honest], registrations={}, rep_shares=SHARES,
-                            review_snapshot=_bonded())
+                            review_snapshot=_bonded(), proven_registrations=True)
     meta = out["registrations_next"][digest]
     assert meta["trust_class"] == "pinned" and meta["deps"] == ""
     assert meta["author"] == AUTHOR and meta["sender"] == "author-key"
     assert "manifest" not in meta          # the carried state keeps fields only
     # A spoof alone registers nothing on a chain-backed close.
     alone = compute_tool_mint([spoof], registrations={}, rep_shares=SHARES,
+                              review_snapshot=_bonded(), proven_registrations=True)
+    # Without the flag (the local regime, tests), registrations stay as gossiped.
+    local = compute_tool_mint([spoof], registrations={}, rep_shares=SHARES,
                               review_snapshot=_bonded())
+    assert digest in local["registrations_next"]
     assert digest not in alone["registrations_next"]

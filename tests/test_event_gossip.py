@@ -293,15 +293,15 @@ def test_open_epoch_batches_survive_a_restart(tmp_path):
 def test_a_sender_cannot_flood_or_send_oversized_batches():
     from nodes.common import event_gossip as eg
 
-    class World:
+    class Library:
         rpb_address = "0x" + "33" * 20
 
     hub = eg.InMemoryHub()
     kp = eg.Keypair.generate()
-    sender = eg.EventGossip(rpb_address=World.rpb_address, keypair=kp,
-                            transport=eg.InMemoryTransport(hub), world_service=World())
-    receiver = eg.EventGossip(rpb_address=World.rpb_address, keypair=eg.Keypair.generate(),
-                              transport=eg.InMemoryTransport(hub), world_service=World())
+    sender = eg.EventGossip(rpb_address=Library.rpb_address, keypair=kp,
+                            transport=eg.InMemoryTransport(hub), library=Library())
+    receiver = eg.EventGossip(rpb_address=Library.rpb_address, keypair=eg.Keypair.generate(),
+                              transport=eg.InMemoryTransport(hub), library=Library())
     limit, eg.MAX_SENDER_BATCHES_PER_HOUR = eg.MAX_SENDER_BATCHES_PER_HOUR, 3
     try:
         sender.clock = receiver.clock = lambda: 7200.0

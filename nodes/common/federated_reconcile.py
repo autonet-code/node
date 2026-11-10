@@ -477,6 +477,9 @@ def compute_tool_mint(
     agent_owner_map: Optional[Dict[str, str]] = None,
     rep_shares: Optional[Dict[str, float]] = None,
     review_snapshot: Optional[Dict[str, Any]] = None,
+    # A chain-backed close (set by the close driver): registrations count
+    # only from the manifest bytes their digest proves (audit G2).
+    proven_registrations: bool = False,
     tool_rounds: Optional[Dict[str, Any]] = None,
     sanctioned_households: Optional[List[str]] = None,
     mint_gate: Optional[Tuple[int, int]] = None,
@@ -722,7 +725,7 @@ def compute_tool_mint(
             continue
         meta = dict(ev["manifest_meta"])
         raw = meta.pop("manifest", "")
-        if review_snapshot is not None:
+        if proven_registrations:
             # A chain-backed close reads a registration only from the
             # manifest bytes its digest proves (fundamentals audit G2): the
             # deps, trust class, version and author of a first-come gossip
@@ -921,6 +924,8 @@ def federated_epoch_close(
     # (same snapshot as rep_shares / emission_pool). None = no ratings
     # and no review rounds.
     review_snapshot: Optional[Dict[str, Any]] = None,
+    # Registrations only from proven manifest bytes (compute_tool_mint).
+    proven_registrations: bool = False,
     # Households under a DAO sanction at the same snapshot
     # (docs/accountability.md): their mint is withheld (left unminted, not
     # passed to others) and their reviews weigh nothing.
@@ -965,6 +970,7 @@ def federated_epoch_close(
         agent_owner_map=agent_owner_map,
         rep_shares=rep_shares,
         review_snapshot=review_snapshot,
+        proven_registrations=proven_registrations,
         tool_rounds=tool_rounds,
         sanctioned_households=sanctioned,
         mint_gate=mint_gate,

@@ -1046,6 +1046,9 @@ class FederatedCloseDriver:
                             if self.rep_shares or chain_backed else None),
                 review_snapshot=(dict(self.review_snapshot)
                                  if self.review_snapshot else None),
+                # Chain-backed: a registration counts only from the
+                # manifest bytes its digest proves (audit G2).
+                proven_registrations=chain_backed,
                 sanctioned_households=list(self.sanctioned_households),
                 mint_gate=self.mint_gate,
                 review_decay=float(self.review_params[0]),
