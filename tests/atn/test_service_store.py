@@ -465,6 +465,31 @@ class TestServiceStore:
         assert len(rt.service_store.list(include_retired=True)) == 1
         assert not rt.service_store.retire("nope")
 
+    def test_reserved_voucher_counts_but_is_kept_only_when_served(self, tmp_path):
+        from atn.service_store import ServiceStore
+        rt = _make_runtime(tmp_path)
+        store = rt.service_store
+        store.record_channel_voucher(3, 100, "0xkept", service_id=2, ask=100)
+        r = store.reserve_channel_voucher(3, 200, "0xnext", service_id=2, ask=100)
+        # Counts at once (a copy is refused), settles at the kept one.
+        assert store.last_channel_cumulative(3) == 200
+        assert store.kept_channel_cumulative(3) == 100
+        assert store.has_pending_voucher(3)
+        # Not persisted while pending: a restart forgets it.
+        reloaded = ServiceStore(rt, rt._config.data_dir / "services")
+        assert reloaded.last_channel_cumulative(3) == 100
+        store.release_channel_voucher(r)
+        assert store.last_channel_cumulative(3) == 100
+        assert not store.has_pending_voucher(3)
+        r = store.reserve_channel_voucher(3, 200, "0xnext", service_id=2, ask=100)
+        store.keep_channel_voucher(r)
+        kept = store.get_channel_voucher(3)
+        assert kept["cumulative"] == 200 and kept["signature"] == "0xnext"
+        assert kept["service_id"] == 2 and kept["ask"] == 100
+        # Releasing a handle twice, or after keeping, is a no-op.
+        store.release_channel_voucher(r)
+        assert store.kept_channel_cumulative(3) == 200
+
 
 # ---------------------------------------------------------------------------
 # Provider-side service_request dispatch (WS rail) + request log

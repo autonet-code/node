@@ -314,6 +314,47 @@ class TestNoChainDegrade:
 
 
 # ---------------------------------------------------------------------------
+# The transport reports whether the provider charged (service_client)
+# ---------------------------------------------------------------------------
+
+class TestChargedReachesTheBuyer:
+    """``service_client.request_service`` passes on the provider's
+    ``charged`` (kept this request's payment or not) and adds none of its
+    own: a relay's error or a timeout leaves the question open, which the
+    buyer's book counts as paid."""
+
+    @staticmethod
+    async def _send(monkeypatch, outcome):
+        from types import SimpleNamespace
+
+        import atn.service_client as sc
+
+        async def fake(host, peer, frame, timeout):
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return dict(outcome)
+        monkeypatch.setattr(sc, "p2p_request", fake)
+        host = SimpleNamespace(_trio_token=object())
+        return await sc.request_service(
+            MagicMock(), PROVIDER_ADDR, DIGEST, {}, p2p_host=host,
+            peer_id="12D3KooWtest", request_id="0x" + "01" * 32)
+
+    @pytest.mark.asyncio
+    async def test_provider_refusal_says_not_charged(self, monkeypatch):
+        out = await self._send(monkeypatch, {"ok": False, "charged": False,
+                                             "error": "backing failed"})
+        assert out["delivered"] is True and out["charged"] is False
+
+    @pytest.mark.asyncio
+    async def test_relay_error_and_timeout_leave_it_open(self, monkeypatch):
+        relay = await self._send(monkeypatch, {
+            "ok": False, "error": "the provider did not reply through the relay"})
+        assert relay["delivered"] is True and "charged" not in relay
+        late = await self._send(monkeypatch, TimeoutError("no reply within 300s"))
+        assert late["delivered"] is True and "charged" not in late
+
+
+# ---------------------------------------------------------------------------
 # Ask caching
 # ---------------------------------------------------------------------------
 

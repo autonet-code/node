@@ -94,8 +94,12 @@ REPLY_AUTH_DOMAIN = "autonet:service_reply:v1"
 
 
 def _reply_body(reply: dict[str, Any]) -> bytes:
+    # ``charged`` (whether the provider kept the payment) is signed too, so
+    # no relay can change what the buyer's channel book records.
+    charged = reply.get("charged")
     body = {"ok": bool(reply.get("ok")), "result": reply.get("result"),
-            "error": reply.get("error")}
+            "error": reply.get("error"),
+            "charged": charged if isinstance(charged, bool) else None}
     return json.dumps(body, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True).encode("utf-8")
 
@@ -103,7 +107,7 @@ def _reply_body(reply: dict[str, Any]) -> bytes:
 def reply_auth_hash(request_id: str, spec_digest: str,
                     reply: dict[str, Any]) -> bytes:
     """keccak over (domain, request id, spec digest, sha256 of the reply's
-    ``ok``, ``result`` and ``error`` as canonical JSON): what the provider
+    ``ok``, ``result``, ``error`` and ``charged`` as canonical JSON): what the provider
     signs. Ids and digests are compared lowercase without ``0x``."""
     import hashlib
 
@@ -439,8 +443,11 @@ async def request_service(
     a provider error, or a timeout after sending). ``authenticated`` says
     the reply carries the signature of ``provider_address`` (the address
     paid) over this request id and its content; a reply without it, from a
-    relay or whoever answers the wss URL, is never ``ok``. ``endpoint`` may
-    be passed in to skip the chain read (the provider caches it).
+    relay or whoever answers the wss URL, is never ``ok``. An authentic
+    reply also carries ``charged``: whether the provider kept this
+    request's payment (it keeps a voucher only for a request it served).
+    Any other reply leaves the question open. ``endpoint`` may be passed
+    in to skip the chain read (the provider caches it).
     """
     from .on_chain import OnChainService
 
@@ -507,6 +514,9 @@ async def request_service(
                           "served" + (f" (unverified reply: {claimed})"
                                       if claimed else "")),
             })
+        elif isinstance(reply.get("charged"), bool):
+            # The provider's own word on whether it kept the payment.
+            out["charged"] = reply["charged"]
         return out
 
     # --- 1. libp2p ---------------------------------------------------------

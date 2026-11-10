@@ -4319,6 +4319,11 @@ class WebSocketBridge:
         (``receipt_sig``, ``service_client.sign_reply``) with the key that
         registered the service, the address the buyer paid: the buyer takes
         nothing a relay or a wss impostor says as served.
+
+        Not served = not paid: a voucher the gate accepted is kept only when
+        the dispatch succeeds and released otherwise. Every reply says so in
+        ``charged`` (whether this request's payment was kept, signed with
+        the rest), which is how the buyer knows whether to count its voucher.
         """
         reply = await self._service_request_reply(msg, msg_id, local=local)
         return self._sign_service_reply(msg, reply)
@@ -4394,20 +4399,21 @@ class WebSocketBridge:
         if args is None:
             args = {}
         if not spec_digest or not request_id:
-            return {"msg_id": msg_id, "ok": False,
+            return {"msg_id": msg_id, "ok": False, "charged": False,
                     "error": "Missing 'spec_digest' or 'request_id' field"}
 
         store = self.runtime.service_store
         record = store.get(spec_digest)
         if record is None:
-            return {"msg_id": msg_id, "ok": False,
+            return {"msg_id": msg_id, "ok": False, "charged": False,
                     "error": f"Unknown service digest: {spec_digest[:16]}"}
         if record.retired:
             store.count_refused(spec_digest)
-            return {"msg_id": msg_id, "ok": False, "error": "Service retired"}
+            return {"msg_id": msg_id, "ok": False, "charged": False,
+                    "error": "Service retired"}
         if not isinstance(args, dict):
             store.count_refused(spec_digest)
-            return {"msg_id": msg_id, "ok": False,
+            return {"msg_id": msg_id, "ok": False, "charged": False,
                     "error": "'args' must be an object"}
 
         upstream: Any = None
@@ -4420,20 +4426,20 @@ class WebSocketBridge:
                     problem = upstream
             if problem is not None:
                 store.count_refused(spec_digest)
-                return {"msg_id": msg_id, "ok": False,
+                return {"msg_id": msg_id, "ok": False, "charged": False,
                         "error": f"{problem}; the payment was not taken"}
         else:
             backing = record.backing_tool
             if not backing:
                 store.count_refused(spec_digest)
-                return {"msg_id": msg_id, "ok": False,
+                return {"msg_id": msg_id, "ok": False, "charged": False,
                         "error": "Service has no backing implementation"}
             tool_record = self.runtime.tool_store.get(backing)
             if tool_record is None:
                 tool_record = self.runtime.tool_store.resolve(backing)
             if tool_record is None:
                 store.count_refused(spec_digest)
-                return {"msg_id": msg_id, "ok": False,
+                return {"msg_id": msg_id, "ok": False, "charged": False,
                         "error": f"Backing tool {backing[:16]} not found"}
 
         # Payment/voucher validation gate (Stage B — real on-chain verify).
@@ -4441,33 +4447,41 @@ class WebSocketBridge:
         amount = str(gate.get("ask_amount", ""))
         if not gate.get("ok"):
             store.count_refused(spec_digest)
-            return {"msg_id": msg_id, "ok": False,
+            return {"msg_id": msg_id, "ok": False, "charged": False,
                     "error": f"Payment validation failed: "
                              f"{gate.get('reason', 'unknown')}"}
         payer = self._verified_payer(msg, record, gate)
-
-        # Inference-backed: the work item is a chat completion served off
-        # this daemon's provider stack. Payment already cleared above —
-        # the gate is backing-agnostic on purpose.
-        if record.inference:
-            result = await self._serve_inference_request(
-                record, args, upstream)
-            ok = "error" not in result
-            store.record_request(spec_digest, request_id, payer, ok=ok,
-                                 amount=amount)
-            return {"msg_id": msg_id, "ok": ok,
-                    "result": {"request_id": request_id, **result}}
-
-        # Owner-sanctioned dispatch: selling a tool IS the owner's choice.
-        result = await self.runtime.tool_store.call(
-            tool_record, args, caller_id=None)
+        reservation = gate.get("reservation")
+        try:
+            # Inference-backed: the work item is a chat completion served
+            # off this daemon's provider stack. Payment already cleared
+            # above; the gate is backing-agnostic on purpose.
+            if record.inference:
+                result = await self._serve_inference_request(
+                    record, args, upstream)
+            else:
+                # Owner-sanctioned dispatch: selling a tool IS the owner's
+                # choice.
+                result = await self.runtime.tool_store.call(
+                    tool_record, args, caller_id=None)
+        except BaseException:
+            # Not served (a crash in the backing, or the call was cancelled).
+            if reservation is not None:
+                store.release_channel_voucher(reservation)
+            raise
         ok = "error" not in result
+        if reservation is not None:
+            if ok:
+                store.keep_channel_voucher(reservation)
+            else:
+                store.release_channel_voucher(reservation)
+        # The log records the price only for a payment kept.
+        proof = gate.get("proof")
+        charged = ok if proof == "voucher" else proof == "direct"
         store.record_request(spec_digest, request_id, payer, ok=ok,
-                             amount=amount)
-        if not ok:
-            return {"msg_id": msg_id, "ok": False,
-                    "result": {"request_id": request_id, **result}}
-        return {"msg_id": msg_id, "ok": True,
+                             amount=amount if charged else "0")
+        # A direct payment is on chain already, whatever the dispatch did.
+        return {"msg_id": msg_id, "ok": ok, "charged": charged,
                 "result": {"request_id": request_id, **result}}
 
     # ------------------------------------------------------------------
@@ -5195,9 +5209,11 @@ class WebSocketBridge:
           - Voucher: ``{channel_id, cumulative_amount, signature}`` — a
             PaymentChannel voucher. We recover+verify the signature against
             on-chain channel state (client + Open) and require the increment
-            (cumulative - last_seen) >= ask, tracking the latest accepted
-            cumulative per channel and storing the voucher so the provider can
-            settle later via close_channel.
+            (cumulative - last_seen) >= ask. The voucher is reserved (it
+            counts toward last_seen at once) and returned as
+            ``reservation``: the caller keeps it, to settle later via
+            close_channel, only when the request is served, and releases
+            it otherwise. The request id is consumed either way.
 
         Config escape hatch: when the daemon has NO chain config, a request
         that arrived on the LOCAL listener (the two-daemon dev demo) is
@@ -5209,7 +5225,8 @@ class WebSocketBridge:
         knows the digest. When chain IS configured, the gate is enforced
         on both listeners.
 
-        Returns ``{ok: bool, reason: str}``.
+        Returns ``{ok: bool, reason: str}``; an accepted request also names
+        its ``proof`` ("direct", "voucher", "free" or "degraded").
         """
         from .on_chain import OnChainService, ServiceMarketClient
 
@@ -5234,7 +5251,8 @@ class WebSocketBridge:
                 "(substrate_address/rpc_url unset) — ALLOWING service request "
                 "for %s WITHOUT payment verification (local listener only).",
                 record.name or record.digest[:16])
-            return {"ok": True, "reason": "chain not configured (dev degrade)"}
+            return {"ok": True, "reason": "chain not configured (dev degrade)",
+                    "proof": "degraded"}
 
         # The price, the active flag and the payee come from the service's
         # ServiceRegistry entry, the only reference for them (Decision
@@ -5253,7 +5271,8 @@ class WebSocketBridge:
         # A free service needs no payment proof (payForService accepts zero,
         # but a zero ask has nothing to pay; the client sends no proof).
         if ask_amount <= 0:
-            return {"ok": True, "reason": "free service", "ask_amount": 0}
+            return {"ok": True, "reason": "free service", "ask_amount": 0,
+                    "proof": "free"}
 
         store = self.runtime.service_store
         tx_hash = str(request.get("tx_hash") or "").strip()
@@ -5322,7 +5341,8 @@ class WebSocketBridge:
                 store.mark_request_served(request_id)
             finally:
                 inflight.discard(request_id)
-            return {"ok": True, "reason": "ok", "ask_amount": ask_amount}
+            return {"ok": True, "reason": "ok", "ask_amount": ask_amount,
+                    "proof": "direct"}
 
         # --- Voucher (PaymentChannel) path ----------------------------------
         if channel_id is not None and signature and cumulative is not None:
@@ -5336,10 +5356,25 @@ class WebSocketBridge:
             if not smc.channel_available:
                 return {"ok": False,
                         "reason": "PaymentChannel not configured on this daemon"}
+            # The request id is single use here too: a voucher is released
+            # when its request fails, and a copy of that request sent later
+            # must not be served on it.
+            rid = store.normalize_request_id(request_id)
+            if not rid or not str(request.get("payer_signature") or "").strip():
+                return {"ok": False,
+                        "reason": "a voucher request must be signed by the "
+                                  "channel's client (payer_signature over "
+                                  "request_id and args)"}
+            if len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid):
+                return {"ok": False,
+                        "reason": "request_id must be 32 bytes of hex (64 hex digits)"}
             # One voucher check per channel at a time: two vouchers raced
             # through the cumulative check before either was recorded.
             locks = self.__dict__.setdefault("_channel_locks", {})
             async with locks.setdefault(cid, asyncio.Lock()):
+                if store.has_served_request(rid):
+                    return {"ok": False,
+                            "reason": f"request_id 0x{rid[:16]} already used (replay)"}
                 # Off-loop for the same reason as the direct path above: the
                 # voucher check reads on-chain channel state synchronously.
                 res = await self._offload(
@@ -5380,11 +5415,17 @@ class WebSocketBridge:
                     return {"ok": False,
                             "reason": f"voucher increment {cum - last} < ask "
                                       f"{ask_amount}"}
-                # Accept: record the latest cumulative + store the voucher to
-                # settle.
-                store.record_channel_voucher(cid, cum, str(signature),
-                                             provider=str(res.get("provider", "")))
-            return {"ok": True, "reason": "ok", "ask_amount": ask_amount}
+                # Accept, as a reservation: it counts at once (a copy sent
+                # meanwhile is refused), but _handle_service_request keeps it
+                # only if the request is served and otherwise releases it, so
+                # a buyer never pays for a failed request (atomic tasks).
+                reservation = store.reserve_channel_voucher(
+                    cid, cum, str(signature),
+                    provider=str(res.get("provider", "")),
+                    service_id=chain.get("service_id"), ask=ask_amount)
+                store.mark_request_served(rid)
+            return {"ok": True, "reason": "ok", "ask_amount": ask_amount,
+                    "proof": "voucher", "reservation": reservation}
 
         return {"ok": False,
                 "reason": "no payment proof: provide {tx_hash, request_id} or "

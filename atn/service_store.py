@@ -149,6 +149,11 @@ class ServiceStore:
         self._request_seq = 0
         self._seen_requests: set[str] = set()
         self._channel_vouchers: dict[str, dict[str, Any]] = {}
+        # Vouchers the gate accepted for requests still being served, per
+        # channel (memory only): kept when the dispatch succeeds, dropped
+        # when it fails, so a buyer pays only for what was served.
+        self._pending_vouchers: dict[str, dict[int, dict[str, Any]]] = {}
+        self._pending_seq = 0
         # async digest -> bytes | None over the libp2p blob protocol, set by
         # the autonet wiring: specs of other daemons' services (#45).
         self.blob_fetcher: Any = None
@@ -479,8 +484,9 @@ class ServiceStore:
         self._seen_requests.add(rid)
         self._persist_seen()
 
-    def last_channel_cumulative(self, channel_id: str | int) -> int:
-        """Latest accepted cumulative for a channel (0 if never seen)."""
+    def kept_channel_cumulative(self, channel_id: str | int) -> int:
+        """The cumulative of the best voucher kept for a channel (0 if
+        none): what the provider can settle with."""
         entry = self._channel_vouchers.get(str(channel_id))
         if not entry:
             return 0
@@ -489,27 +495,93 @@ class ServiceStore:
         except (TypeError, ValueError):
             return 0
 
+    def last_channel_cumulative(self, channel_id: str | int) -> int:
+        """The highest cumulative accepted for a channel, kept or reserved
+        by a request still being served (0 if never seen). A new voucher
+        must add at least one price on top of it."""
+        pending = self._pending_vouchers.get(str(channel_id)) or {}
+        return max([self.kept_channel_cumulative(channel_id)]
+                   + [int(p["cumulative"]) for p in pending.values()])
+
     def record_channel_voucher(
         self,
         channel_id: str | int,
         cumulative: int,
         signature: str,
         provider: str = "",
+        service_id: int | None = None,
+        ask: int = 0,
     ) -> None:
         """Store the latest accepted voucher for a channel so the provider can
         settle later via close_channel. Monotone: a lower cumulative than the
-        stored one is ignored (never regress the settlement position)."""
+        stored one is ignored (never regress the settlement position).
+        ``service_id`` and ``ask`` name the service it paid for, so the
+        settlement sweep can tell when the deposit no longer covers it."""
         cid = str(channel_id)
-        prev = self.last_channel_cumulative(cid)
+        prev = self.kept_channel_cumulative(cid)
         if int(cumulative) < prev:
             return
         self._channel_vouchers[cid] = {
             "cumulative": int(cumulative),
             "signature": str(signature),
             "provider": str(provider or ""),
+            "service_id": None if service_id is None else int(service_id),
+            "ask": int(ask or 0),
             "ts": int(time.time()),
         }
         self._persist_vouchers()
+
+    def reserve_channel_voucher(
+        self,
+        channel_id: str | int,
+        cumulative: int,
+        signature: str,
+        provider: str = "",
+        service_id: int | None = None,
+        ask: int = 0,
+    ) -> dict[str, Any]:
+        """Hold a voucher the gate accepted while its request is served.
+        Counts toward ``last_channel_cumulative`` at once (a copy sent
+        meanwhile is refused), but is kept only by
+        ``keep_channel_voucher``; ``release_channel_voucher`` drops it and
+        the channel is back at its previous cumulative. Returns the handle
+        both take."""
+        cid = str(channel_id)
+        self._pending_seq += 1
+        token = self._pending_seq
+        self._pending_vouchers.setdefault(cid, {})[token] = {
+            "cumulative": int(cumulative), "signature": str(signature),
+            "provider": str(provider or ""),
+            "service_id": None if service_id is None else int(service_id),
+            "ask": int(ask or 0)}
+        return {"channel_id": cid, "token": token}
+
+    def _pop_pending(self, reservation: dict[str, Any]) -> dict[str, Any] | None:
+        cid = str(reservation.get("channel_id"))
+        pending = self._pending_vouchers.get(cid)
+        if not pending:
+            return None
+        entry = pending.pop(reservation.get("token"), None)
+        if not pending:
+            self._pending_vouchers.pop(cid, None)
+        return entry
+
+    def keep_channel_voucher(self, reservation: dict[str, Any]) -> None:
+        """The request was served: keep its voucher to settle with."""
+        entry = self._pop_pending(reservation)
+        if entry is not None:
+            self.record_channel_voucher(
+                reservation["channel_id"], entry["cumulative"],
+                entry["signature"], provider=entry["provider"],
+                service_id=entry["service_id"], ask=entry["ask"])
+
+    def release_channel_voucher(self, reservation: dict[str, Any]) -> None:
+        """The request was not served: drop its voucher (not paid)."""
+        self._pop_pending(reservation)
+
+    def has_pending_voucher(self, channel_id: str | int) -> bool:
+        """A request on this channel is being served right now."""
+        return bool(self._pending_vouchers.get(str(channel_id)))
 
     def channel_vouchers(self) -> dict[str, dict[str, Any]]:
         """Every channel this provider holds a voucher for (settlement)."""

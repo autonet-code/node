@@ -124,9 +124,13 @@ def _signed(req: dict, record, key: str = PAYER_KEY) -> dict:
         return dict(req)   # a malformed id the gate refuses before any signature
     return {**req, "payer_signature": sig}
 
-def _vsigned(req: dict, record, key: str = PAYER_KEY) -> dict:
-    """A voucher request signed by the channel's client, as a buyer sends it."""
-    rid = "0x" + "ab" * 32
+_RIDS = iter(range(1, 10 ** 6))
+
+
+def _vsigned(req: dict, record, key: str = PAYER_KEY, rid: str = "") -> dict:
+    """A voucher request signed by the channel's client, as a buyer sends it
+    (a fresh request id each time, as the buyer makes one per request)."""
+    rid = rid or "0x" + f"{next(_RIDS):064x}"
     return _signed({**req, "request_id": rid}, record, key)
 
 
@@ -232,10 +236,15 @@ class TestVoucherPath:
             _vsigned({"channel_id": 7, "cumulative_amount": ASK_AMOUNT,
              "signature": "0xsig"}, record), record)
         assert out["ok"] is True, out
-        # Latest cumulative recorded + voucher stored for later settlement.
+        # Reserved: it counts at once, but is kept to settle with only once
+        # the request is served.
         assert rt.service_store.last_channel_cumulative(7) == ASK_AMOUNT
+        assert rt.service_store.get_channel_voucher(7) is None
+        assert out["proof"] == "voucher" and out["reservation"]
+        rt.service_store.keep_channel_voucher(out["reservation"])
         stored = rt.service_store.get_channel_voucher(7)
         assert stored and stored["signature"] == "0xsig"
+        assert stored["service_id"] == 7 and stored["ask"] == ASK_AMOUNT
 
     @pytest.mark.asyncio
     async def test_voucher_request_must_be_signed_by_the_channel_client(
@@ -648,3 +657,129 @@ class TestChainService:
             "spec_digest": record.digest, "ask_amount": "0", "active": True}})
         out = await server._chain_service(record)
         assert "another address" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# Not served = not paid: a voucher is kept only for a request that was served
+# ---------------------------------------------------------------------------
+
+class TestNotServedNotPaid:
+    """_handle_service_request keeps a voucher the gate reserved only when
+    the dispatch succeeds, and every reply says whether it charged, which
+    is what the buyer's book follows."""
+
+    @staticmethod
+    def _setup(tmp_path, monkeypatch, outcomes):
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        _patch_chain(monkeypatch, voucher={
+            "valid": True, "status": 1, "provider": PROVIDER_ADDR})
+        server = WebSocketBridge(rt)
+        calls = []
+
+        async def dispatch(self, record, args, msg_id, request_id):
+            calls.append(request_id)
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            if callable(outcome):
+                outcome = await outcome()
+            return {"msg_id": msg_id, "ok": outcome,
+                    "result": {"request_id": request_id,
+                               **({} if outcome else {"error": "backing failed"})}}
+        monkeypatch.setattr(WebSocketBridge, "_dispatch_service", dispatch)
+        return rt, record, server, calls
+
+    @staticmethod
+    def _frame(record, cid, cum, rid=""):
+        return {"spec_digest": record.digest, "args": {},
+                **_vsigned({"channel_id": cid, "cumulative_amount": cum,
+                            "signature": f"0xsig{cum}"}, record, rid=rid)}
+
+    @pytest.mark.asyncio
+    async def test_failed_dispatch_is_not_charged(self, tmp_path, monkeypatch):
+        rt, record, server, calls = self._setup(tmp_path, monkeypatch, [False, True])
+        store = rt.service_store
+        frame = self._frame(record, 5, ASK_AMOUNT)
+        out = await server._handle_service_request(frame, "m1")
+        assert out["ok"] is False and out["charged"] is False
+        assert store.last_channel_cumulative(5) == 0
+        assert store.get_channel_voucher(5) is None
+        # A copy of the failed request is refused, and never dispatched.
+        again = await server._handle_service_request(dict(frame), "m2")
+        assert again["ok"] is False and "replay" in again["error"]
+        assert len(calls) == 1
+        # The buyer did not count it, so its next voucher is the same total:
+        # accepted, served and kept.
+        nxt = await server._handle_service_request(
+            self._frame(record, 5, ASK_AMOUNT), "m3")
+        assert nxt["ok"] is True and nxt["charged"] is True
+        assert store.get_channel_voucher(5)["cumulative"] == ASK_AMOUNT
+
+    @pytest.mark.asyncio
+    async def test_served_request_keeps_its_voucher(self, tmp_path, monkeypatch):
+        rt, record, server, _ = self._setup(tmp_path, monkeypatch, [True, False])
+        store = rt.service_store
+        out = await server._handle_service_request(
+            self._frame(record, 6, ASK_AMOUNT), "m1")
+        assert out["ok"] is True and out["charged"] is True
+        assert store.get_channel_voucher(6)["cumulative"] == ASK_AMOUNT
+        # A failed request after it leaves the kept voucher where it was.
+        out = await server._handle_service_request(
+            self._frame(record, 6, ASK_AMOUNT * 2), "m2")
+        assert out["charged"] is False
+        assert store.last_channel_cumulative(6) == ASK_AMOUNT
+        assert store.get_channel_voucher(6)["cumulative"] == ASK_AMOUNT
+
+    @pytest.mark.asyncio
+    async def test_a_copy_sent_while_serving_is_refused(self, tmp_path, monkeypatch):
+        release = asyncio.Event()
+
+        async def slow():
+            await release.wait()
+            return True
+        rt, record, server, calls = self._setup(tmp_path, monkeypatch, [slow])
+        frame = self._frame(record, 7, ASK_AMOUNT)
+        first = asyncio.create_task(server._handle_service_request(frame, "m1"))
+        while not calls:
+            await asyncio.sleep(0.01)
+        # Same total on another request id: it adds nothing to the reserved one.
+        copy = await server._handle_service_request(
+            self._frame(record, 7, ASK_AMOUNT), "m2")
+        assert copy["ok"] is False and copy["charged"] is False
+        assert "increment" in copy["error"]
+        release.set()
+        assert (await first)["charged"] is True
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_crash_in_the_backing_releases_the_voucher(self, tmp_path,
+                                                              monkeypatch):
+        rt, record, server, _ = self._setup(
+            tmp_path, monkeypatch, [RuntimeError("backing crashed")])
+        with pytest.raises(RuntimeError):
+            await server._handle_service_request(
+                self._frame(record, 8, ASK_AMOUNT), "m1")
+        assert rt.service_store.last_channel_cumulative(8) == 0
+        assert not rt.service_store.has_pending_voucher(8)
+
+    @pytest.mark.asyncio
+    async def test_refusals_say_nothing_was_charged(self, tmp_path, monkeypatch):
+        rt, record, server, calls = self._setup(tmp_path, monkeypatch, [])
+        low = await server._handle_service_request(
+            self._frame(record, 9, ASK_AMOUNT - 1), "m1")
+        assert low["ok"] is False and low["charged"] is False
+        unknown = await server._handle_service_request(
+            {"spec_digest": "ab" * 32, "request_id": "0x" + "01" * 32}, "m2")
+        assert unknown["charged"] is False and calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_direct_payment_is_charged_whatever_the_dispatch(
+            self, tmp_path, monkeypatch):
+        rt, record, server, _ = self._setup(tmp_path, monkeypatch, [False])
+        _patch_chain(monkeypatch, verify={"verified": True, "reason": "ok"})
+        frame = {"spec_digest": record.digest, "args": {},
+                 **_signed({"tx_hash": "0xabc", "request_id": "0x" + "1a" * 32},
+                           record)}
+        out = await server._handle_service_request(frame, "m1")
+        assert out["ok"] is False and out["charged"] is True
