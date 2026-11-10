@@ -19,8 +19,9 @@ This script answers it with NOTHING mocked:
     cannot pass that.
   * A REAL AGENT TURN — the consumer's child agent is driven through
     ``send_agent_message``, the production surface a human's app uses. The
-    child's bound ``ServiceProvider`` resolves, pays, dials, and the completion
-    comes back into the agent's execution record.
+    child's bound ``ServiceProvider`` resolves, signs a voucher on its payment
+    channel, dials, and the completion comes back into the agent's execution
+    record.
 
 The economic loop under test is the one ratified 2026-07-26
 (``docs/services_market.md``, "Decision (2026-07-26): LLM inference as a
@@ -31,21 +32,24 @@ marketplace service" + the employer-chooses-the-tool ruling):
       -> consumer daemon's parent agent creates a CHILD bound to that service
       -> parent funds the child's own wallet
       -> the child does an ordinary agent turn
-      -> real Substrate.payForService signed with the CHILD'S key
-      -> provider gate verifies the payment on chain (not degraded)
+      -> a payment channel from the CHILD'S wallet, one voucher per call
+         (one call is one unit of the service, Decision 2026-11-10)
+      -> provider gate verifies the voucher on chain (not degraded)
       -> the REAL MODEL serves the work item over the real wss wire
-      -> a replayed request_id is refused
+      -> a replayed request_id and a reused voucher are refused
+      -> the voucher the provider kept collects on chain, net of the fee
 
 Stages
 ------
-  1  chain up (hardhat node + Substrate + ServiceRegistry)
+  1  chain up (hardhat node + Substrate + ServiceRegistry + PaymentChannel)
   2  model up (ollama reachable, a real model installed)
   3  provider daemon boots (real subprocess, isolated home, port 7710)
   4  consumer daemon boots (real subprocess, isolated home, port 7720)
   5  agents on chain (provider agent, consumer parent + child, funded)
   6  provider lists an inference-backed service (WS + chain + endpoint)
   7  parent binds the child, child does a REAL agent turn on purchased cognition
-  8  settlement (ServicePayment event, provider request log, replay refused)
+  8  settlement (the channel, both books, request log, replay refused,
+     the provider's voucher collected)
   9  teardown
 
 Running it remotely
@@ -84,6 +88,7 @@ re-runs with the consumer on another machine:
 
     E2E_SUBSTRATE         deployed Substrate address
     E2E_SERVICE_REGISTRY  deployed ServiceRegistry address
+    E2E_PAYMENT_CHANNEL   deployed PaymentChannel address
     E2E_SPEC_DIGEST       the service spec digest the provider listed
     E2E_PROVIDER_ADDR     the selling agent's 0x (payment recipient)
     E2E_PROVIDER_ANCHOR   "1" (default) => the consumer submits its own epoch
@@ -173,6 +178,7 @@ PROVIDER_HOLD = os.environ.get("E2E_PROVIDER_HOLD", "") == "1"
 # Consumer-side inputs for a split run (printed by the hold side).
 EXT_SUBSTRATE = os.environ.get("E2E_SUBSTRATE", "").strip()
 EXT_REGISTRY = os.environ.get("E2E_SERVICE_REGISTRY", "").strip()
+EXT_CHANNEL = os.environ.get("E2E_PAYMENT_CHANNEL", "").strip()
 EXT_SPEC_DIGEST = os.environ.get("E2E_SPEC_DIGEST", "").strip()
 EXT_PROVIDER_ADDR = os.environ.get("E2E_PROVIDER_ADDR", "").strip()
 CONSUMER_ANCHORS = os.environ.get("E2E_PROVIDER_ANCHOR", "1") != "0"
@@ -185,6 +191,9 @@ HH_ACCT0_PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff8
 HH_ACCT1_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 
 SERVICE_ASK = 1000            # ATN base units per work item
+# The channel's challenge window (seconds). Nothing here waits it out: the
+# provider collects its voucher at once.
+CHANNEL_WINDOW = 3600
 CHILD_FUNDING = 100_000       # ATN the employer allocates to the child
 MAX_TOKENS_CAP = 512          # the declared output ceiling the ask is priced at
 
@@ -379,15 +388,22 @@ async function main() {
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 
-  // ServiceRegistry's constructor takes the substrate address. PaymentChannel
-  // is not deployed: this rail settles by DIRECT payForService per call
-  // (channels are the v2 upgrade).
+  // ServiceRegistry's constructor takes the substrate address. Every buy
+  // pays through the PaymentChannel (Decision 2026-11-10): a voucher per
+  // call on one channel per (payer, provider).
   const Registry = await ethers.getContractFactory("ServiceRegistry");
   const registry = await Registry.deploy(substrateAddr);
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
 
-  const out = { substrate: substrateAddr, serviceRegistry: registryAddr };
+  const Channel = await ethers.getContractFactory("PaymentChannel");
+  const channel = await Channel.deploy(substrateAddr,
+                                       Number(process.env.CHANNEL_WINDOW));
+  await channel.waitForDeployment();
+  const channelAddr = await channel.getAddress();
+
+  const out = { substrate: substrateAddr, serviceRegistry: registryAddr,
+                paymentChannel: channelAddr };
   fs.writeFileSync(process.env.DEPLOY_OUT, JSON.stringify(out, null, 2));
   console.log("DEPLOYED " + JSON.stringify(out));
 }
@@ -404,7 +420,9 @@ def deploy_contracts(cwd: Path) -> Dict[str, Optional[str]]:
     try:
         env = dict(os.environ)
         env["DEPLOY_OUT"] = str(out_json)
-        log("deploying Substrate + ServiceRegistry via hardhat run…")
+        env["CHANNEL_WINDOW"] = str(CHANNEL_WINDOW)
+        log("deploying Substrate + ServiceRegistry + PaymentChannel via "
+            "hardhat run…")
         proc = subprocess.run(
             [_npx(), "hardhat", "run", str(tmp_js), "--network", "localhost"],
             cwd=str(cwd), capture_output=True, text=True, timeout=300,
@@ -820,23 +838,26 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         # ------------------------------------------------------------------
         # Stage 1 — chain up
         # ------------------------------------------------------------------
-        s1 = board.stage(1, "chain up (hardhat + Substrate + ServiceRegistry)")
+        s1 = board.stage(1, "chain up (hardhat + Substrate + ServiceRegistry "
+                            "+ PaymentChannel)")
         addresses: Dict[str, Optional[str]] = {}
         try:
             if SKIP_PROVIDER:
                 # Split run: the chain lives on the PROVIDER box. We must not
                 # start one (a second chain has neither the deployed contracts
                 # nor the provider's registrations) — only dial it.
-                if not (EXT_SUBSTRATE and EXT_REGISTRY):
+                if not (EXT_SUBSTRATE and EXT_REGISTRY and EXT_CHANNEL):
                     raise RuntimeError(
-                        "E2E_SKIP_PROVIDER=1 needs E2E_SUBSTRATE and "
-                        "E2E_SERVICE_REGISTRY (printed by the hold side)")
+                        "E2E_SKIP_PROVIDER=1 needs E2E_SUBSTRATE, "
+                        "E2E_SERVICE_REGISTRY and E2E_PAYMENT_CHANNEL (printed "
+                        "by the hold side)")
                 if not wait_rpc(60.0):
                     raise RuntimeError(
                         f"the provider box's chain is not reachable at "
                         f"{RPC_URL} (firewall? wrong host?)")
                 addresses = {"substrate": EXT_SUBSTRATE,
-                             "serviceRegistry": EXT_REGISTRY}
+                             "serviceRegistry": EXT_REGISTRY,
+                             "paymentChannel": EXT_CHANNEL}
                 s1.note("mode", "remote chain (provider box)")
             else:
                 hh_proc = start_hardhat(REPO)
@@ -847,6 +868,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             s1.note("hardhat_bind", HARDHAT_HOST)
             s1.note("substrate", addresses["substrate"])
             s1.note("serviceRegistry", addresses["serviceRegistry"])
+            s1.note("paymentChannel", addresses["paymentChannel"])
             step(f"chain up; Substrate at {addresses['substrate']}")
             s1.status = "PASS"
         except _SkipStage:
@@ -867,6 +889,9 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         registry_c = w3.eth.contract(
             address=Web3.to_checksum_address(addresses["serviceRegistry"]),
             abi=load_abi("ServiceRegistry"))
+        channel_c = w3.eth.contract(
+            address=Web3.to_checksum_address(addresses["paymentChannel"]),
+            abi=load_abi("PaymentChannel"))
 
         from eth_account import Account
         owner_prov = Account.from_key(HH_ACCT0_PK)   # seller's human wallet
@@ -956,6 +981,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     "chain_id": CHAIN_ID,
                     "substrate_address": addresses["substrate"],
                     "service_registry_address": addresses["serviceRegistry"],
+                    "payment_channel_address": addresses["paymentChannel"],
             }
             if PROVIDER_OFFBOX:
                 # The privileged listener is loopback-pinned in atn/cli.py, so
@@ -1024,6 +1050,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     "chain_id": CHAIN_ID,
                     "substrate_address": addresses["substrate"],
                     "service_registry_address": addresses["serviceRegistry"],
+                    "payment_channel_address": addresses["paymentChannel"],
                     # DELIBERATELY no provider stack of its own: the child must
                     # think on PURCHASED cognition or not at all. If the binding
                     # silently fell back to a local model the test would pass
@@ -1326,6 +1353,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 ("E2E_PROVIDER_WS", PROVIDER_WS),
                 ("E2E_SUBSTRATE", str(addresses["substrate"])),
                 ("E2E_SERVICE_REGISTRY", str(addresses["serviceRegistry"])),
+                ("E2E_PAYMENT_CHANNEL", str(addresses["paymentChannel"])),
                 ("E2E_SPEC_DIGEST", spec_digest),
                 ("E2E_PROVIDER_ADDR", prov_addr),
                 ("E2E_MODEL", model),
@@ -1408,9 +1436,10 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 "type": "activate_agent", "agent_id": child_agent})
 
             # THE TURN. `send_agent_message` is the production surface a human's
-            # app uses; the child resolves its bound ServiceProvider, pays from
-            # its OWN wallet, dials the provider daemon over the real wss wire,
-            # and a REAL model answers.
+            # app uses; the child resolves its bound ServiceProvider, opens a
+            # payment channel from its OWN wallet and signs a voucher for the
+            # call, dials the provider daemon over the real wss wire, and a
+            # REAL model answers.
             sent = await cons_client.ok({
                 "type": "send_agent_message", "agent_id": child_agent,
                 "content": PROBE_PROMPT})
@@ -1486,170 +1515,209 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             failed = True
 
         # ------------------------------------------------------------------
-        # Stage 8 — settlement: money, provider log, replay refused
+        # Stage 8 — settlement: the channel, both books, replay refused, collect
         # ------------------------------------------------------------------
-        s8 = board.stage(8, "settlement (payment event, request log, replay)")
+        s8 = board.stage(8, "settlement (channel, books, request log, replay, "
+                            "collect)")
         try:
             if s7.status != "PASS":
                 raise RuntimeError("stage 7 did not complete a paid turn")
+            from atn import service_client as _sc
+            from atn.config import AutonetConfig as _AC
+            from atn.on_chain import ServiceMarketClient as _SMC
+            from atn.service_store import ServiceStore as _SS
 
-            # (b) ServicePayment event: child payer, provider recipient, amount.
-            # Scope to THIS child's payments: a split run shares one chain with
-            # the provider box, which may have settled other traffic, and the
-            # balance arithmetic below counts calls.
+            chain_cfg = _AC(
+                rpc_url=RPC_URL, chain_id=CHAIN_ID,
+                substrate_address=addresses["substrate"] or "",
+                service_registry_address=addresses["serviceRegistry"] or "",
+                payment_channel_address=addresses["paymentChannel"] or "")
+
+            # (a) The turn paid on ONE channel from the child's wallet: no
+            # direct payForService, a ChannelOpened naming the child and the
+            # provider. Scoped to THIS child: a split run shares the chain.
             def _payer_of(a: Dict[str, Any]) -> str:
                 return str(a.get("payer") or a.get("client")
                            or a.get("from") or "")
 
-            pay_logs = [
+            direct = [
                 lg for lg in
                 substrate.events.ServicePayment().get_logs(from_block=0)
                 if _payer_of(lg["args"]).lower() == child_addr.lower()]
-            assert pay_logs, (
-                "no ServicePayment event from the child on chain — nothing paid")
-            ev = pay_logs[-1]["args"]
-            assert ev["recipient"].lower() == prov_addr.lower(), ev
-            payer = ev.get("payer") or ev.get("client") or ev.get("from")
-            if payer is not None:
-                assert str(payer).lower() == child_addr.lower(), (
-                    payer, child_addr)
-            assert int(ev["amount"]) == SERVICE_ASK, ev
-            s8.note("payments", len(pay_logs))
-            s8.note("event_payer", str(payer))
-            s8.note("event_recipient", ev["recipient"])
-            s8.note("event_amount", int(ev["amount"]))
-            step("ServicePayment event: child payer, provider recipient, "
-                 f"amount {SERVICE_ASK}")
+            assert not direct, (
+                f"the child paid with payForService instead of a voucher: "
+                f"{direct}")
+            opened = [
+                lg for lg in
+                channel_c.events.ChannelOpened().get_logs(from_block=0)
+                if str(lg["args"]["client"]).lower() == child_addr.lower()]
+            assert len(opened) == 1, (
+                f"expected one channel from the child, found {len(opened)}")
+            channel_id = int(opened[0]["args"]["channelId"])
+            client, payee, deposit, claimed, _closes, status = \
+                channel_c.functions.getChannel(channel_id).call()[:6]
+            assert payee.lower() == prov_addr.lower(), (payee, prov_addr)
+            assert deposit == SERVICE_ASK * 10 and status == 1, (
+                deposit, status)
+            s8.note("channel_id", channel_id)
+            s8.note("deposit", deposit)
 
-            # The money moved from the RIGHT wallet, net of the 2.5% fee.
-            fee = (SERVICE_ASK * 250) // 10000
-            net = SERVICE_ASK - fee
-            n_calls = len(pay_logs)
+            # The buyer's book, as the consumer daemon wrote it: the running
+            # total it signed, one ask per call.
+            book = json.loads((tmp_cons / ".atn" / "service_channels.json")
+                              .read_text(encoding="utf-8"))
+            mine = next(v for v in book["open"].values()
+                        if int(v["channel_id"]) == channel_id)
+            assert "pending" not in mine, mine
+            paid_total = int(mine["cumulative"])
+            assert paid_total >= SERVICE_ASK and paid_total % SERVICE_ASK == 0, (
+                f"the buyer's book holds {paid_total}, not a whole number of "
+                f"asks of {SERVICE_ASK}")
+            n_calls = paid_total // SERVICE_ASK
+            s8.note("calls_paid", n_calls)
+            s8.note("running_total", paid_total)
+
+            # The money moved from the RIGHT wallet: the deposit, once.
             prov_after = substrate.functions.balanceOf(prov_addr).call()
             child_after = substrate.functions.balanceOf(child_addr).call()
             owner_after = substrate.functions.balanceOf(
                 owner_cons.address).call()
-            assert child_bal_before - child_after == SERVICE_ASK * n_calls, (
-                f"child paid {child_bal_before - child_after}, expected "
-                f"{SERVICE_ASK * n_calls} over {n_calls} call(s)")
-            assert prov_after - prov_bal_before == net * n_calls, (
-                f"provider received {prov_after - prov_bal_before}, expected "
-                f"{net * n_calls}")
+            assert child_bal_before - child_after == deposit, (
+                f"child moved {child_bal_before - child_after}, expected the "
+                f"deposit {deposit}")
+            assert prov_after == prov_bal_before, (
+                "the provider was paid before collecting its voucher")
             assert owner_after == owner_bal_before, (
                 "the daemon OWNER's wallet moved — the child pays for itself")
-            s8.note("child_debited", child_bal_before - child_after)
-            s8.note("provider_credited_net", prov_after - prov_bal_before)
-            s8.note("fee_burned_per_call", fee)
+            s8.note("child_escrowed", deposit)
             s8.note("owner_wallet_untouched", True)
-            step(f"child debited {SERVICE_ASK * n_calls}, provider credited "
-                 f"{net * n_calls} net of fee; owner wallet untouched")
+            step(f"the child's provider paid on channel {channel_id} "
+                 f"(deposit {deposit}): {n_calls} call(s), running total "
+                 f"{paid_total}; owner wallet untouched")
 
-            # The request id the child actually paid on, in the two forms the
-            # rest of this stage compares against.
-            rid_raw = pay_logs[-1]["args"].get("requestId")
-            rid_hex = (bytes(rid_raw).hex()
-                       if isinstance(rid_raw, (bytes, bytearray))
-                       else str(rid_raw or ""))
-            rid = rid_hex.lower().removeprefix("0x")
-            paid_tx = pay_logs[-1]["transactionHash"].hex()
-
-            # (c) The PROVIDER daemon's own request log recorded the served
-            #     item. Read off the provider's isolated home — a real process
-            #     wrote this, which is the provider-side proof of service.
-            #     In a split run those files are on the OTHER box; the provider
-            #     side asserts them there, and the wire-level replay refusal
-            #     below is the stronger cross-machine proof of the same gate.
-            replay_rid = "0x" + rid
+            # (b) The PROVIDER daemon's own records. Read off its isolated
+            #     home: a real process wrote them. In a split run they are on
+            #     the OTHER box; the wire-level refusals below are the
+            #     cross-machine proof of the same gate.
+            kept_sig = ""
+            served_rid = ""
             if prov_client is not None:
-                req_log = tmp_prov / ".atn" / "services" / "requests.jsonl"
-                served_path = (tmp_prov / ".atn" / "services"
-                               / "served_requests.jsonl")
+                svc_dir = tmp_prov / ".atn" / "services"
+                req_log = svc_dir / "requests.jsonl"
                 assert req_log.exists(), (
                     f"provider recorded NO request log at {req_log}")
                 rows = [json.loads(ln) for ln in
                         req_log.read_text(encoding="utf-8").splitlines()
                         if ln.strip()]
-                mine_rows = [r for r in rows
-                             if r.get("spec_digest") == spec_digest]
-                assert mine_rows, (
-                    f"no request-log row for {spec_digest[:16]}: {rows}")
-                ok_rows = [r for r in mine_rows if r.get("ok")]
-                assert ok_rows, (
-                    f"the provider logged only FAILED requests: {mine_rows}")
+                ok_rows = [r for r in rows
+                           if r.get("spec_digest") == spec_digest and r.get("ok")]
+                assert len(ok_rows) == n_calls, (
+                    f"the provider served {len(ok_rows)} item(s), the buyer "
+                    f"paid for {n_calls}: {rows}")
                 # The payer the gate verified, not a client field the
                 # request carried.
                 assert (ok_rows[-1].get("payer", "").lower()
                         == child_addr.lower()), (ok_rows[-1], child_addr)
-                s8.note("provider_log_rows", len(mine_rows))
-                s8.note("provider_log_payer", ok_rows[-1].get("payer"))
+                s8.note("provider_log_rows", len(ok_rows))
                 step(f"provider request log recorded {len(ok_rows)} served "
                      f"item(s) for the child")
 
                 # The gate really VERIFIED rather than degrading open: a
-                # degraded gate never consumes a request id, so the served set
-                # would be empty.
-                assert served_path.exists(), (
-                    "the gate persisted NO served request ids — it DEGRADED "
-                    "OPEN instead of verifying the payment on chain")
+                # degraded gate keeps no voucher and consumes no request id.
+                vouchers = json.loads((svc_dir / "channel_vouchers.json")
+                                      .read_text(encoding="utf-8"))
+                kept = vouchers.get(str(channel_id))
+                assert kept and int(kept["cumulative"]) == paid_total, (
+                    f"the provider kept {kept}, the buyer signed {paid_total}")
+                kept_sig = str(kept["signature"])
                 served = [json.loads(ln)["id"] for ln in
-                          served_path.read_text(encoding="utf-8").splitlines()
+                          (svc_dir / "served_requests.jsonl")
+                          .read_text(encoding="utf-8").splitlines()
                           if ln.strip()]
-                seen_norm = {str(r).lower().removeprefix("0x") for r in served}
-                assert rid in seen_norm, (
-                    f"paid request id {rid[:18]} was never marked served "
-                    f"(gate saw {[s[:18] for s in seen_norm]}) — the payment "
-                    f"verified was not the one made")
+                served_rid = _SS.normalize_request_id(ok_rows[-1]["request_id"])
+                assert served_rid in {_SS.normalize_request_id(r) for r in served}, (
+                    "the served request's id was never consumed by the gate")
                 s8.note("gate_verified_not_degraded", True)
-                step("provider gate verified the payment on chain "
-                     "(not degraded)")
-                # Re-send the id in the EXACT form the gate stored it (the
-                # served set is string-keyed).
-                replay_rid = next(r for r in served
-                                  if str(r).lower().removeprefix("0x") == rid)
+                s8.note("provider_voucher", paid_total)
+                step(f"provider gate verified the voucher on chain and kept "
+                     f"it at {paid_total}, the buyer's own total")
             else:
-                s8.note("provider_log", "on the provider box (not readable "
-                                        "from here)")
+                s8.note("provider_records", "on the provider box (not "
+                                            "readable from here)")
 
-            # (d) A REPLAYED request_id is refused. Cross-machine this goes over
-            #     the SAME wire the child used, through service_client — which
-            #     is also the proof that the remote listener accepts a paying
-            #     stranger's service_request and nothing else.
+            # (c) Refusals: the served request id again (single box), and a
+            #     voucher that adds nothing on a fresh id (both modes, over
+            #     the same wire the child used).
+            smc = _SMC(chain_cfg)
+            args = {"messages": [{"role": "user", "content": "replay"}]}
+
+            def _frame(rid: str, cumulative: int) -> Dict[str, Any]:
+                return {
+                    "type": "service_request", "spec_digest": spec_digest,
+                    "request_id": rid, "args": args, "client": child_addr,
+                    "channel_id": channel_id, "cumulative_amount": cumulative,
+                    "signature": smc.sign_voucher(child_key, channel_id,
+                                                  cumulative),
+                    "payer_signature": _sc.sign_request(
+                        child_key, rid, spec_digest, args, prov_addr),
+                }
+
             if prov_client is not None:
-                replay = await prov_client.call({
-                    "type": "service_request",
-                    "spec_digest": spec_digest,
-                    "request_id": replay_rid,
-                    "args": {"messages": [{"role": "user",
-                                           "content": "replay"}]},
-                    "client": child_addr,
-                    "tx_hash": paid_tx,
-                })
+                replay = await prov_client.call(
+                    _frame("0x" + served_rid, paid_total + SERVICE_ASK))
+                assert not replay.get("ok"), (
+                    f"the gate ACCEPTED a replayed request_id: {replay}")
+                assert "replay" in str(replay.get("error", "")).lower(), replay
+                s8.note("replay_refused", True)
+                reused = await prov_client.call(
+                    _frame(_sc.new_request_id(), paid_total))
             else:
-                from atn import service_client as _sc
-                from atn.config import AutonetConfig as _AC
-
+                rid = _sc.new_request_id()
                 wire = await _sc.request_service(
-                    _AC(rpc_url=RPC_URL, chain_id=CHAIN_ID,
-                        substrate_address=addresses["substrate"] or "",
-                        service_registry_address=(
-                            addresses["serviceRegistry"] or "")),
-                    prov_addr, spec_digest,
-                    {"messages": [{"role": "user", "content": "replay"}]},
-                    tx_hash=paid_tx, request_id=replay_rid,
-                    client_address=child_addr, timeout=60.0)
-                if wire.get("error") and wire.get("ok") is None:
+                    chain_cfg, prov_addr, spec_digest, args,
+                    request_id=rid, client_address=child_addr,
+                    payer_key=child_key, timeout=60.0,
+                    voucher={"channel_id": channel_id,
+                             "cumulative_amount": paid_total,
+                             "signature": smc.sign_voucher(
+                                 child_key, channel_id, paid_total)})
+                if not wire.get("delivered"):
                     raise RuntimeError(
-                        f"the replay probe never reached the provider: "
-                        f"{wire['error']}")
-                replay = {"ok": wire.get("ok"), "error": wire.get("error")}
-                s8.note("replay_over_wire", wire.get("endpoint"))
-            assert not replay.get("ok"), (
-                f"the gate ACCEPTED a replayed request_id: {replay}")
-            err = str(replay.get("error", "")).lower()
-            assert "replay" in err or "already served" in err, replay
-            s8.note("replay_refused", True)
-            s8.note("replay_error", str(replay.get("error"))[:70])
-            step("gate refuses a replayed request_id")
+                        f"the refusal probe never reached the provider: "
+                        f"{wire.get('error')}")
+                reused = {"ok": wire.get("ok"), "error": wire.get("error")}
+                s8.note("probe_over_wire", wire.get("endpoint"))
+            assert not reused.get("ok"), (
+                f"the gate accepted a voucher that adds nothing: {reused}")
+            assert "increment" in str(reused.get("error", "")).lower(), reused
+            s8.note("reused_voucher_refused", True)
+            step("gate refuses a replayed request id and a voucher that adds "
+                 "no price")
+
+            # (d) The voucher the provider kept collects on chain, net of
+            #     the 2.5% fee, in one settlement (single box: the provider's
+            #     key and voucher are here).
+            if prov_client is not None:
+                fee = (paid_total * 250) // 10000
+                sig = bytes.fromhex(kept_sig.removeprefix("0x"))
+                send_tx(w3, channel_c.functions.closeChannel(
+                    channel_id, paid_total, sig), prov_key, prov_addr)
+                prov_paid = substrate.functions.balanceOf(prov_addr).call()
+                assert prov_paid - prov_bal_before == paid_total - fee, (
+                    f"provider received {prov_paid - prov_bal_before}, "
+                    f"expected {paid_total - fee}")
+                closed = channel_c.functions.getChannel(channel_id).call()
+                assert closed[5] == 2 and closed[3] == paid_total, closed
+                settled = [
+                    lg for lg in
+                    substrate.events.ServicePayment().get_logs(from_block=0)
+                    if lg["args"]["recipient"].lower() == prov_addr.lower()]
+                assert len(settled) == 1 and \
+                    int(settled[0]["args"]["amount"]) == paid_total, settled
+                s8.note("provider_collected_net", paid_total - fee)
+                s8.note("fee", fee)
+                step(f"the provider's voucher collected {paid_total} in one "
+                     f"settlement, {paid_total - fee} net of the fee")
             s8.status = "PASS"
         except _SkipStage:
             pass
