@@ -43,14 +43,17 @@ branch. Everything else is temporary.
 
 10. **Secrets and generated files** are never committed.
 
-## Breaking upgrades (consensus or contract changes)
+## Consensus and contract changes
 
-A change is a breaking upgrade when daemons on the old and new build would
-compute different epoch closes, proofs or charter readings, or when it needs
-a contract ABI that is not deployed yet.
+A change is a consensus change when daemons on the old and new build would
+compute different epoch closes, proofs or charter readings, and a contract
+change when it needs a contract ABI that is not deployed yet. Nothing has
+launched, so there is no old build to stay compatible with: test networks
+are redeployed (CLAUDE.md, "Nothing has launched").
 
-11. The commit message starts with `Breaking upgrade:` and says what every
-    daemon must do.
+11. The commit message says what the change does and that it changes
+    consensus or a contract ABI (for example "the close reads ...", "elections
+    have ..."), in plain words.
 12. The epoch computation changes bump the supported epoch rules version
     (`SUPPORTED_EPOCH_RULES` in `atn/config.py`; the jurisdiction's Registry
     key `jurisdiction.autonet.epoch_rules`), per

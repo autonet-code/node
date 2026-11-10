@@ -34,7 +34,9 @@ registered in the packaged jurisdiction keeps it. It:
   on the machine, snapshotted by content (`docs/tool_codebases.md`), or a
   single script;
 - gossips events over libp2p (a published tool's one `tool_registered`
-  event), serves blobs and announces in the DHT the tool blobs it holds
+  event, which carries the manifest's bytes: a chain-backed close reads a
+  tool's author, dependencies and trust class only from what its digest
+  proves), serves blobs and announces in the DHT the tool blobs it holds
   and the evidence of its own malware flags;
 - with a registered agent or operator: runs the federated close, votes epoch elections
   and submits claims through the operator key. Without one it closes
@@ -268,9 +270,9 @@ agent directory.
 
 ## Repos and rules
 
-- `C:\code\autonet` (backend, run branch `wan-run`), `C:\code\atn_web_apps`
+- `C:\code\autonet` (backend, branch `master`), `C:\code\atn_web_apps`
   (app), `C:\code\dao\trustless-contracts` (dao's).
-- Commit locally; push only when the owner says. Consensus or ABI changes
-  are `Breaking upgrade:` commits (flag day: every daemon on the new build
-  and a fresh Substrate).
+- Commit locally; push only when the owner says. Nothing has launched, so a
+  commit says what the change does; a consensus or ABI change says so in
+  its message, and test networks are simply redeployed.
 - Economy changes need the owner's sign-off.

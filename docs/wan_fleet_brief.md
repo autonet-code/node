@@ -30,7 +30,7 @@ time; this session must not go idle.
 
 ```bash
 sudo apt-get install -y libgmp-dev
-git clone --branch wan-run --depth 1 https://github.com/autonet-code/node.git ~/node && cd ~/node
+git clone --branch master --depth 1 https://github.com/autonet-code/node.git ~/node && cd ~/node
 python3 -m venv ~/venv && ~/venv/bin/pip install -q --upgrade pip setuptools wheel && ~/venv/bin/pip install -q .
 nohup ~/venv/bin/python scripts/s2/vm_up.py --households {HOUSEHOLDS} --obs-token {OBS_TOKEN} \
     --dir ~/autonet-wan --name-prefix {VM}- > ~/vm_up.log 2>&1 &
