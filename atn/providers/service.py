@@ -386,9 +386,9 @@ class ServiceProvider(Provider):
             )
 
         # Success envelope (provider-side): {request_id, content, model, usage,
-        # stop_reason, max_tokens}. An EMPTY served model is legitimate — the
-        # spec may leave the model unset and let the seller's daemon resolve
-        # its own default — so fall back to our config label, never error.
+        # stop_reason, max_tokens}. The spec names the served model, but an
+        # upstream may report none, so fall back to our config label rather
+        # than error.
         usage_raw = result.get("usage") or {}
         served_model = str(result.get("model") or "") or (model or self._model)
         self._active_model = served_model
