@@ -1435,9 +1435,10 @@ class TestInvokeServicePayment:
         assert receipt["tx_hash"] == "0xdeadbeef"
         assert receipt["amount"] == ASK["amount"]
 
-        # Signed with the daemon OWNER key (not the authoring agent's), for
-        # the ask, to the spec's author_pubkey — the SAME recipient
-        # _validate_service_payment verifies the ServicePayment event against.
+        # Signed with the operator key (here the configured daemon key; not
+        # the authoring agent's), for the ask, to the spec's author_pubkey —
+        # the SAME recipient _validate_service_payment verifies the
+        # ServicePayment event against.
         assert seen[0]["key"] == rt._config.rpb.private_key
         assert seen[0]["amount"] == int(ASK["amount"])
         assert seen[0]["recipient"] == rt.service_store.get(
@@ -1493,7 +1494,11 @@ class TestInvokeServicePayment:
         assert out["result"]["receipt"]["recipient"] == provider
 
     @pytest.mark.asyncio
-    async def test_no_owner_key_is_a_payment_failure(self, tmp_path):
+    async def test_owner_buys_as_the_operator_in_a_normal_install(
+            self, tmp_path, monkeypatch):
+        """No configured daemon key (a normal install): the owner surface
+        pays with the vault-held operator key and buys as the operator's
+        address, which also signs the request (Decision 2026-11-08)."""
         rt = _make_runtime(tmp_path)
         await _register_agent(rt, "child")
         tool = await _register_echo_tool(rt)
@@ -1502,10 +1507,55 @@ class TestInvokeServicePayment:
             author="child", backing_tool=tool["digest"])
         self._configure_chain(rt)
         rt._config.rpb.private_key = ""
+        operator_key = rt.registry.daemon_operator_key()
+        from eth_account import Account
+        operator = Account.from_key(operator_key).address
 
-        out = await _invoke(rt, svc["digest"], {"x": "hi"})
+        from atn import service_client
+        keys: list[str] = []
+
+        async def _ok(config, key, recipient, amount, request_id=""):
+            keys.append(key)
+            return {"tx_hash": "0xbeef", "request_id": request_id}
+
+        monkeypatch.setattr(service_client, "pay_for_service", _ok)
+        server = _server(rt)
+        frames: list[dict] = []
+
+        async def _spy_gate(request, record, local=False):
+            frames.append(dict(request))
+            return {"ok": True, "reason": "stubbed", "proof": "direct"}
+
+        server._validate_service_payment = _spy_gate
+        out = await _invoke(rt, svc["digest"], {"x": "hi"}, server=server)
+        assert out["ok"] is True, out
+        assert keys == [operator_key]
+        assert frames[0]["client"] == operator
+        signer = service_client.recover_request_signer(
+            frames[0]["payer_signature"], frames[0]["request_id"],
+            svc["digest"], {"x": "hi"}, out["result"]["receipt"]["recipient"])
+        assert signer == operator
+
+    @pytest.mark.asyncio
+    async def test_no_operator_key_is_a_payment_failure(self, tmp_path,
+                                                        monkeypatch):
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        svc = rt.service_store.register(
+            name="echo_svc", description="d", input_schema=SCHEMA,
+            author="child", backing_tool=tool["digest"])
+        self._configure_chain(rt)
+        rt._config.rpb.private_key = ""
+        server = _server(rt)
+
+        def _no_vault():
+            raise RuntimeError("vault unavailable")
+        monkeypatch.setattr(server, "_operator_key", _no_vault)
+
+        out = await _invoke(rt, svc["digest"], {"x": "hi"}, server=server)
         assert out["ok"] is False
-        assert "owner signing key" in out["error"]
+        assert "no operator key" in out["error"]
         assert svc["digest"] not in rt.service_store.summary()
 
     @pytest.mark.asyncio

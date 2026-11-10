@@ -4525,9 +4525,10 @@ class WebSocketBridge:
         handler then pays nothing itself: the proof rides to the
         provider gate, which verifies recipient/amount/replay on-chain
         exactly as it would a stranger's. Without a prepaid proof the
-        daemon falls back to signing with the OWNER key
-        (``autonet.private_key``) when one is configured — the headless
-        setup — same doctrine as the ``service`` provider type.
+        daemon buys as the household's operator: the operator key pays and
+        signs the request, and the operator's address is the client
+        (Decision 2026-11-08; ``autonet.private_key`` is empty in a normal
+        install).
         """
         digest = str(msg.get("digest") or "").strip()
         args = msg.get("args")
@@ -4579,13 +4580,25 @@ class WebSocketBridge:
             return asyncio.run(factory())
         return await asyncio.to_thread(_run)
 
-    def _owner_signing_key(self) -> str:
-        autonet_cfg = getattr(self.runtime._config, "rpb", None)
-        return str(getattr(autonet_cfg, "private_key", "") or "").strip()
+    def _buyer_key(self) -> str:
+        """The key the owner surface buys with: the operator's, which signs
+        and pays for the household (Decision 2026-11-08). The configured
+        daemon key is empty in a normal install. Empty when none is held."""
+        try:
+            return str(self._operator_key() or "").strip()
+        except Exception:                                   # noqa: BLE001
+            return ""
 
-    def _owner_client_address(self) -> str:
-        autonet_cfg = getattr(self.runtime._config, "rpb", None)
-        return str(getattr(autonet_cfg, "owner_wallet", "") or "").strip()
+    def _buyer_address(self) -> str:
+        """The operator's address: the client the owner surface buys as."""
+        key = self._buyer_key()
+        if not key:
+            return ""
+        try:
+            from eth_account import Account
+            return str(Account.from_key(key).address)
+        except Exception:                                   # noqa: BLE001
+            return ""
 
     # ---- ServiceRegistry (the chain half of publish/retire) -------------
     #
@@ -4821,7 +4834,8 @@ class WebSocketBridge:
     async def _pay_for_invoke(
         self, *, recipient: str, amount: int, request_id: str,
     ) -> dict[str, Any]:
-        """Pay one work item's ask with the owner key.
+        """Pay one work item's ask with the operator key (the household's
+        payer).
 
         Three outcomes, all of which the receipt distinguishes:
 
@@ -4857,12 +4871,12 @@ class WebSocketBridge:
             log.info("invoke_service: ask is 0 — no payment needed")
             return {"free": True}
 
-        key = self._owner_signing_key()
+        key = self._buyer_key()
         if not key:
             return {"error": "Payment failed: chain is configured but this "
-                             "daemon holds no owner signing key "
-                             "(autonet.private_key) — buying a service is an "
-                             "owner-level act."}
+                             "daemon holds no operator key (the vault is "
+                             "unavailable), so it cannot pay for the "
+                             "household."}
         if not recipient:
             return {"error": "Payment failed: could not resolve the service "
                              "provider's payment address."}
@@ -4933,11 +4947,11 @@ class WebSocketBridge:
             "spec_digest": record.digest,
             "request_id": request_id,
             "args": args,
-            "client": self._owner_client_address() or "owner",
+            "client": self._buyer_address() or "owner",
         }
         if tx_hash:
             frame["tx_hash"] = tx_hash
-            key = self._owner_signing_key()
+            key = self._buyer_key()
             if key:
                 frame["payer_signature"] = service_client.sign_request(
                     key, request_id, record.digest, args, recipient)
@@ -5040,9 +5054,9 @@ class WebSocketBridge:
         reply = await service_client.request_service(
             config, provider_address, digest, args,
             tx_hash=tx_hash, request_id=request_id,
-            client_address=self._owner_client_address(),
+            client_address=self._buyer_address(),
             endpoint=str(endpoint or ""),
-            payer_key=self._owner_signing_key() or "",
+            payer_key=self._buyer_key(),
         )
         return self._invoke_result(
             {"ok": bool(reply.get("ok")), "result": reply.get("result"),
