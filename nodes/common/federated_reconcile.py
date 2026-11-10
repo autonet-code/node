@@ -448,6 +448,28 @@ def _normalize_tool_rounds(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def proven_registration_meta(digest: str, raw: str) -> Optional[Dict[str, str]]:
+    """The registration fields (trust class, author, deps, version_of) of
+    the manifest whose canonical bytes ``raw`` hash to ``digest``, or None
+    when they don't (fundamentals audit G2)."""
+    import hashlib
+    import json
+    if not raw or hashlib.sha256(str(raw).encode("utf-8")).hexdigest() != str(digest):
+        return None
+    try:
+        manifest = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    meta = {"trust_class": str(manifest.get("trust_class", "")),
+            "author": str(manifest.get("author", "")),
+            "deps": ",".join(manifest.get("dependencies") or [])}
+    if manifest.get("version_of"):
+        meta["version_of"] = str(manifest["version_of"])
+    return meta
+
+
 def compute_tool_mint(
     events: List[Dict[str, Any]],
     *,
@@ -699,8 +721,20 @@ def compute_tool_mint(
         if digest in known_regs or digest in state["refused"]:
             continue
         meta = dict(ev["manifest_meta"])
+        raw = meta.pop("manifest", "")
+        if review_snapshot is not None:
+            # A chain-backed close reads a registration only from the
+            # manifest bytes its digest proves (fundamentals audit G2): the
+            # deps, trust class, version and author of a first-come gossip
+            # could otherwise redirect a tool's fan-out, zero it, or claim
+            # it for another household.
+            meta = proven_registration_meta(digest, raw)
+            if meta is None:
+                continue
+        # The batch's signing key, never a "sender" the metadata claims.
+        meta.pop("sender", None)
         if ev.get("sender"):
-            meta.setdefault("sender", str(ev["sender"]))
+            meta["sender"] = str(ev["sender"])
         bad = sorted({m for x in _deps(meta) for m in _uses_malware(x)})
         if bad:
             refused_now[digest] = bad

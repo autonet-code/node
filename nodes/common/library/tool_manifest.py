@@ -419,13 +419,18 @@ def registration_event(manifest: Dict[str, Any], digest: str, *,
 
     ``manifest_meta`` carries what the close needs so a mint never depends
     on blob replication: trust_class, author, the declared dependencies
-    (comma-joined, the composition fan-out) and ``version_of`` when set.
-    Values are strings on the wire.
+    (comma-joined, the composition fan-out) and ``version_of`` when set,
+    plus ``manifest``, the manifest's canonical bytes (sorted-key JSON, the
+    bytes its digest is the sha256 of). A chain-backed close reads the
+    fields from those bytes only (fundamentals audit G2), so no copy of
+    the event gossiped first can change them. Values are strings on the
+    wire.
     """
     meta = {
         "trust_class": str(manifest.get("trust_class", "")),
         "author": str(manifest.get("author", "")),
         "deps": ",".join(manifest.get("dependencies") or []),
+        "manifest": json.dumps(manifest, sort_keys=True),
     }
     if manifest.get("version_of"):
         meta["version_of"] = str(manifest["version_of"])

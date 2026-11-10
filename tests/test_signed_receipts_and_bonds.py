@@ -107,3 +107,31 @@ def test_a_tool_mints_only_once_it_breaks_through():
     assert mint((500, 50)) == {}
     assert mint((100, 500)) == {}
 
+
+
+def test_a_gossiped_registration_cannot_change_what_a_digest_declares():
+    """Fundamentals audit G2: a chain-backed close reads a tool's fields from
+    the manifest bytes its digest proves, so a first-come spoof of deps,
+    trust class or author is ignored, and the sender is the batch's key."""
+    import hashlib
+    import json
+
+    from nodes.common.library.tool_manifest import registration_event
+    manifest = {"kind": "tool_manifest", "name": "t", "trust_class": "pinned",
+                "author": AUTHOR, "dependencies": []}
+    digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest()
+    honest = dict(registration_event(manifest, digest, agent_id="0xa"), sender="author-key")
+    spoof = {"kind": "tool_registered", "artifact_digest": digest, "seq": 1,
+             "author_agent": "0x00", "sender": "attacker",
+             "manifest_meta": {"trust_class": "other", "author": R1,
+                               "deps": "ee" * 32, "sender": "victim"}}
+    out = compute_tool_mint([spoof, honest], registrations={}, rep_shares=SHARES,
+                            review_snapshot=_bonded())
+    meta = out["registrations_next"][digest]
+    assert meta["trust_class"] == "pinned" and meta["deps"] == ""
+    assert meta["author"] == AUTHOR and meta["sender"] == "author-key"
+    assert "manifest" not in meta          # the carried state keeps fields only
+    # A spoof alone registers nothing on a chain-backed close.
+    alone = compute_tool_mint([spoof], registrations={}, rep_shares=SHARES,
+                              review_snapshot=_bonded())
+    assert digest not in alone["registrations_next"]
