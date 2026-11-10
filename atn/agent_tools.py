@@ -1452,6 +1452,21 @@ _TOOLS: list[ToolDefinition] = [
                     "description": "Optional JSON schema of the service's result.",
                     "additionalProperties": True,
                 },
+                "protocol": {
+                    "type": "object",
+                    "description": "Makes the service a two-way stream: the "
+                                   "application protocol buyers speak on it, "
+                                   "{id: name/version such as 'openai-chat/1' "
+                                   "or 'webrtc-sdp/1', description}. The "
+                                   "backing_tool is then the local address the "
+                                   "stream is piped to, 'tcp://127.0.0.1:<port>'.",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "description": {"type": "string"},
+                    },
+                    "required": ["id"],
+                    "additionalProperties": False,
+                },
                 "endpoint_hint": {"type": "string", "description": "Optional reachability hint (advisory)."},
                 "image_uri": {
                     "type": "string",
@@ -3568,6 +3583,8 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
             endpoint_hint=str(input.get("endpoint_hint") or ""),
             image_uri=str(input.get("image_uri") or "").strip(),
             inference=inference,
+            protocol=input.get("protocol") if isinstance(
+                input.get("protocol"), dict) else None,
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}

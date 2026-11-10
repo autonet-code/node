@@ -2024,6 +2024,10 @@ class WebSocketBridge:
                     image_uri=str(msg.get("image_uri") or "").strip(),
                     inference=inference,
                     version_of=msg.get("version_of"),
+                    # A stream service's application protocol {id,
+                    # description} (Decision 2026-11-10).
+                    protocol=msg.get("protocol") if isinstance(
+                        msg.get("protocol"), dict) else None,
                 )
             except (ValueError, RuntimeError) as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}

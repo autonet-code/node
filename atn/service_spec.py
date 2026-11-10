@@ -30,6 +30,7 @@ buyer can check throughput against what that hardware documents.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 SERVICE_SPEC_KIND = "service_spec"
@@ -63,6 +64,13 @@ DEFAULT_MAX_INPUT_CHARS = 64_000
 # a sponsor's grant) or generate no text (``jev``).
 NOT_UPSTREAM_PROVIDERS = frozenset({"service", "rpb", "jev", "external"})
 
+# A stream service's application protocol: a name and a version number,
+# "openai-chat/1", "webrtc-sdp/1" (Decision 2026-11-10, a stream between
+# buyer and seller). The network carries the bytes; what they mean is this
+# protocol, the parties' business.
+PROTOCOL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}/[0-9]{1,9}$")
+MAX_PROTOCOL_DESCRIPTION = 2000
+
 
 def inference_input_chars(messages: Any, system: str = "") -> int:
     """The size an inference request is bounded by: its messages as compact
@@ -87,6 +95,7 @@ def build_service_spec(
     inference: Optional[Dict[str, Any]] = None,
     version_of: Optional[str] = None,
     created_ts: int = 0,
+    protocol: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble and validate a service-spec payload.
 
@@ -114,6 +123,11 @@ def build_service_spec(
     post-signature) but, like ``image_uri``, is NOT part of
     ``service_embedding_text`` — the name/description carry the
     semantics, a model id is plumbing.
+
+    ``protocol`` (``{id, description}``, Decision 2026-11-10) makes the
+    service a stream: buyers open ``/autonet/service-stream/1.0.0`` to the
+    provider and speak the named application protocol on it (``id`` is a
+    name and a version, "openai-chat/1"; ``description`` is free text).
     """
     spec: Dict[str, Any] = {
         "kind": SERVICE_SPEC_KIND,
@@ -137,6 +151,8 @@ def build_service_spec(
         spec["hardware"] = hardware
     if inference is not None:
         spec["inference"] = normalize_inference(inference)
+    if protocol is not None:
+        spec["protocol"] = normalize_protocol(protocol)
 
     errors = validate_service_spec(spec)
     if errors:
@@ -196,7 +212,53 @@ def validate_service_spec(payload: Dict[str, Any]) -> List[str]:
     if inference is not None:
         errors.extend(validate_inference(inference))
 
+    if "protocol" in payload:
+        errors.extend(validate_protocol(payload.get("protocol")))
+
     return errors
+
+
+def validate_protocol(protocol: Any) -> List[str]:
+    """Shape-check a ``protocol`` block: ``{id, description}``, ``id`` a
+    name and a version number ("openai-chat/1"), ``description`` free text
+    (may be empty)."""
+    if not isinstance(protocol, dict):
+        return ["protocol must be a dict of {id, description}"]
+    errors: List[str] = []
+    pid = protocol.get("id")
+    if not isinstance(pid, str) or not PROTOCOL_ID_RE.match(pid):
+        errors.append("protocol.id must be a name and a version number, "
+                      "e.g. 'openai-chat/1' or 'webrtc-sdp/1'")
+    desc = protocol.get("description", "")
+    if not isinstance(desc, str):
+        errors.append("protocol.description must be text")
+    elif len(desc) > MAX_PROTOCOL_DESCRIPTION:
+        errors.append(f"protocol.description is longer than "
+                      f"{MAX_PROTOCOL_DESCRIPTION} characters")
+    extra = sorted(set(protocol) - {"id", "description"})
+    if extra:
+        errors.append(f"protocol has unknown keys {extra}")
+    return errors
+
+
+def normalize_protocol(protocol: Any) -> Any:
+    """Trim a protocol block's ``id`` and ``description`` and default the
+    description to "". Other keys are kept, so the validator refuses them
+    instead of the digest silently dropping them."""
+    if not isinstance(protocol, dict):
+        return protocol
+    out = dict(protocol)
+    if isinstance(out.get("id"), str):
+        out["id"] = out["id"].strip()
+    desc = out.get("description", "")
+    out["description"] = desc.strip() if isinstance(desc, str) else desc
+    return out
+
+
+def stream_protocol(payload: Any) -> Dict[str, Any]:
+    """A stream service's application protocol block, or ``{}``."""
+    block = payload.get("protocol") if isinstance(payload, dict) else None
+    return block if isinstance(block, dict) else {}
 
 
 def _positive_int(value: Any) -> bool:

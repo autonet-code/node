@@ -194,6 +194,7 @@ class ServiceStore:
         image_uri: str = "",
         inference: dict[str, Any] | None = None,
         version_of: str | None = None,
+        protocol: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build, sign, blob-store, and persist a service spec. Returns
         ``{"digest", "spec"}`` or raises ValueError on bad input.
@@ -239,6 +240,7 @@ class ServiceStore:
             inference=inference,
             version_of=version_of,
             created_ts=int(time.time()),
+            protocol=protocol,
         )
         self._sign(author, spec)
 
