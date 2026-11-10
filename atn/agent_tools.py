@@ -1549,6 +1549,35 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="open_service_stream",
+        description=(
+            "Open a paid two-way stream to a stream service (one whose spec "
+            "names a 'protocol', such as 'openai-chat/1' or 'webrtc-sdp/1') "
+            "and get a local port for it: connect one program to "
+            "127.0.0.1:<port> and speak that protocol; the bytes reach the "
+            "provider's application. The daemons connect directly when the "
+            "provider is reachable, else through a relay. Payment: vouchers "
+            "on your payment channel to the provider, each paying for "
+            "'units' units, sent as the provider asks while it serves; a "
+            "voucher the provider never uses is not paid. The stream ends "
+            "when your program disconnects (or when nobody connects within "
+            "5 minutes). Name the service by 'service_id' or by "
+            "'spec_digest' with 'provider_address'. Returns {port, path, "
+            "protocol, units, request_id}."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "service_id": {"type": "integer", "description": "The service's number in the ServiceRegistry (service_id from find_services)."},
+                "spec_digest": {"type": "string", "description": "Or: the service's spec digest, with provider_address."},
+                "provider_address": {"type": "string", "description": "The provider's address (0x...). Needed with spec_digest."},
+                "args": {"type": "object", "description": "Optional opening arguments for the provider's application.", "additionalProperties": True},
+                "units": {"type": "integer", "description": "Units each voucher pays for (default 1): more means fewer vouchers and more paid ahead."},
+                "deposit": {"type": "integer", "description": "Optional: ATN base units to escrow if a new channel to this provider is opened."},
+            },
+        },
+    ),
+    ToolDefinition(
         name="close_service_channel",
         description=(
             "Close your payment channel to a service provider. The provider "
@@ -3798,6 +3827,55 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         return reply
 
 
+async def _open_service_stream(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Buyer: a paid stream to a stream service, handed to a local program
+    on a 127.0.0.1 port (atn/service_streams.py; docs/services_market.md,
+    Decision 2026-11-10 "a stream between buyer and seller")."""
+    from . import service_client
+    from .service_streams import open_local_stream
+
+    provider_address = str(input.get("provider_address") or "").strip()
+    spec_digest = service_client.normalize_digest(str(input.get("spec_digest") or ""))
+    args = input.get("args") if input.get("args") is not None else {}
+    if not isinstance(args, dict):
+        return {"error": "'args' must be an object"}
+    try:
+        units = max(1, int(input.get("units") or 1))
+        deposit = int(input.get("deposit") or 0)
+    except (TypeError, ValueError):
+        return {"error": "units and deposit must be integers"}
+    entry: dict[str, Any] | None = None
+    if input.get("service_id") not in (None, ""):
+        try:
+            number = int(str(input.get("service_id")).strip())
+        except (TypeError, ValueError):
+            return {"error": "'service_id' is the service's number from find_services"}
+        entry = await service_client.read_service(runtime._config.rpb, number)
+        if entry.get("error"):
+            return {"error": str(entry["error"])}
+        if not entry.get("active"):
+            return {"error": "that service is retired"}
+        spec_digest = service_client.normalize_digest(str(entry.get("spec_digest") or ""))
+        provider_address = str(entry.get("provider") or "")
+    elif not (spec_digest and provider_address):
+        return {"error": "Name the service: 'service_id', or 'spec_digest' with "
+                         "'provider_address'"}
+    blocked = await _sanctioned(runtime, provider_address, "buy services from")
+    if blocked:
+        return blocked
+    caller_id = input.get("_caller_id")
+    defn = runtime.get_agent(caller_id) if caller_id else None
+    payer = defn.identity.address if defn and defn.identity else ""
+    payer_key = ""
+    if caller_id and not is_owner_caller(caller_id):
+        payer_key = runtime.registry.get_agent_key(caller_id) or ""
+    return await open_local_stream(
+        runtime, payer_key=payer_key, payer=payer,
+        provider_address=provider_address, spec_digest=spec_digest, args=args,
+        units=units, deposit=deposit,
+        ask=int(entry.get("ask_amount") or 0) if entry is not None else None)
+
+
 async def _close_service_channel(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Start closing this agent's payment channel to a provider; the unspent
     deposit is withdrawn automatically once the challenge window passes."""
@@ -4511,10 +4589,11 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # the consumer half (sign a payForService transfer, then cross-daemon
     # invoke with the proof). Kept off the progressive surface.
     "services": {"find_services", "register_service",
-                 "pay_for_service", "request_service", "close_service_channel"},
+                 "pay_for_service", "request_service", "close_service_channel",
+                 "open_service_stream"},
     # The buying half alone, granted to external agents by default.
     "services_buy": {"find_services", "pay_for_service", "request_service",
-                     "close_service_channel"},
+                     "close_service_channel", "open_service_stream"},
     # User-memory bundle: read + write the dossier (USER.md). One grant —
     # an agent trusted to know the user is trusted to keep the record
     # current. Assignable to ANY agent; nothing about it is Kevin-specific.
@@ -5763,6 +5842,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "register_service": _register_service,
     "pay_for_service": _pay_for_service,
     "request_service": _request_service,
+    "open_service_stream": _open_service_stream,
     "close_service_channel": _close_service_channel,
     # Manual compaction (§15)
     "compact_agent": _compact_agent,

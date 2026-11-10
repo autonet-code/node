@@ -243,6 +243,7 @@ async def test():
     tool_names = {t.name for t in tools}
     expected = {
         "find_services", "register_service", "request_service", "pay_for_service", "close_service_channel",
+        "open_service_stream",
         "list_agents", "get_agent", "create_agent", "update_agent", "remove_agent",
         "activate_agent", "deactivate_agent", "trigger_run",
         "get_execution", "get_output", "kill_execution", "kill_agent",

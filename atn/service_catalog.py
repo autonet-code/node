@@ -95,6 +95,14 @@ def _norm(digest: Any) -> str:
     return str(digest or "").lower().removeprefix("0x")
 
 
+def _provider_reachable(provider: str) -> Optional[bool]:
+    try:
+        from .service_streams import provider_reachable
+        return provider_reachable(str(provider or ""))
+    except Exception:  # noqa: BLE001 (display only)
+        return None
+
+
 def announcement(spec: dict[str, Any], service_id: int) -> bytes:
     """The gossip message announcing one registered spec."""
     return json.dumps({"v": ANNOUNCEMENT_VERSION,
@@ -442,6 +450,10 @@ class ServiceCatalog:
             "inference": spec.get("inference") if isinstance(spec.get("inference"), dict) else {},
             "owned": digest in own,
             "known_spec": bool(spec),
+            # Whether the provider's daemon can be dialled directly (its
+            # libp2p capability); None until known. Unreachable providers are
+            # served through a relay.
+            "reachable": _provider_reachable(entry.get("provider", "")),
         }
 
     # ------------------------------------------------------------------

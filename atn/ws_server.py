@@ -2086,8 +2086,13 @@ class WebSocketBridge:
                     "registered_ts": record.registered_ts,
                 })
             summary = self.runtime.service_store.summary()
+            # Whether buyers can dial this daemon directly, with advice when
+            # they cannot (Decision 2026-11-10, a stream between buyer and
+            # seller: providers are encouraged to be reachable).
+            from .service_streams import own_reachability
             return {"msg_id": msg_id, "ok": True,
-                    "result": {"services": services, "summary": summary}}
+                    "result": {"services": services, "summary": summary,
+                               "reachability": own_reachability()}}
 
         # The MARKET view: every service on-chain, not just what this daemon
         # published. `list_services` reads the daemon-local store, so before

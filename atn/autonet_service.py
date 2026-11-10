@@ -895,6 +895,9 @@ class AutonetBridge:
             return
         from .service_client import host_service_handler
         host.set_service_handler(host_service_handler(serve, loop))
+        # Service streams (/autonet/service-stream/1.0.0) pass the same gate.
+        from .service_streams import stream_handler_for
+        host.set_service_stream_handler(stream_handler_for(serve, loop))
 
     async def _emit(self, event_type_name: str, data: dict[str, Any] | None = None) -> None:
         """Emit an event if the event bus is available."""
