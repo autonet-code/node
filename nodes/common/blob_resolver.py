@@ -96,10 +96,6 @@ class HostBlobServer:
 
         self._serve = _serve
         host.set_blob_handler(_serve)
-        # Blobs this host relays for a peer (two-hop fetch) are cached here.
-        set_sink = getattr(host, "set_blob_relay_sink", None)
-        if set_sink is not None:
-            set_sink(lambda _cid, data: self.put(data))
 
     def put(self, blob: bytes) -> str:
         cid = cid_for_blob(blob)
@@ -146,6 +142,33 @@ class HostBlobServer:
         return None
 
 
+def known_peer_ids(host: Any) -> list:
+    """Distinct peers worth asking for a blob: ``host``'s connected peers
+    first, then peers known only from capability gossip. Its own id is
+    skipped."""
+    out: list = []
+    try:
+        out.extend(host.get_connected_peers())
+    except Exception:
+        pass
+    try:
+        caps = host.known_capabilities
+    except Exception:
+        caps = {}
+    for cap in caps.values():
+        pid_str = getattr(cap, "peer_id", "")
+        if pid_str:
+            out.append(pid_str)
+    own = getattr(host, "peer_id", "")
+    seen: set = set()
+    peers = []
+    for pid in out:
+        if pid and pid != own and pid not in seen:
+            seen.add(pid)
+            peers.append(pid)
+    return peers
+
+
 _HOST_SERVER_LOCK = threading.Lock()
 _HOST_SERVER_ATTR = "_autonet_blob_server"
 
@@ -169,17 +192,13 @@ class LibP2PBlobResolver:
     ``/autonet/blob/1.0.0``. Any number of resolvers on one host share
     that map; none of them replaces the handler.
 
-    Reads: shared map first; on miss, ask every connected or advertised
-    peer at once over libp2p (first verified answer wins; a peer that
-    misses forwards the request one hop to its own peers). The host already verifies
-    content-hash integrity inside ``fetch_blob``; this resolver
-    additionally confirms the returned hex matches the requested
-    CID so a buggy peer can't poison our cache.
-
-    Phase 10.3d: minimal implementation. No DHT/announce — relies on
-    peers being connected (via mDNS / bootstrap) and us iterating
-    them. Sufficient for the two-daemon smoke test; production may
-    want explicit content advertisement.
+    Reads: shared map first; on miss, the host's network fetch: every
+    connected or advertised peer at once, and meanwhile the blob's DHT
+    providers (dialled directly or through a relay circuit); the first
+    verified answer wins. The host already verifies content-hash
+    integrity inside ``fetch_blob``; this resolver additionally confirms
+    the returned hex matches the requested CID so a buggy peer can't
+    poison our cache.
     """
 
     def __init__(self, host: Any, *, fetch_timeout: float = 10.0):
@@ -206,9 +225,6 @@ class LibP2PBlobResolver:
             return blob
 
         peer_ids = self._known_peer_ids()
-        if not peer_ids:
-            logger.debug("LibP2PBlobResolver: no known peers to query for %s", cid[:16])
-            return None
 
         blob = self._fetch_from_peers(peer_ids, cid)
         if blob is None:
@@ -238,29 +254,7 @@ class LibP2PBlobResolver:
             logger.debug("LibP2PBlobResolver: offer of %d blobs failed: %s", len(cids), e)
 
     def _known_peer_ids(self) -> list:
-        """Distinct peers worth asking: connected peers first, then peers
-        known only from capability gossip. Our own id is skipped."""
-        out: list = []
-        try:
-            out.extend(self._host.get_connected_peers())
-        except Exception:
-            pass
-        try:
-            caps = self._host.known_capabilities
-        except Exception:
-            caps = {}
-        for cap in caps.values():
-            pid_str = getattr(cap, "peer_id", "")
-            if pid_str:
-                out.append(pid_str)
-        own = getattr(self._host, "peer_id", "")
-        seen: set = set()
-        peers = []
-        for pid in out:
-            if pid and pid != own and pid not in seen:
-                seen.add(pid)
-                peers.append(pid)
-        return peers
+        return known_peer_ids(self._host)
 
     def _fetch_from_peers(self, peer_ids: list, cid: str) -> Optional[bytes]:
         """Cross-thread bridge: schedule host.fetch_blob_from_peers via the
@@ -272,6 +266,10 @@ class LibP2PBlobResolver:
             import trio
 
             async def _do():
+                network = getattr(self._host, "fetch_blob_from_network", None)
+                if network is not None:
+                    return await network(cid, peer_ids=peer_ids,
+                                         timeout_per_peer=self._fetch_timeout)
                 return await self._host.fetch_blob_from_peers(
                     peer_ids, cid, timeout_per_peer=self._fetch_timeout,
                 )

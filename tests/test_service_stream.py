@@ -1,7 +1,11 @@
-"""Relayed connections (circuit relay v2) and paid service streams between
-real localhost libp2p hosts (nodes/common/circuit_relay.py,
-nodes/common/service_stream.py; docs/services_market.md, Decision
-2026-11-10 "a stream between buyer and seller").
+"""Paid service streams between real localhost libp2p hosts over the mesh
+(nodes/common/service_stream.py; docs/services_market.md, Decision
+2026-11-10 "a stream between buyer and seller"; docs/p2p_networking.md):
+direct connections, circuit relay v2 circuits through a relay, the relay's
+limits (unlimited unless the operator caps them) and the payment handshake.
+A host built with ``advertise_listen_addrs=False`` advertises only its
+circuit addresses, which is how a NAT'd daemon looks to the others; hole
+punching itself needs real NATs (scripts/mesh_nat_harness.py).
 
 Run: python -m pytest tests/test_service_stream.py -v
 """
@@ -16,8 +20,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 import trio
 
-from nodes.common.circuit_relay import RelayCaps, dial_via_relay, is_relayed
-from nodes.common.p2p import AutonetHost, NodeCapability
+from nodes.common import p2p_mesh
+from nodes.common.p2p import (
+    RELAY_CIRCUIT_BYTES,
+    RELAY_CIRCUIT_DURATION,
+    RELAY_UNLIMITED_BYTES,
+    AutonetHost,
+    NodeCapability,
+)
 from nodes.common.service_stream import (
     Accept,
     StreamClosed,
@@ -39,28 +49,41 @@ def trio_test(fn):
     return run
 
 
-def _host(name, relay=False, caps=None, announce=None, transport="tcp"):
+def _host(name, *, relay=False, nat=False, limits=None, announce=None,
+          transport="tcp+ws", mesh_interval=0.5):
+    """A relay (``relay_hop``, the relay role), a NAT'd daemon (circuit
+    addresses only) or a plain daemon, on the mesh."""
     cap = NodeCapability(peer_id="", node_id=name, roles=["relay"]) if relay else None
     h = AutonetHost(node_id=name, listen_host="127.0.0.1", capability=cap,
-                    announce_addrs=announce, transport=transport)
-    if relay:
-        h.circuit_relay_caps = caps or RelayCaps()
+                    announce_addrs=announce, transport=transport,
+                    relay_hop=relay, advertise_listen_addrs=not nat,
+                    mesh_interval=mesh_interval)
+    if limits:
+        h.relay_limits = dict(limits)
     return h
 
 
-async def _meet(relay, *peers):
-    """Each peer dials the relay and both sides learn each other's
-    capability (a relay and a daemon advertise on an interval)."""
-    for p in peers:
-        assert await p.connect_to_peer(relay.addrs[0])
-    await relay.advertise_capability()
-    for p in peers:
-        await p.advertise_capability()
-    with trio.fail_after(10):
-        for p in peers:
-            while relay.peer_id not in p.known_capabilities or \
-                    p.peer_id not in relay.known_capabilities:
-                await trio.sleep(0.05)
+async def _until(cond, timeout=20.0, step=0.1):
+    with trio.move_on_after(timeout):
+        while not cond():
+            await trio.sleep(step)
+    return cond()
+
+
+def _direct_addr(host, ws=False):
+    return next(a for a in host.addrs
+                if p2p_mesh.is_ws(a) == ws and not p2p_mesh.is_circuit(a))
+
+
+async def _natd_pair(relay, a, c, ws=False):
+    """a and c dial only the relay; c reserves on it and advertises its
+    circuit address, which a learns (as capability gossip or the DHT would
+    tell it)."""
+    assert await a.connect_to_peer(_direct_addr(relay, ws))
+    assert await c.connect_to_peer(_direct_addr(relay, ws))
+    assert await _until(lambda: relay.peer_id in c.reservations, 20)
+    assert any(p2p_mesh.is_circuit(x) for x in c.addrs), c.addrs
+    a._known_capabilities[c.peer_id] = c._capability
 
 
 def _echo_handler(host):
@@ -104,94 +127,91 @@ async def _echo_through(host, peer_id, nbytes):
 
 
 # ---------------------------------------------------------------------------
-# Circuit relay
+# Relayed connections: circuit relay v2 on the mesh
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("transport", ["tcp", "ws"])
-def test_a_relayed_connection_carries_bulk_both_ways(transport):
-    """A and C dialled out to R only. A gets a connection to C through R
-    that carries megabytes (py-libp2p 0.6's own relay breaks past 64 KiB),
-    on both transports the daemon runs."""
+def test_relayed_connections_are_unlimited_by_default():
+    """Decision 2026-11-10: no duration cap and no data cap unless the
+    relay's operator sets one. (py-libp2p 0.8.1 reads a data limit of 0 as
+    zero bytes in its per-reservation fallback, so "no cap" is a count no
+    circuit reaches.)"""
+    assert RELAY_CIRCUIT_DURATION == 0
+    assert RELAY_CIRCUIT_BYTES == RELAY_UNLIMITED_BYTES >= 1 << 60
+
+
+@pytest.mark.parametrize("ws", [False, True])
+def test_a_relayed_connection_carries_bulk_both_ways(ws):
+    """a and c dialled out to the relay only. a reaches c through c's
+    circuit and the connection carries megabytes both ways, on TCP and on
+    WebSocket."""
     async def main():
-        a, r, c = (_host("nat-a", transport=transport),
-                   _host("relay", relay=True, transport=transport),
-                   _host("nat-c", transport=transport))
-        async with a.run(), r.run(), c.run():
+        relay = _host("relay", relay=True)
+        a, c = _host("nat-a", nat=True), _host("nat-c", nat=True)
+        async with relay.run(), a.run(), c.run():
             _echo_handler(c)
-            await _meet(r, a, c)
-            assert c.peer_id not in a.get_connected_peers()
-            with trio.fail_after(20):
-                conn = await dial_via_relay(a._host, r.peer_id, c.peer_id)
-            assert is_relayed(conn)
+            await _natd_pair(relay, a, c, ws=ws)
+            assert await a.reach_peer(c.peer_id, timeout=20)
             assert a.connection_path(c.peer_id) == "relayed"
-            assert c.connection_path(a.peer_id) == "relayed"
-            assert a.connection_path(r.peer_id) == "direct"
-            with trio.fail_after(60):
+            assert a.connection_path(relay.peer_id) == "direct"
+            with trio.fail_after(90):
                 assert await _echo_through(a, c.peer_id, 3 * 1024 * 1024)
-            assert r.circuit_relay.bytes_relayed >= 6 * 1024 * 1024
     trio.run(main)
 
 
 @trio_test
-async def test_a_relay_only_reaches_peers_connected_to_it():
-    a, r, c = _host("a"), _host("relay", relay=True), _host("lonely")
-    async with a.run(), r.run(), c.run():
-        await _meet(r, a)
-        with trio.fail_after(20), pytest.raises(ConnectionError, match="not connected"):
-            await dial_via_relay(a._host, r.peer_id, c.peer_id)
-        assert r.circuit_relay.active == 0
-
-
-@trio_test
-async def test_a_host_without_relay_caps_relays_nothing():
-    a, d, c = _host("a"), _host("daemon-d"), _host("c")
-    async with a.run(), d.run(), c.run():
-        assert await a.connect_to_peer(d.addrs[0])
-        assert await c.connect_to_peer(d.addrs[0])
-        with trio.fail_after(20), pytest.raises(ConnectionError, match="no circuit"):
-            await dial_via_relay(a._host, d.peer_id, c.peer_id)
-
-
-@trio_test
 async def test_the_operators_caps_end_circuits():
-    """Unlimited by default; a capped relay ends a circuit at its byte cap
-    or its duration cap, and refuses circuits past its concurrent cap."""
-    caps = RelayCaps(max_bytes=200_000, max_circuits=1)
-    a, r, c = _host("a"), _host("relay", relay=True, caps=caps), _host("c")
-    async with a.run(), r.run(), c.run():
+    """A relay whose operator caps bytes ends a circuit past the cap; one
+    that caps duration ends it when the time runs out. (WebSocket only, so
+    DCUtR, which is TCP only and punches loopback at once, cannot move the
+    traffic off the circuit under test.)"""
+    relay = _host("relay", relay=True, limits={"bytes": 200_000}, transport="ws")
+    a = _host("nat-a", nat=True, mesh_interval=0, transport="ws")
+    c = _host("nat-c", nat=True, mesh_interval=0, transport="ws")
+    async with relay.run(), a.run(), c.run():
+        assert relay._circuit_protocol.limits.data == 200_000
         _echo_handler(c)
-        await _meet(r, a, c)
-        with trio.fail_after(20):
-            await dial_via_relay(a._host, r.peer_id, c.peer_id)
+        await _natd_pair(relay, a, c, ws=True)
+        assert await a.reach_peer(c.peer_id, timeout=20)
+        assert a.connection_path(c.peer_id) == "relayed"
         ok = False
-        with trio.move_on_after(20):
+        with trio.move_on_after(30):
             try:
                 ok = await _echo_through(a, c.peer_id, 1024 * 1024)
             except Exception:
                 ok = False
         assert not ok
-        with trio.fail_after(10):
-            while r.circuit_relay.active:
-                await trio.sleep(0.05)
-        # One circuit at once: hold one open, the next is refused.
-        b = _host("b")
-        async with b.run():
-            await _meet(r, b)
-            with trio.fail_after(20):
-                await dial_via_relay(a._host, r.peer_id, c.peer_id)
-            with trio.fail_after(20), pytest.raises(ConnectionError, match="at most 1"):
-                await dial_via_relay(b._host, r.peer_id, c.peer_id)
 
-    timed = _host("relay2", relay=True, caps=RelayCaps(max_duration=1.0))
-    a, c = _host("a2"), _host("c2")
-    async with a.run(), timed.run(), c.run():
-        await _meet(timed, a, c)
-        with trio.fail_after(20):
-            await dial_via_relay(a._host, timed.peer_id, c.peer_id)
-        assert timed.circuit_relay.active == 1
-        with trio.fail_after(10):
-            while timed.circuit_relay.active:
-                await trio.sleep(0.05)
+    timed = _host("relay2", relay=True, limits={"duration": 2}, transport="ws")
+    a2 = _host("nat-a2", nat=True, mesh_interval=0, transport="ws")
+    c2 = _host("nat-c2", nat=True, mesh_interval=0, transport="ws")
+    async with timed.run(), a2.run(), c2.run():
+        assert timed._circuit_protocol.limits.duration == 2
+        _echo_handler(c2)
+        await _natd_pair(timed, a2, c2, ws=True)
+        assert await a2.reach_peer(c2.peer_id, timeout=20)
+        assert a2.connection_path(c2.peer_id) == "relayed"
+        await trio.sleep(4)
+        ok = False
+        with trio.move_on_after(15):
+            try:
+                ok = await _echo_through(a2, c2.peer_id, 64 * 1024)
+            except Exception:
+                ok = False
+        assert not ok
+
+
+@trio_test
+async def test_a_relay_without_circuits_holds_no_reservation():
+    """atn relay --no-circuits: gossip, blobs and service requests only."""
+    relay = AutonetHost(node_id="relay", listen_host="127.0.0.1",
+                        capability=NodeCapability(peer_id="", node_id="relay",
+                                                  roles=["relay"]),
+                        relay_hop=False, mesh_interval=0.5)
+    c = _host("nat-c", nat=True)
+    async with relay.run(), c.run():
+        assert await c.connect_to_peer(_direct_addr(relay))
+        await trio.sleep(3)
+        assert relay.peer_id not in c.reservations
 
 
 # ---------------------------------------------------------------------------
@@ -306,48 +326,37 @@ async def test_a_direct_stream_to_a_connected_provider():
 
 @trio_test
 async def test_a_reachable_provider_is_dialled_directly_not_relayed():
-    """The buyer knows the provider only through a relay, but the provider
-    advertises a reachable address: the stream goes direct."""
-    r = _host("relay", relay=True)
-    async with r.run():
-        seller = _host("seller", announce=["/ip4/127.0.0.1/tcp/0"])
-        # Announce the real port once it is known (a reachable daemon
-        # announces its public address).
-        buyer = _host("buyer")
-        async with seller.run(), buyer.run():
-            port = seller._listen_port_actual()
-            seller._announce_addrs = [f"/ip4/127.0.0.1/tcp/{port}"]
-            seller._announce_resolved = seller._resolve_announce_addrs()
-            seller._capability.listen_addrs = seller.addrs
-            seller._capability.reachable = True
-            seller.set_service_stream_handler(_Gate(app=_metered_echo, units=10))
-            await _meet(r, buyer, seller)
-            assert seller.peer_id not in buyer.get_connected_peers()
-            with trio.fail_after(20):
-                assert (await buyer.relay_peer_infos(seller.peer_id))[r.peer_id]["reachable"]
-            with trio.fail_after(30):
-                async with buyer.service_stream(seller.peer_id, _opening()) as s:
-                    assert s.path == "direct" and s.relay == ""
-                    assert await _talk(s, 2) == ["msg 0", "msg 1"]
-            assert buyer.connection_path(seller.peer_id) == "direct"
-            assert r.circuit_relay.total == 0
+    """The buyer knows the provider only from its capability (its listen
+    addresses, as gossip carries them): the stream goes direct."""
+    relay = _host("relay", relay=True)
+    buyer, seller = _host("buyer", nat=True), _host("seller")
+    async with relay.run(), buyer.run(), seller.run():
+        seller.set_service_stream_handler(_Gate(app=_metered_echo, units=10))
+        assert await buyer.connect_to_peer(_direct_addr(relay))
+        assert await seller.connect_to_peer(_direct_addr(relay))
+        assert seller.peer_id not in buyer.get_connected_peers()
+        buyer._known_capabilities[seller.peer_id] = seller._capability
+        with trio.fail_after(30):
+            async with buyer.service_stream(seller.peer_id, _opening()) as s:
+                assert s.path == "direct"
+                assert await _talk(s, 2) == ["msg 0", "msg 1"]
+        assert buyer.connection_path(seller.peer_id) == "direct"
 
 
-@pytest.mark.parametrize("transport", ["tcp", "ws"])
-def test_a_stream_through_a_relay(transport):
-    """Neither side can dial the other: the stream runs over a circuit
-    through the relay, and the circuit closes with the stream."""
+@pytest.mark.parametrize("ws", [False, True])
+def test_a_stream_through_a_relay(ws):
+    """Neither side can dial the other: the stream runs over the seller's
+    circuit through the relay, and carries bulk."""
     async def main():
-        buyer, r, seller = (_host("nat-buyer", transport=transport),
-                            _host("relay", relay=True, transport=transport),
-                            _host("nat-seller", transport=transport))
+        relay = _host("relay", relay=True)
+        buyer, seller = _host("nat-buyer", nat=True), _host("nat-seller", nat=True)
         gate = _Gate(app=_metered_echo, units=50)
-        async with buyer.run(), r.run(), seller.run():
+        async with relay.run(), buyer.run(), seller.run():
             seller.set_service_stream_handler(gate)
-            await _meet(r, buyer, seller)
-            with trio.fail_after(30):
+            await _natd_pair(relay, buyer, seller, ws=ws)
+            with trio.fail_after(60):
                 async with buyer.service_stream(seller.peer_id, _opening()) as s:
-                    assert s.path == "relayed" and s.relay == r.peer_id
+                    assert s.path == "relayed"
                     assert await _talk(s, 3) == ["msg 0", "msg 1", "msg 2"]
                     big = bytes(300_000)
                     await s.send(big)
@@ -358,10 +367,6 @@ def test_a_stream_through_a_relay(transport):
                         back.extend(chunk)
                     assert bytes(back) == big
             assert gate.kept == ["open-1"]
-            with trio.fail_after(10):
-                while buyer.connection_path(seller.peer_id) is not None:
-                    await trio.sleep(0.05)
-            assert r.circuit_relay.total == 1
     trio.run(main)
 
 
@@ -466,11 +471,13 @@ async def test_a_free_stream_is_unmetered():
 
 @trio_test
 async def test_no_path_raises_before_anything_is_sent():
-    buyer, r, lonely = _host("buyer"), _host("relay", relay=True), _host("lonely")
+    """A NAT'd provider with no relay reservation and no known address."""
+    buyer, r = _host("buyer"), _host("relay", relay=True)
+    lonely = _host("lonely", nat=True)
     async with buyer.run(), r.run(), lonely.run():
         lonely.set_service_stream_handler(_Gate())
-        await _meet(r, buyer)
-        with trio.fail_after(30), pytest.raises(ConnectionError, match="no path"):
+        assert await buyer.connect_to_peer(_direct_addr(r))
+        with trio.fail_after(60), pytest.raises(ConnectionError, match="no path"):
             async with buyer.service_stream(lonely.peer_id, _opening()):
                 pass
 
@@ -480,12 +487,20 @@ async def test_reachability_is_learned_through_a_relay():
     """A buyer not connected to a provider learns from a relay whether the
     provider says it is reachable (what catalog rows show)."""
     r = _host("relay", relay=True)
-    buyer, nat = _host("buyer"), _host("nat")
+    buyer, nat = _host("buyer"), _host("nat", nat=True)
     reachable = _host("public", announce=["/ip4/127.0.0.1/tcp/4999"])
     async with r.run(), buyer.run(), nat.run(), reachable.run():
         assert reachable._capability.reachable is True
         assert nat._capability.reachable is False
-        await _meet(r, buyer, nat, reachable)
+        for p in (buyer, nat, reachable):
+            assert await p.connect_to_peer(_direct_addr(r))
+        await r.advertise_capability()
+        for p in (buyer, nat, reachable):
+            await p.advertise_capability()
+        with trio.fail_after(10):
+            for p in (buyer, nat, reachable):
+                while p.peer_id not in r.known_capabilities:
+                    await trio.sleep(0.05)
         assert buyer.peer_reachable(nat.peer_id) is None   # asks in the background
         with trio.fail_after(10):
             while buyer.peer_reachable(nat.peer_id) is None or \
@@ -501,6 +516,8 @@ async def test_reachability_is_learned_through_a_relay():
 # ---------------------------------------------------------------------------
 
 def test_relay_flags_and_env_set_the_caps(monkeypatch):
+    """Unlimited unless the operator caps it (0 = no limit); the caps reach
+    the host as ``relay_limits`` (nodes/relay.py run)."""
     from nodes import relay
     args = relay.parse_args(["--data-dir", "x"])
     assert (args.circuit_max_duration, args.circuit_max_bytes,
@@ -518,7 +535,8 @@ def test_relay_flags_and_env_set_the_caps(monkeypatch):
 @trio_test
 async def test_a_stream_crosses_atn_relay(tmp_path):
     """The relay node relays circuits (unlimited by default): two NAT'd
-    daemons connected only to it get a paid stream."""
+    daemons connected only to it get a paid stream; the buyer finds the
+    seller's circuit address in the relay's DHT."""
     from nodes import relay
     args = relay.parse_args([
         "--port", "0", "--host", "127.0.0.1", "--no-upnp", "--transport", "tcp",
@@ -531,8 +549,9 @@ async def test_a_stream_crosses_atn_relay(tmp_path):
             real_print = builtins.print
 
             def _capture(*a, **kw):
-                if a and str(a[0]).startswith("relay address: "):
-                    relay_addr.append(str(a[0])[len("relay address: "):])
+                text = str(a[0]) if a else ""
+                if text.startswith("relay address: ") and "/ws" not in text:
+                    relay_addr.append(text[len("relay address: "):])
                 real_print(*a, **kw)
             builtins.print = _capture
             try:
@@ -541,20 +560,20 @@ async def test_a_stream_crosses_atn_relay(tmp_path):
                 builtins.print = real_print
 
         nursery.start_soon(_relay)
-        with trio.fail_after(10):
+        with trio.fail_after(15):
             while not relay_addr:
                 await trio.sleep(0.05)
-        buyer = AutonetHost(node_id="nat-buyer", listen_host="127.0.0.1",
-                            bootstrap_peers=[relay_addr[0]])
-        seller = AutonetHost(node_id="nat-seller", listen_host="127.0.0.1")
+        relay_id = relay_addr[0].split("/p2p/")[1]
+        buyer = _host("nat-buyer", nat=True)
+        seller = _host("nat-seller", nat=True)
         gate = _Gate(app=_metered_echo, units=10)
         async with buyer.run(), seller.run():
             seller.set_service_stream_handler(gate)
             assert await seller.connect_to_peer(relay_addr[0])
-            with trio.fail_after(10):
-                while relay_addr[0].split("/p2p/")[1] not in buyer.get_connected_peers():
-                    await trio.sleep(0.05)
-            with trio.fail_after(30):
+            assert await buyer.connect_to_peer(relay_addr[0])
+            assert await _until(lambda: relay_id in seller.reservations, 30)
+            buyer._known_capabilities[seller.peer_id] = seller._capability
+            with trio.fail_after(60):
                 async with buyer.service_stream(seller.peer_id, _opening()) as s:
                     assert s.path == "relayed"
                     assert await _talk(s, 3) == ["msg 0", "msg 1", "msg 2"]

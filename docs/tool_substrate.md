@@ -91,7 +91,7 @@ the network's judgement" and the reviewed own-share of Decision
   tool pays exactly the reserved amounts in the next close (the pay waits
   for the vote: the author is paid what the conclusion computed). A flag needs evidence: free text pointing into the code,
   kept by the reviewer's daemon as a content-addressed blob whose sha256
-  is `evidenceHash`, read with `fetch_evidence`.
+  is `evidenceHash` and announced in the DHT, read with `fetch_evidence`.
 - **Disqualified means unpaid, nothing else.** The tool stays in the
   library, in search with its ratings, and can be adopted. Positions (the
   head/mass geometry) became plain means: the carry bundle keeps
@@ -221,7 +221,8 @@ the network's judgement" and the reviewed own-share of Decision
   (`minilm.py`), run with onnxruntime and tokenizers (mean pool over the
   attention mask, L2 norm). The daemon fetches them on its first run in
   the background (Hugging Face first, then peers that serve them as
-  content-addressed blobs), checks the hashes at every start, and retries
+  content-addressed blobs, found through their DHT provider records like
+  tool blobs), checks the hashes at every start, and retries
   with backoff. Until it loads, results are keyword-only and the reply
   says so with the progress; manifests learned meanwhile are embedded
   once it loads. Each vector records model and revision; others are

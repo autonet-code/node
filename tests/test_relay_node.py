@@ -98,12 +98,15 @@ async def test_gossip_and_blobs_cross_the_relay(tmp_path):
             assert got[0] == b"event-batch"
 
             host_blob_server(c).put(blob)
-            relay_pid = relay_addr[0].split("/p2p/")[1]
-            with trio.fail_after(15):
-                fetched = await a.fetch_blob_from_peers([relay_pid], cid)
+            # The relay holds c's provider record; a finds c and dials it.
+            with trio.fail_after(30):
+                while not await c.provide_blob(cid):
+                    await trio.sleep(0.5)
+            with trio.fail_after(30):
+                fetched = await a.fetch_blob_from_network(cid)
+            # Through the DHT, or over a link c opened to a while
+            # announcing (a serves the DHT too): never through the relay.
             assert fetched == blob
-            # The relay kept the blob on disk.
-            assert (tmp_path / "relay" / "blobs").exists()
         nursery.cancel_scope.cancel()
 
 
@@ -223,5 +226,9 @@ async def test_offered_state_outlives_the_daemon_that_computed_it(tmp_path):
             with trio.fail_after(15):
                 fetched = await a.fetch_blob_from_peers([relay_pid], cid, hops=0)
             assert fetched == blob
+            # The relay announces what it keeps: the DHT names it.
+            with trio.fail_after(30):
+                while relay_pid not in [str(i.peer_id) for i in await a.find_blob_providers(cid)]:
+                    await trio.sleep(0.5)
 
         nursery.cancel_scope.cancel()

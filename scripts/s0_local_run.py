@@ -43,8 +43,10 @@ default ``<S0_DIR>/models``), fetched and verified once before they start.
 The collector writes ``<run>/epochs.jsonl`` (one line per anchor and per
 close, with the close's tool mint) and ``<run>/status.jsonl`` (per daemon,
 every poll); ``CLOSE`` lines name each concluding tool's weight, score
-(V x C x S) and mint, and the end of the run reports ``MINT``, ``BOUNTY``
-and ``VERDICT`` lines. Success, in the owner's
+(V x C x S) and mint, and the end of the run reports ``MINT``, ``BOUNTY``,
+``VERDICT`` and ``EVIDENCE`` lines (a household that neither wrote nor
+flagged the canary reads each flag's evidence by its hash, from the
+reviewer's daemon). Success, in the owner's
 words: the system works, epochs move forward with durations getting shorter
 with volume of activity, and nothing gets stuck.
 
@@ -52,9 +54,14 @@ Run:
     python scripts/s0_local_run.py                 # full run
     S0_MINUTES=20 python scripts/s0_local_run.py   # shorter activity phase
 
+The households in S0_MODEL_FROM_PEERS (default h4) get neither that
+directory nor Hugging Face: their model comes from the others, found
+through DHT provider records. The run logs each daemon's connections
+(direct or relayed, per peer) after onboarding and at the end.
+
 Env: S0_DIR (default D:/autonet_s0), S0_MINUTES (activity phase, default
 60), S0_KEEP=1 leaves everything running at the end (Ctrl+C to stop),
-S0_MODEL_DIR (the shared search model files),
+S0_MODEL_DIR (the shared search model files), S0_MODEL_FROM_PEERS,
 TRUSTLESS_CONTRACTS_DIR (default C:/code/dao/trustless-contracts).
 """
 from __future__ import annotations
@@ -82,6 +89,10 @@ KEEP = os.environ.get("S0_KEEP", "") == "1"
 # One copy of the search model for every daemon (atn/search_model.py reads
 # ATN_MODEL_DIR first): without it each daemon downloads 90 MB itself.
 MODEL_DIR = Path(os.environ.get("S0_MODEL_DIR") or (S0_DIR / "models"))
+# Households that get the search model from peers only (no ATN_MODEL_DIR,
+# Hugging Face unreachable): comma-separated names, "" for none.
+MODEL_FROM_PEERS = {n.strip() for n in os.environ.get("S0_MODEL_FROM_PEERS", "h4").split(",")
+                    if n.strip()}
 
 RPC_PORT = 8545
 # S2 VMs point this at the hub chain (https://rpc.autonet.computer/<token>).
@@ -352,9 +363,15 @@ class Household:
         env["KEYSTORE_DIR"] = str(self.home / ".atn" / "keystore")
         env["ATN_JURISDICTION_REGISTRY"] = registry
         env["ATN_JURISDICTION_RPC"] = RPC_URL
-        env["AUTONET_P2P_PORT"] = str(self.p2p_port)
+        env["AUTONET_P2P_PORT"] = str(self.p2p_port)          # WebSocket
+        env["AUTONET_P2P_TCP_PORT"] = str(self.p2p_port + 100)  # TCP
         env["AUTONET_P2P_HOST"] = "127.0.0.1"
-        env["AUTONET_P2P_TRANSPORT"] = "ws"
+        if self.name in MODEL_FROM_PEERS:
+            # No shared copy and Hugging Face unreachable: the search model
+            # can only come from the households that hold it, found through
+            # their DHT provider records.
+            env.pop("ATN_MODEL_DIR", None)
+            env["HF_ENDPOINT"] = "http://127.0.0.1:9"
         # Not ATN_DISABLE_PROVIDER_AUTODETECT: that test gate also stops the
         # review driver, so no review would ever reach ToolBond.
         return env
@@ -1050,6 +1067,44 @@ class Activity:
         except Exception as exc:  # noqa: BLE001
             log(f"VERDICT: read failed: {exc}")
 
+    async def report_evidence(self) -> int:
+        """The canary's malware flags, read by a household that neither
+        wrote nor flagged it: ``tool_round_reviews`` names each flag's
+        evidence hash (ToolBond's logs) and ``fetch_evidence`` gets the
+        blob from the reviewer's daemon, which provides it in the DHT.
+        Returns how many flags' evidence was read."""
+        digest = next((d for d, m in self.published.items() if m["name"] == CANARY), "")
+        author = (self.published.get(digest) or {}).get("author")
+        reader = next((h for h in self.hs
+                       if h.name not in HARM_REVIEWERS and h.name != author), None)
+        if not digest or reader is None:
+            log("EVIDENCE: no canary or no household to read its flags")
+            return 0
+        names = {h.operator.lower(): h.name for h in self.hs if h.operator}
+        try:
+            res = await reader.client.ok({"type": "tool_round_reviews", "digest": digest})
+        except Exception as exc:  # noqa: BLE001
+            log(f"EVIDENCE: tool_round_reviews failed: {exc}")
+            return 0
+        flags = {}
+        for r in res.get("reviews") or []:
+            if r.get("malware") and r.get("evidence_hash"):
+                flags.setdefault(r["evidence_hash"], names.get(r.get("reviewer", ""), "?"))
+        read = 0
+        for h, who in flags.items():
+            try:
+                ev = await reader.client.ok({"type": "fetch_evidence", "evidence_hash": h},
+                                            timeout=120.0)
+            except Exception as exc:  # noqa: BLE001
+                ev = {"error": str(exc)}
+            body = ev.get("evidence") if isinstance(ev.get("evidence"), dict) else {}
+            ok = bool(ev.get("found")) and body.get("manifest_digest") == digest
+            read += ok
+            log(f"EVIDENCE: {reader.name} read {who}'s flag on {CANARY} ({h[:12]}): "
+                f"found={ev.get('found')} {str(body.get('evidence') or ev.get('error') or ev.get('note'))[:80]}")
+        log(f"EVIDENCE: {read}/{len(flags)} malware flag(s) on {CANARY} read by {reader.name}")
+        return read
+
     def epoch_threshold(self) -> int:
         """Fees that end an epoch now: the target share of the supply."""
         return EPOCH_TARGET_SHARE * int(self.sub.functions.atnTotalSupply().call()) // 1_000_000
@@ -1139,6 +1194,37 @@ async def drain(act: Activity, cap_s: float = 900.0) -> None:
         await asyncio.sleep(max(0.0, TICK_SECS - (time.time() - t0)))
     log(f"drain: gave up after {cap_s:.0f}s; {LATE_TOOL[0]} "
         f"{'concluded' if LATE_TOOL[0] in act.concluded else 'not concluded'}")
+
+
+async def report_p2p(households: List["Household"], relay_peer: str, when: str) -> bool:
+    """Each daemon's libp2p connections (autonet_status "p2p"), by peer
+    name: direct or relayed. True when every daemon has a direct connection
+    to every other daemon."""
+    st: Dict[str, Dict[str, Any]] = {}
+    for h in households:
+        try:
+            res = await h.client.ok({"type": "autonet_status"})
+        except Exception as exc:  # noqa: BLE001
+            res = {"error": repr(exc)}
+        st[h.name] = res.get("p2p") or {}
+    names = {p["peer_id"]: n for n, p in st.items() if p.get("peer_id")}
+    names[relay_peer] = "relay"
+    mesh = True
+    for h in households:
+        p = st[h.name]
+        conns = p.get("connections") or {}
+        links = ", ".join(f"{names.get(pid, pid[:12])}={'+'.join(sorted(set(k)))}"
+                          for pid, k in sorted(conns.items(), key=lambda kv: names.get(kv[0], kv[0])))
+        log(f"P2P {when} {h.name} {str(p.get('peer_id'))[:16]} [{p.get('transport')}, "
+            f"dht {p.get('dht_mode')}, reservations {len(p.get('reservations') or [])}]: "
+            f"{links or 'no connections'}")
+        for o in households:
+            if o is h:
+                continue
+            if "direct" not in conns.get(st[o.name].get("peer_id", ""), []):
+                mesh = False
+    log(f"P2P {when}: every daemon directly connected to every other: {mesh}")
+    return mesh
 
 
 # ---------------------------------------------------------------------------
@@ -1331,7 +1417,7 @@ async def amain() -> int:
         relay_dir = run / "relay"
         relay_dir.mkdir()
         relay_args = [sys.executable, "-m", "nodes.relay", "--port", str(RELAY_PORT),
-                      "--host", "127.0.0.1", "--transport", "ws", "--no-upnp",
+                      "--host", "127.0.0.1", "--no-upnp",
                       "--data-dir", str(relay_dir)]
         probe = procs.start("relay-probe", relay_args + ["--jurisdiction", "31337:0x0"],
                             cwd=REPO, env=base_env(), log_path=run / "relay_probe.log")
@@ -1374,6 +1460,7 @@ async def amain() -> int:
                 raise
 
         log("all households onboarded")
+        await report_p2p(households, peer, "after onboarding")
 
         # 6. Work, watched by the collector.
         stop = asyncio.Event()
@@ -1415,8 +1502,10 @@ async def amain() -> int:
         await drain(act)
         act.report_mint()
         act.report_verdicts()
+        await act.report_evidence()
         act.report_batches()
         act.report_shared()
+        await report_p2p(households, peer, "at the end")
         stop.set()
         await col
         if KEEP:

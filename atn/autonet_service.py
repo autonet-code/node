@@ -50,12 +50,15 @@ def _charter_axes() -> list[dict[str, str]]:
         return []
 
 
-def _stable_p2p_port(data_dir, host: str = "0.0.0.0") -> int:
-    """The p2p port saved in ``<data_dir>/p2p.port``; on first use a free
-    port is picked and saved. 0 (random) when neither works."""
+def _stable_p2p_port(data_dir, host: str = "0.0.0.0", name: str = "p2p.port",
+                     avoid: int = 0) -> int:
+    """The p2p port saved in ``<data_dir>/<name>`` (``p2p.port``: the
+    WebSocket listener, ``p2p.tcp_port``: the TCP one); on first use a free
+    port (other than ``avoid``) is picked and saved. 0 (random) when
+    neither works."""
     import socket
     from pathlib import Path as _Path
-    path = _Path(data_dir) / "p2p.port"
+    path = _Path(data_dir) / name
     try:
         port = int(path.read_text(encoding="utf-8").strip())
         if 0 < port < 65536:
@@ -63,9 +66,12 @@ def _stable_p2p_port(data_dir, host: str = "0.0.0.0") -> int:
     except Exception:  # noqa: BLE001 (missing or unreadable: pick one)
         pass
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, 0))
-            port = s.getsockname()[1]
+        for _ in range(5):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, 0))
+                port = s.getsockname()[1]
+            if port != avoid:
+                break
         path.write_text(str(port), encoding="utf-8")
         return port
     except Exception:  # noqa: BLE001
@@ -509,11 +515,17 @@ class AutonetBridge:
             cfg = None
 
         listen_port = cfg.p2p.listen_port if cfg else 0
+        tcp_port = cfg.p2p.tcp_port if cfg else 0
         listen_host = cfg.p2p.listen_host if cfg else "0.0.0.0"
         if not listen_port and self._data_dir:
             # Keep one port across restarts: the daemon's address can be a
             # Registry seed, and a new random port each start made it stale.
             listen_port = _stable_p2p_port(self._data_dir, listen_host)
+        if not tcp_port and self._data_dir:
+            # The TCP listener (hole punching binds its dials to it) keeps
+            # its port too; a port forward or UPnP mapping names it.
+            tcp_port = _stable_p2p_port(self._data_dir, listen_host,
+                                        "p2p.tcp_port", avoid=listen_port)
         # Phase 12: a fresh install with no user-configured bootstrap
         # falls back to community-published bootstrap peers, so daemons
         # can join without manual multiaddr configuration.
@@ -544,10 +556,19 @@ class AutonetBridge:
             except Exception as exc:  # noqa: BLE001
                 log.warning("p2p.key unreadable (%s); using a fresh peer id", exc)
 
+        peer_cache = None
+        if self._data_dir:
+            from pathlib import Path as _Path
+            peer_cache = str(_Path(self._data_dir) / "p2p_peers.json")
         host = AutonetHost(
             node_id=node_id,
             key_seed=key_seed,
             listen_port=listen_port,
+            tcp_port=tcp_port,
+            peer_cache_path=peer_cache,
+            target_peers=cfg.p2p.target_peers if cfg else 8,
+            max_peers=cfg.p2p.max_peers if cfg else 48,
+            enable_dht=cfg.p2p.dht if cfg else True,
             listen_host=listen_host,
             bootstrap_peers=bootstrap,
             capability=cap,
@@ -556,7 +577,7 @@ class AutonetBridge:
             enable_upnp=cfg.p2p.enable_upnp if cfg else True,
             auto_reach=cfg.p2p.auto_reach if cfg else True,
             reach_interval=cfg.p2p.reach_interval if cfg else 300,
-            transport=cfg.p2p.transport if cfg else "ws",
+            transport=cfg.p2p.transport if cfg else "tcp+ws",
             seed_source=seed_source,
             seed_refresh_interval=cfg.p2p.seed_refresh_interval if cfg else 300,
         )
@@ -1291,29 +1312,20 @@ class AutonetBridge:
 
     def _share_search_model(self, host) -> None:
         """The search model's files are content-addressed blobs: serve the
-        verified ones to peers (now, and again once the model is ready), and
-        let a daemon still fetching them take them from peers when Hugging
-        Face fails (atn/search_model.py). Bytes from a peer are checked
-        against the pinned hashes like any download."""
+        verified ones to peers and provide them in the DHT (now, and again
+        once the model is ready), and let a daemon still fetching them take
+        them from a provider when Hugging Face fails (atn/search_model.py).
+        Bytes from a peer are checked against the pinned hashes like any
+        download."""
         model = getattr(self._runtime, "search_model", None) if self._runtime else None
         if model is None or host is None:
             return
         try:
+            from .search_model import peer_fetcher_for
             model.serve_on(host)
-            model.on_ready(lambda m, _h=host: m.serve_on(_h))
-            from nodes.common.blob_resolver import LibP2PBlobResolver
-            # A 90 MB file: give each peer minutes, not the 10 s default.
-            resolver = LibP2PBlobResolver(host, fetch_timeout=600.0)
-
-            def _get(digest: str, _r=resolver) -> bytes | None:
-                # Not _r.get: that keeps every fetched blob in the host's
-                # memory map, and these files are served from disk.
-                peers = _r._known_peer_ids()
-                return _r._fetch_from_peers(peers, digest) if peers else None
-
-            async def _fetch(digest: str) -> bytes | None:
-                return await asyncio.to_thread(_get, digest)
-            model.peer_fetcher = _fetch
+            if not model.ready:
+                model.on_ready(lambda m, _h=host: m.serve_on(_h))
+            model.peer_fetcher = peer_fetcher_for(host)
         except Exception as e:  # noqa: BLE001
             log.debug("sharing the search model failed: %s", e)
 
@@ -1384,6 +1396,21 @@ class AutonetBridge:
                 service_store = getattr(self._runtime, "service_store", None)
                 if service_store is not None:
                     service_store.blob_fetcher = _fetch
+
+            # DHT provider records (docs/p2p_networking.md, "Blobs"): a
+            # published tool's manifest and code are provided before its
+            # registration is gossiped, adopted ones once installed, a
+            # malware flag's evidence once stored, and every tool blob and
+            # flag evidence we hold now (the host re-provides them).
+            p2p = self._p2p_host
+            if p2p is not None and hasattr(p2p, "provide_blobs_blocking"):
+                tool_store.blob_announcer = (
+                    lambda digests, _h=p2p: _h.provide_blobs_blocking(digests, timeout=15.0))
+                try:
+                    p2p.provide_blobs_threadsafe(tool_store.held_blob_digests()
+                                                 + tool_store.held_evidence_digests())
+                except Exception:  # noqa: BLE001
+                    log.debug("providing held tool blobs failed", exc_info=True)
 
             # A new peer may hold code an approved adoption is waiting for
             # (#46): the retry loop watches the connected set.
@@ -1690,7 +1717,30 @@ class AutonetBridge:
             except Exception:
                 pass  # Service might be between cycles
 
-        return self.state.to_dict()
+        out = self.state.to_dict()
+        out["p2p"] = self.p2p_status()
+        return out
+
+    def p2p_status(self) -> dict[str, Any]:
+        """This daemon's libp2p host: peer id, transport, DHT mode, relay
+        reservations and the kind of each connection per peer ("direct" or
+        "relayed"), {} before the host is up. The host runs in its own
+        thread, so a read that races a change returns what it has."""
+        host = self._p2p_host
+        if host is None:
+            return {}
+        out: dict[str, Any] = {"peer_id": "", "transport": "", "dht_mode": "",
+                               "reservations": [], "connections": {}}
+        for key, read in (("peer_id", lambda: host.peer_id),
+                          ("transport", lambda: getattr(host, "_transport", "")),
+                          ("dht_mode", lambda: host.dht_mode),
+                          ("reservations", lambda: list(host.reservations)),
+                          ("connections", lambda: host.connection_kinds())):
+            try:
+                out[key] = read()
+            except Exception:  # noqa: BLE001 (best effort)
+                pass
+        return out
 
     def connect_wallet(self, address: str) -> dict[str, Any]:
         """Register a wallet connection (from frontend wallet provider)."""

@@ -194,8 +194,9 @@ Every review carries four fields; a review missing any is refused:
 A malware flag needs `evidence`: free text saying what the code does, with
 a pointer into it (file and line numbers, or the quoted code). The daemon
 keeps it as a content-addressed blob and the review carries its sha256 as
-`evidenceHash`. Keeping it available is your household's job: other
-daemons fetch it from yours (`fetch_evidence` with the hash reads anyone's).
+`evidenceHash`, and announces it in the DHT. Keeping it available is your
+household's job: other daemons find yours as its holder and fetch it while
+your daemon is online (`fetch_evidence` with the hash reads anyone's).
 
 `axes` are optional: the jurisdiction's charter axes, the DAO's values
 (`autonet_status` lists them under `charter_axes`). Score each axis that

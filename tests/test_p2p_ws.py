@@ -83,6 +83,7 @@ def _self_signed(tmp_path):
             .not_valid_after(now + datetime.timedelta(days=1))
             .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]),
                            critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
             .sign(key, hashes.SHA256()))
     cert_p, key_p = tmp_path / "c.pem", tmp_path / "k.pem"
     cert_p.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -108,8 +109,12 @@ async def _relay_traffic(a, c, relay):
             await a.publish_topic(TOPIC, b"event")
             await trio.sleep(0.5)
     host_blob_server(c).put(blob)
-    with trio.fail_after(15):
-        assert await a.fetch_blob_from_peers([relay.peer_id], cid) == blob
+    # The relay does not forward blob requests: a finds c in the DHT.
+    with trio.fail_after(30):
+        while not await c.provide_blob(cid):
+            await trio.sleep(0.5)
+    with trio.fail_after(30):
+        assert await a.fetch_blob_from_network(cid) == blob
     return got[0]
 
 
@@ -176,10 +181,14 @@ async def test_wss_by_hostname_through_proxy_to_a_tls_front(tmp_path=None):
             front_port = front[0].socket.getsockname()[1]
             addr = f"/dns4/localhost/tcp/{front_port}/wss/p2p/{r.peer_id}"
             os.environ["HTTPS_PROXY"] = f"http://127.0.0.1:{proxy_port}"
+            # wss dials verify the certificate (py-libp2p 0.8.1): trust the
+            # front's, as S1 trusts Caddy's local CA.
+            os.environ["SSL_CERT_FILE"] = str(tmp / "c.pem")
             try:
                 assert await a.connect_to_peer(addr)
             finally:
                 os.environ.pop("HTTPS_PROXY", None)
+                os.environ.pop("SSL_CERT_FILE", None)
             assert seen == [f"localhost:{front_port}"]
             assert r.peer_id in a.get_connected_peers()
         nursery.cancel_scope.cancel()

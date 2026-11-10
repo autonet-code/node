@@ -126,13 +126,12 @@ def test_listings_show_whether_the_provider_is_reachable(monkeypatch):
 # The provider's gate on real streams
 # ---------------------------------------------------------------------------
 
-def _host(name, relay=False):
-    from nodes.common.circuit_relay import RelayCaps
+def _host(name, relay=False, nat=False):
     from nodes.common.p2p import AutonetHost, NodeCapability
     cap = NodeCapability(peer_id="", node_id=name, roles=["relay"]) if relay else None
-    h = AutonetHost(node_id=name, listen_host="127.0.0.1", capability=cap)
-    if relay:
-        h.circuit_relay_caps = RelayCaps()
+    h = AutonetHost(node_id=name, listen_host="127.0.0.1", capability=cap,
+                    relay_hop=relay, advertise_listen_addrs=not nat,
+                    mesh_interval=0.5)
     return h
 
 
@@ -142,7 +141,10 @@ class _Hosts:
     are connected to the relay only."""
 
     def __init__(self):
-        self.buyer, self.relay, self.provider = _host("buyer"), _host("relay", True), _host("seller")
+        # The provider is NAT'd (circuit addresses only), so the stream
+        # rides its circuit through the relay, as on a home network.
+        self.buyer, self.relay = _host("buyer"), _host("relay", True)
+        self.provider = _host("seller", nat=True)
         self.ready, self.stop = threading.Event(), threading.Event()
         self.thread = threading.Thread(target=lambda: trio.run(self._main), daemon=True)
 
@@ -151,9 +153,11 @@ class _Hosts:
             await self.buyer.connect_to_peer(self.relay.addrs[0])
             await self.provider.connect_to_peer(self.relay.addrs[0])
             await self.relay.advertise_capability()
-            with trio.fail_after(10):
-                while self.relay.peer_id not in self.buyer.known_capabilities:
+            with trio.fail_after(20):
+                while self.relay.peer_id not in self.buyer.known_capabilities or                         self.relay.peer_id not in self.provider.reservations:
                     await trio.sleep(0.05)
+            # What capability gossip (or the relay's DHT) tells the buyer.
+            self.buyer._known_capabilities[self.provider.peer_id] =                 self.provider._capability
             self.ready.set()
             while not self.stop.is_set():
                 await trio.sleep(0.05)

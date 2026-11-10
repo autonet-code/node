@@ -178,7 +178,6 @@ class ContainerHousehold(s0.Household):
         env = {
             "ATN_JURISDICTION_REGISTRY": registry,
             "ATN_JURISDICTION_RPC": DAEMON_RPC,
-            "AUTONET_P2P_TRANSPORT": "ws",
             "HTTPS_PROXY": proxy, "https_proxy": proxy,
             "HTTP_PROXY": proxy, "http_proxy": proxy,
             "NO_PROXY": "localhost,127.0.0.1", "no_proxy": "localhost,127.0.0.1",

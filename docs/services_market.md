@@ -182,13 +182,13 @@ a video call, anything. Decided by the owner:
    version number, "openai-chat/1", "webrtc-sdp/1"; validated in
    `atn/service_spec.py`). The network gives the two daemons a stream and
    nothing more.
-2. **Direct first, a relay last.** A connection already open, else a direct
-   dial to the addresses a reachable provider advertises, else a circuit
-   relay v2 connection through a relay. Hole punching (DCUtR) belongs
-   between the last two and is not done: py-libp2p 0.6 cannot
-   (`docs/p2p_networking.md`, "Not covered"). Relays are not paid and
-   relayed connections are unlimited by default, like torrent seeding,
-   unless the relay's operator caps them (`atn relay
+2. **Direct first, then hole punching, a relay last.** The stream rides
+   the mesh (`docs/p2p_networking.md`): a connection already open, else the
+   provider's direct addresses, else its relay circuit (circuit relay v2),
+   which DCUtR then upgrades to a direct, hole-punched TCP connection where
+   both NATs allow it (symmetric NATs, common on mobile carriers, do not).
+   Relays are not paid and relayed connections are unlimited by default,
+   like torrent seeding, unless the relay's operator caps them (`atn relay
    --circuit-max-duration`, `--circuit-max-bytes`, `--max-circuits`).
 3. **Providers are encouraged to be reachable.** `list_services` returns
    `reachability` (`reachable`, the addresses, advice when buyers reach the

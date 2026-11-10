@@ -1,0 +1,25 @@
+# The P2P mesh NAT harness image (scripts/mesh_nat_harness.py): the repo
+# installed like the daemon image, plus iproute2/iptables so one image
+# serves as NAT gateway, relay, proxy and mesh node. Runs as root: nodes
+# replace their default route with their gateway's.
+#
+#   docker build -f docker/Dockerfile.mesh -t autonet-mesh:dev .
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential libgmp-dev \
+       iproute2 iptables tini \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE ./
+COPY atn/ atn/
+COPY nodes/ nodes/
+COPY bridge/ bridge/
+RUN pip install --upgrade pip setuptools wheel && pip install .
+
+WORKDIR /
+ENTRYPOINT ["/usr/bin/tini", "--"]

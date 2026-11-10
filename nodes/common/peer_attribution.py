@@ -30,8 +30,9 @@ of the discovered peers are real agents vs. random nodes.
 What this does NOT do (yet)
 ---------------------------
 
-DHT-based PeerId-to-multiaddr resolution. py-libp2p's Kademlia DHT
-module is in alpha and unused in our setup; tracked in #73.
+DHT-based PeerId-to-multiaddr resolution of agents. The host runs a
+Kademlia DHT for peers and blob providers (docs/p2p_networking.md); this
+module still maps agents to peers by on-chain attribution only (#73).
 """
 from __future__ import annotations
 

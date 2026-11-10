@@ -139,29 +139,28 @@ async def test_parallel_fetch_skips_dead_peer():
 
 
 @trio_test
-async def test_two_hop_relay_between_nat_peers():
-    """A and C both dial out to B only; A fetches a blob only C holds."""
+async def test_nat_peers_find_each_others_blobs_through_the_dht():
+    """A and C both dial out to B only; A fetches a blob only C holds: C
+    provides it in the DHT, A finds C as its provider and dials it. B
+    never forwards the request and keeps no copy."""
     blob = b"carry-bundle-held-by-a-natd-peer"
     cid = hashlib.sha256(blob).hexdigest()
-    a, b, c = _host("nat-a"), _host("hub-b"), _host("nat-c")
+    # No mesh dialling on a and c: they must not meet before the fetch.
+    a, b, c = _host("nat-a", mesh_interval=0), _host("hub-b"), _host("nat-c", mesh_interval=0)
     async with a.run(), b.run(), c.run():
         host_blob_server(c).put(blob)
-        host_blob_server(b)  # installs B's relay cache
+        host_blob_server(b)
         assert await a.connect_to_peer(b.addrs[0])
         assert await c.connect_to_peer(b.addrs[0])
         assert c.peer_id not in a.get_connected_peers()
-        with trio.fail_after(10):
-            got = await a.fetch_blob_from_peers([b.peer_id], cid)
+        with trio.fail_after(30):
+            while not await c.provide_blob(cid):
+                await trio.sleep(0.5)
+        with trio.fail_after(30):
+            got = await a.fetch_blob_from_network(cid)
         assert got == blob
-        # B cached what it relayed.
-        assert host_blob_server(b).get_local(cid) == blob
-        # A request that allows no hops is not forwarded.
-        other = b"second-blob"
-        host_blob_server(c).put(other)
-        with trio.fail_after(10):
-            miss = await a.fetch_blob_from_peers(
-                [b.peer_id], hashlib.sha256(other).hexdigest(), hops=0)
-        assert miss is None
+        assert a.last_fetch_source == "dht"
+        assert host_blob_server(b).get_local(cid) is None
 
 
 @trio_test
