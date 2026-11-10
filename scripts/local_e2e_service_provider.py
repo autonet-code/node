@@ -14,13 +14,21 @@ and controls the tap by controlling the refills.
 This script proves the whole rail on a real local deployment:
 
     owner registers an inference-backed service (WS surface, real spec + real
-    on-chain ServiceRegistry entry, real published ws endpoint)
+    on-chain ServiceRegistry entry, real published ws endpoint), under the
+    selling daemon's operator: a normal install, no configured daemon key,
+    the vault-held operator key signs and is paid
       -> parent agent, on-chain, with a funded child
       -> parent binds the CHILD to that service (update_agent, parent-only)
       -> the child does an ordinary chat completion through its provider
       -> real Substrate.payForService signed with the CHILD'S key
       -> provider-side gate verifies the payment on chain
       -> the canned completion round-trips back into a ProviderResponse
+
+Then the payment channel (stages 9-11), through the daemons' own code: the
+child buys with the request_service agent tool; a request whose dispatch
+fails is not charged on either side; the seller's settlement sweep closes
+the channel with its best voucher; the buyer's sweep takes the remainder
+back after the challenge window.
 
 The LLM seam is the ONE thing mocked: the selling daemon's provider manager
 builds a canned-response fake for the upstream provider its service names,
@@ -51,6 +59,17 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+# Isolation before ANY atn / nodes import: the keystore resolves
+# KEYSTORE_DIR at import time and several modules read Path.home(), so the
+# run's agent and operator keys must never land in the real ~/.atn vault.
+# Child processes (npx / hardhat) get the original environment.
+_ORIG_ENV = dict(os.environ)
+_TMP_HOME = Path(tempfile.mkdtemp(prefix="e2e_svcprov_home_"))
+os.environ["KEYSTORE_DIR"] = str(_TMP_HOME / "keystore")
+os.environ["USERPROFILE"] = str(_TMP_HOME)
+os.environ["HOME"] = str(_TMP_HOME)
+os.environ.setdefault("ATN_SEARCH_MODEL", "off")
+
 RPC_URL = "http://127.0.0.1:8545"
 # `npx hardhat node` serves the in-process "hardhat" network (chainId 1337,
 # see hardhat.config.js) — NOT 31337. Signing for the wrong id gives
@@ -69,6 +88,11 @@ SERVICE_ASK = 1000
 CHILD_FUNDING = 10_000        # ATN the parent's owner grants the child's wallet
 SELLER_WS_PORT = 7791         # the selling daemon's local WS listener
 CANNED_REPLY = "The bound child thinks on purchased cognition."
+# A message the canned provider fails on: the seller's dispatch errors.
+FAIL_PROMPT = "please fail this one"
+# PaymentChannel challenge window (seconds): short, so the refund stage
+# waits it out in real time (hardhat stamps each block with the wall clock).
+CHANNEL_WINDOW = 6
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +170,7 @@ def start_hardhat(cwd: Path) -> subprocess.Popen:
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         shell=(os.name == "nt"),
         creationflags=creationflags,
+        env=dict(_ORIG_ENV),
     )
 
 
@@ -216,15 +241,22 @@ async function main() {
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 
-  // ServiceRegistry's constructor takes the substrate address. PaymentChannel
-  // is not deployed here: this rail settles by DIRECT payForService per call
-  // (channels are the v2 upgrade).
+  // ServiceRegistry's constructor takes the substrate address. The bound
+  // child's provider settles by DIRECT payForService per call; the agent
+  // tool request_service pays through the PaymentChannel (stages 9-11).
   const Registry = await ethers.getContractFactory("ServiceRegistry");
   const registry = await Registry.deploy(substrateAddr);
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
 
-  const out = { substrate: substrateAddr, serviceRegistry: registryAddr };
+  const Channel = await ethers.getContractFactory("PaymentChannel");
+  const channel = await Channel.deploy(substrateAddr,
+                                       Number(process.env.CHANNEL_WINDOW));
+  await channel.waitForDeployment();
+  const channelAddr = await channel.getAddress();
+
+  const out = { substrate: substrateAddr, serviceRegistry: registryAddr,
+                paymentChannel: channelAddr };
   fs.writeFileSync(process.env.DEPLOY_OUT, JSON.stringify(out, null, 2));
   console.log("DEPLOYED " + JSON.stringify(out));
 }
@@ -239,9 +271,11 @@ def deploy_contracts(cwd: Path) -> Dict[str, Optional[str]]:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     tmp_js.write_text(DEPLOY_JS, encoding="utf-8")
     try:
-        env = dict(os.environ)
+        env = dict(_ORIG_ENV)
         env["DEPLOY_OUT"] = str(out_json)
-        log("deploying Substrate + ServiceRegistry via hardhat run…")
+        env["CHANNEL_WINDOW"] = str(CHANNEL_WINDOW)
+        log("deploying Substrate + ServiceRegistry + PaymentChannel via "
+            "hardhat run…")
         proc = subprocess.run(
             [_npx(), "hardhat", "run", str(tmp_js), "--network", "localhost"],
             cwd=str(cwd), capture_output=True, text=True, timeout=300,
@@ -350,7 +384,12 @@ def register_agent_on_chain(w3, substrate, shape, *, agent_pk: str,
 
 def make_runtime(tmp_root: Path, *, owner_wallet: str, owner_pk: str,
                  addresses: Dict[str, Optional[str]]):
-    """A real ATN Runtime wired to the local chain."""
+    """A real ATN Runtime wired to the local chain.
+
+    ``owner_pk`` empty is a normal install: no configured daemon key, so
+    the operator key is the one the vault holds. The two daemons share one
+    process and so one vault, so only one of them (the seller) can take
+    that path; the buyer keeps a configured key."""
     from atn.config import ATNConfig
     from atn.events import EventBus
     from atn.runtime import Runtime
@@ -371,6 +410,7 @@ def make_runtime(tmp_root: Path, *, owner_wallet: str, owner_pk: str,
     config.autonet.chain_id = CHAIN_ID
     config.autonet.substrate_address = addresses["substrate"] or ""
     config.autonet.service_registry_address = addresses["serviceRegistry"] or ""
+    config.autonet.payment_channel_address = addresses.get("paymentChannel") or ""
     return Runtime(EventBus(), data_dir=data_dir, config=config)
 
 
@@ -419,6 +459,9 @@ class CannedProvider:
             "messages": messages, "system": system, "model": model,
             "max_tokens": max_tokens,
         })
+        if any(m.get("content") == FAIL_PROMPT for m in messages):
+            # The seller's upstream fails: its dispatch returns an error.
+            raise RuntimeError("canned upstream failure")
         return ProviderResponse(
             text=CANNED_REPLY,
             model=model or "canned-model-1",
@@ -455,7 +498,8 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
     # ------------------------------------------------------------------
     # Stage 1 — chain up
     # ------------------------------------------------------------------
-    s1 = board.stage(1, "chain up (hardhat node + Substrate + ServiceRegistry)")
+    s1 = board.stage(1, "chain up (hardhat node + Substrate + ServiceRegistry "
+                        "+ PaymentChannel)")
     addresses: Dict[str, Optional[str]] = {}
     try:
         hh_proc = start_hardhat(REPO)
@@ -492,9 +536,9 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
     # ------------------------------------------------------------------
     # Stage 2 — two daemons, three agents, on-chain identities
     # ------------------------------------------------------------------
-    s2 = board.stage(2, "fleet (seller daemon + buyer daemon, agents on chain)")
+    s2 = board.stage(2, "fleet (seller daemon's operator + buyer agents on chain)")
     rt_seller = rt_buyer = None
-    seller_defn = parent_defn = child_defn = None
+    parent_defn = child_defn = None
     seller_key = parent_key = child_key = ""
     seller_addr = parent_addr = child_addr = ""
     try:
@@ -502,38 +546,44 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             raise RuntimeError(
                 f"contract exposes no owner-binding surface (shape={shape})")
 
+        # The seller daemon is a normal install: no configured daemon key.
+        # It sells as its operator, the vault-held key the owner surface and
+        # every external agent act as (Decision 2026-11-08).
         rt_seller = make_runtime(
             tmp_seller, owner_wallet=owner_seller.address,
-            owner_pk=owner_seller._private_key.hex(), addresses=addresses)
+            owner_pk="", addresses=addresses)
         rt_buyer = make_runtime(
             tmp_buyer, owner_wallet=owner_buyer.address,
             owner_pk=owner_buyer._private_key.hex(), addresses=addresses)
+        assert not rt_seller._config.autonet.private_key
+        seller_key = rt_seller.registry.daemon_operator_key()
+        seller_addr = Account.from_key(seller_key).address
 
-        # Seller daemon: the agent that SELLS cognition.
-        seller_defn = await register_local_agent(rt_seller, "seller-1")
         # Buyer daemon: the PARENT (employer) and its CHILD. parent_id is what
         # makes the binding a parent act rather than a self-act.
         parent_defn = await register_local_agent(rt_buyer, "parent-1")
         child_defn = await register_local_agent(rt_buyer, "child-1",
                                                 parent_id="parent-1")
 
-        seller_key = rt_seller.registry.get_agent_key("seller-1")
         parent_key = rt_buyer.registry.get_agent_key("parent-1")
         child_key = rt_buyer.registry.get_agent_key("child-1")
-        seller_addr = Web3.to_checksum_address(seller_defn.identity.address)
         parent_addr = Web3.to_checksum_address(parent_defn.identity.address)
         child_addr = Web3.to_checksum_address(child_defn.identity.address)
         assert child_key and child_key != parent_key, (
             "the child must hold its OWN distinct wallet key")
+        assert seller_key not in (parent_key, child_key)
 
-        # Gas for every agent that signs (registration, service ops, payment).
+        # Gas for every key that signs (registration, service ops, payment).
         for owner, addr in ((owner_seller, seller_addr),
                             (owner_buyer, parent_addr),
                             (owner_buyer, child_addr)):
             fund_gas(w3, owner, addr)
 
+        op_tx = register_agent_on_chain(
+            w3, substrate, shape, agent_pk=seller_key, agent_addr=seller_addr,
+            owner_acct=owner_seller, peer_id=b"peer-seller")
+        rt_seller.registry.set_operator_registered(True, op_tx)
         for defn, pk, addr, owner, peer in (
-            (seller_defn, seller_key, seller_addr, owner_seller, b"peer-seller"),
             (parent_defn, parent_key, parent_addr, owner_buyer, b"peer-parent"),
             (child_defn, child_key, child_addr, owner_buyer, b"peer-child"),
         ):
@@ -546,11 +596,12 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             owner_seller.address
         assert substrate.functions.getAgentOwner(child_addr).call() == \
             owner_buyer.address
-        s2.note("seller", seller_addr)
+        s2.note("seller_operator", seller_addr)
         s2.note("parent", parent_addr)
         s2.note("child", child_addr)
         s2.note("child_key_distinct", True)
-        step("three agents registered on chain; child holds its own key")
+        step("seller's operator (vault key) and two buyer agents registered "
+             "on chain; child holds its own key")
         s2.status = "PASS"
     except Exception as e:
         s2.status = "FAIL"
@@ -581,7 +632,8 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         await ws_server.start()
 
         # Register the service through the real WS handler (owner surface):
-        # an `inference` block instead of a backing tool.
+        # an `inference` block instead of a backing tool. The owner's
+        # services are registered, signed and paid under the operator.
         reg = await ws_server._handle_message(
             {
                 "type": "register_service",
@@ -589,30 +641,28 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 "description": "Chat completions off the seller's own stack.",
                 "input_schema": {"type": "object",
                                  "properties": {"messages": {"type": "array"}}},
-                "agent_id": "seller-1",
                 "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
                 "inference": {"provider": "ollama",
                               "model": "canned-model-1",
                               "max_tokens_cap": 512},
             },
             owner_session())
-        if not reg.get("ok"):
+        if not reg.get("ok") or not reg["result"].get("on_chain"):
             raise RuntimeError(f"register_service failed: {reg}")
         spec_digest = reg["result"]["digest"]
         record = rt_seller.service_store.get(spec_digest)
         assert record.inference, "spec carries no inference backing"
-        # The gate verifies payment against the spec's author_pubkey, so it
-        # must be the seller agent's own 0x.
+        # The spec names its signer, the address it is registered under:
+        # the operator's.
         assert record.spec["author_pubkey"].lower() == seller_addr.lower(), (
             record.spec["author_pubkey"], seller_addr)
 
-        # On-chain listing, signed by the seller AGENT's key (the provider of
-        # record — and the payment recipient the gate will check).
-        send_tx(w3,
-                registry_c.functions.registerService(
-                    bytes.fromhex(spec_digest), SERVICE_ASK),
-                seller_key, seller_addr)
-        service_id = registry_c.functions.serviceCount().call()
+        # The chain leg ran through the daemon, signed by the operator key:
+        # the entry's provider is the payee the gate checks.
+        service_id = reg["result"]["service_id"]
+        assert record.service_id == service_id
+        entry = registry_c.functions.getService(service_id).call()
+        assert entry[0].lower() == seller_addr.lower() and entry[2] == SERVICE_ASK
 
         # Publish the seller's reachable ws endpoint on chain. The buyer's
         # provider resolves the counterparty this way — no hardcoded address
@@ -968,9 +1018,166 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         failed = True
 
     # ------------------------------------------------------------------
-    # Stage 9 — teardown
+    # Stages 9-11 — the payment channel, through the daemons' own code:
+    # the child buys with the request_service agent tool (a voucher per
+    # request), the seller's gate keeps a voucher only for a served request,
+    # the seller's sweep closes the channel to collect, and the buyer's
+    # sweep takes the remainder back after the challenge window.
     # ------------------------------------------------------------------
-    s9 = board.stage(9, "teardown")
+    channel_c = w3.eth.contract(
+        address=Web3.to_checksum_address(addresses["paymentChannel"]),
+        abi=load_abi("PaymentChannel"))
+    s9 = board.stage(9, "a request whose dispatch fails is not charged")
+    channel_id = None
+    price = 0
+    try:
+        if s3.status != "PASS":
+            raise RuntimeError("stage 3 listed no service")
+        from atn.agent_tools import _request_service
+
+        price = int(registry_c.functions.getService(service_id).call()[2])
+        # Escrow for three requests; the child's wallet is topped up for it.
+        send_tx(w3, substrate.functions.mintFromVault(child_addr, price * 3),
+                HH_ACCT0_PK, owner_seller.address)
+        seller_store = rt_seller.service_store
+        book = rt_buyer.channel_book
+
+        async def buy(text: str) -> Dict[str, Any]:
+            # By the service's number, as find_services returns it.
+            return await _request_service(rt_buyer, {
+                "_caller_id": "child-1", "service_id": service_id,
+                "deposit": price * 3,
+                "payload": {"messages": [{"role": "user", "content": text}],
+                            "max_tokens": 32}})
+
+        def held() -> tuple:
+            ch = book.get(child_addr, seller_addr) or {}
+            kept = seller_store.get_channel_voucher(channel_id) or {}
+            return (int(ch.get("cumulative", -1)),
+                    seller_store.last_channel_cumulative(channel_id),
+                    int(kept.get("cumulative", 0)))
+
+        calls_before = len(canned.calls)
+        failed1 = await buy(FAIL_PROMPT)
+        assert failed1.get("delivered") and not failed1.get("ok"), failed1
+        assert "canned upstream failure" in json.dumps(failed1), failed1
+        assert failed1["paid"] == 0, failed1
+        channel_id = int(failed1["channel_id"])
+        assert len(canned.calls) == calls_before + 1, "the seller never dispatched"
+        assert held() == (0, 0, 0), held()
+        step("a failed dispatch: paid 0, the seller kept no voucher, the "
+             "buyer's book did not move")
+
+        served = await buy("served one")
+        assert served.get("ok") and served["paid"] == price, served
+        assert served["channel_id"] == channel_id
+        assert held() == (price, price, price), held()
+        failed2 = await buy(FAIL_PROMPT)
+        assert failed2["paid"] == 0 and held() == (price, price, price), held()
+        served2 = await buy("served two")
+        assert served2["paid"] == price, served2
+        assert held() == (2 * price, 2 * price, 2 * price), held()
+        on_chain = channel_c.functions.getChannel(channel_id).call()
+        assert on_chain[5] == 1 and on_chain[2] == price * 3, on_chain
+        s9.note("channel_id", channel_id)
+        s9.note("price", price)
+        s9.note("requests", "fail, ok, fail, ok")
+        s9.note("buyer_book_and_seller_voucher", 2 * price)
+        step(f"two served of four: both sides hold {2 * price} "
+             f"(the two failures cost nothing)")
+        s9.status = "PASS"
+    except Exception as e:
+        s9.status = "FAIL"
+        s9.note("error", repr(e))
+        log(traceback.format_exc())
+        failed = True
+
+    s10 = board.stage(10, "the provider's own close collects its best voucher")
+    closed_view = None
+    try:
+        if s9.status != "PASS":
+            raise RuntimeError("stage 9 did not complete")
+        kept = 2 * price
+        seller_before = substrate.functions.balanceOf(seller_addr).call()
+        # Not due yet: the deposit covers the price and it was just used.
+        out = await rt_seller.settle_channels_once()
+        assert out.get("settled") == [], out
+        # Idle for longer than the configured time: the seller collects.
+        rt_seller._config.rpb.channel_idle_close_s = 1
+        await asyncio.sleep(1.5)
+        out = await rt_seller.settle_channels_once()
+        settled = out.get("settled") or []
+        assert settled and settled[0]["ok"] and settled[0]["reason"] == "idle", out
+        closed_view = channel_c.functions.getChannel(channel_id).call()
+        client, provider, deposit, claimed, closes_at, status = closed_view[:6]
+        assert status == 2 and claimed == kept, closed_view
+        assert provider.lower() == seller_addr.lower()
+        fee = (kept * 250) // 10000
+        seller_after = substrate.functions.balanceOf(seller_addr).call()
+        assert seller_after - seller_before == kept - fee, (
+            seller_after - seller_before, kept - fee)
+        assert str(channel_id) not in seller_store.channel_vouchers()
+        s10.note("claimed", claimed)
+        s10.note("seller_credited_net", seller_after - seller_before)
+        s10.note("closed_with", "operator key (vault)")
+        step(f"the seller's sweep closed channel {channel_id} with its best "
+             f"voucher: {kept} claimed, {kept - fee} net to the operator")
+        s10.status = "PASS"
+    except Exception as e:
+        s10.status = "FAIL"
+        s10.note("error", repr(e))
+        log(traceback.format_exc())
+        failed = True
+
+    s11 = board.stage(11, "the buyer's refund sweep returns the remainder")
+    try:
+        if s10.status != "PASS" or closed_view is None:
+            raise RuntimeError("stage 10 did not close the channel")
+        deposit, claimed, closes_at = (int(closed_view[2]), int(closed_view[3]),
+                                       int(closed_view[4]))
+        remainder = deposit - claimed
+        child_before = substrate.functions.balanceOf(child_addr).call()
+        out = await rt_buyer.settle_channels_once()
+        actions = [r["action"] for r in out.get("refunds") or []]
+        assert "closed_by_provider" in actions, out
+        assert book.get(child_addr, seller_addr) is None
+        withdrew = "withdrew" in actions
+        if not withdrew:
+            assert str(channel_id) in book.closing()
+            assert substrate.functions.balanceOf(child_addr).call() == child_before
+        deadline = time.time() + CHANNEL_WINDOW + 30
+        while not withdrew and time.time() < deadline:
+            await asyncio.sleep(1.0)
+            if time.time() > closes_at:
+                # Hardhat mines a block only for a transaction, so its clock
+                # stands still between them and the withdraw's estimate
+                # would still see the window open. A live chain's blocks
+                # keep coming; here one empty block moves the clock.
+                w3.provider.make_request("evm_mine", [])
+            out = await rt_buyer.settle_channels_once()
+            withdrew = any(r["action"] == "withdrew"
+                           for r in out.get("refunds") or [])
+        assert withdrew, (f"no refund by {deadline} (closes_at {closes_at}): "
+                          f"{out}")
+        child_after = substrate.functions.balanceOf(child_addr).call()
+        assert child_after - child_before == remainder, (
+            child_after - child_before, remainder)
+        assert channel_c.functions.getChannel(channel_id).call()[5] == 3
+        assert book.closing() == {}
+        s11.note("remainder_refunded", remainder)
+        step(f"the buyer's sweep noticed the provider's close and took back "
+             f"{remainder} after the {CHANNEL_WINDOW}s window")
+        s11.status = "PASS"
+    except Exception as e:
+        s11.status = "FAIL"
+        s11.note("error", repr(e))
+        log(traceback.format_exc())
+        failed = True
+
+    # ------------------------------------------------------------------
+    # Stage 12 — teardown
+    # ------------------------------------------------------------------
+    s12 = board.stage(12, "teardown")
     try:
         if ws_server is not None:
             await ws_server.stop()
@@ -982,10 +1189,10 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     pass
         kill_hardhat(hh_proc)
         hh_proc = None
-        s9.status = "PASS"
+        s12.status = "PASS"
     except Exception as e:
-        s9.status = "FAIL"
-        s9.note("error", repr(e))
+        s12.status = "FAIL"
+        s12.note("error", repr(e))
         log(traceback.format_exc())
         failed = True
     finally:
