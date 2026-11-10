@@ -213,6 +213,12 @@ def topic_for_rpb(rpb_address: str) -> str:
     return f"/autonet/world-events/{rpb_address}"
 
 
+def topic_for_services(jurisdiction_key: str) -> str:
+    """The pubsub topic carrying one jurisdiction's service specs
+    (atn/service_catalog.py). Not consensus: services earn no mint."""
+    return f"/autonet/services/{jurisdiction_key}"
+
+
 # ---------------------------------------------------------------------------
 # Transport interface
 # ---------------------------------------------------------------------------

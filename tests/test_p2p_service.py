@@ -240,3 +240,36 @@ async def test_undelivered_libp2p_request_falls_back_to_wss(tmp_path):
             endpoint="ws://127.0.0.1:9", timeout=5)
     assert out["transport"] == "wss"
     assert "libp2p" in out["error"] and "no path" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_service_spec_gossip_reaches_a_peer_through_a_relay():
+    """A provider's spec announcement crosses a relay (subscribed to the
+    services topic, as ``atn relay`` is) to a buyer that reaches the
+    provider only through it, and the buyer's catalog keeps it because the
+    chain names its digest (Decision 2026-11-10)."""
+    from atn.service_catalog import announcement, spec_digest, topic_for
+    from tests.atn.test_service_catalog import ADDR_A, _catalog, _entry, _spec
+
+    cat = _catalog()
+    spec = _spec("transcribe_audio", "speech to text per audio minute")
+    cat._entries[1] = _entry(1, spec, ADDR_A)
+    topic = topic_for("1337:0x" + "da" * 20)
+    got = threading.Event()
+
+    def on_spec(_t, data):
+        if cat.accept_announcement(data):
+            got.set()
+
+    with _Hosts() as hosts:
+        hosts.relay.subscribe_topic_threadsafe(topic, lambda _t, _d: None)
+        hosts.provider.subscribe_topic_threadsafe(topic, lambda _t, _d: None)
+        hosts.consumer.subscribe_topic_threadsafe(topic, on_spec)
+        # The mesh forms on the gossipsub heartbeat: announce until heard.
+        for _ in range(40):
+            hosts.provider.publish_topic_threadsafe(topic, announcement(spec, 1))
+            if got.wait(0.5):
+                break
+    assert got.is_set(), "the announcement never crossed the relay"
+    assert cat.spec(spec_digest(spec)) == spec
+    assert [r["service_id"] for r in cat.search("speech to text")] == [1]

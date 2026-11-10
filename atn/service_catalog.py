@@ -70,8 +70,10 @@ ANNOUNCEMENT_VERSION = 1
 
 
 def topic_for(jurisdiction_key: str) -> str:
-    """The pubsub topic carrying one jurisdiction's service specs."""
-    return f"/autonet/services/{jurisdiction_key}"
+    """The pubsub topic carrying one jurisdiction's service specs (relays
+    subscribe to it too, so specs cross NAT'd daemons)."""
+    from nodes.common.event_gossip import topic_for_services
+    return topic_for_services(jurisdiction_key)
 
 
 def spec_digest(spec: dict[str, Any]) -> str:

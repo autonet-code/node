@@ -113,7 +113,8 @@ async def run(args: argparse.Namespace) -> None:
     import trio
     from .common.blob_resolver import host_blob_server
     from .common.blob_store import BlobStore
-    from .common.event_gossip import BatchLog, SignedBatch, _verify, topic_for_rpb
+    from .common.event_gossip import (
+        BatchLog, SignedBatch, _verify, topic_for_rpb, topic_for_services)
     from .common.p2p import AutonetHost, NodeCapability
 
     data = Path(args.data_dir).expanduser()
@@ -159,6 +160,10 @@ async def run(args: argparse.Namespace) -> None:
             log = BatchLog()
             host.set_batch_source(topic, log.serve)
             await host.subscribe_topic(topic, keep(log))
+            # Service specs (atn/service_catalog.py): forwarded only, so
+            # daemons that reach each other through this relay see them.
+            await host.subscribe_topic(topic_for_services(key),
+                                       lambda _t, _d: None)
             logger.info("relaying gossip for jurisdiction %s", key)
         if not args.jurisdiction:
             logger.warning("no --jurisdiction given: blobs and reach checks "
