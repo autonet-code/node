@@ -331,11 +331,14 @@ _TOOL_BOND_EVENTS_ABI = [
                       ("degradeBps", "uint256", False), ("authorSlashBps", "uint256", False),
                       ("unbondDelay", "uint256", False), ("reviewerShareBps", "uint256", False)]),
     _ev("Concluded", [("digest", "bytes32", True), ("anchorIndex", "uint256", False),
-                      ("malwareShare", "uint256", False), ("appealEnds", "uint48", False)]),
-    _ev("MalwareRuled", [("digest", "bytes32", True), ("malware", "bool", False)]),
-    _ev("MalwareSettled", [("digest", "bytes32", True), ("malware", "bool", False),
+                      ("malwareShare", "uint256", False)]),
+    # by: 1 the reviewers' verdict at conclude, 2 the DAO's designation.
+    _ev("MalwareSlashed", [("digest", "bytes32", True), ("by", "uint8", False),
                            ("bondSlashed", "uint256", False), ("repBurned", "uint256", False)]),
+    _ev("Cleared", [("digest", "bytes32", True), ("household", "address", True),
+                    ("repReturned", "uint256", False)]),
 ]
+_BY_DAO = 2
 
 _REVIEW_COMPONENTS = [
     {"name": "reviewer", "type": "address"}, {"name": "correctness", "type": "int8"},
@@ -424,8 +427,8 @@ def tool_review_snapshot_from_logs(
     (``{"sum", "mass"}``, sum / mass / 100 = the mean; malware's is the yes
     share), the window's rounds with each review's accuracy, ``bonds``,
     ``min_stake``, ``reviewer_share_bps`` and ``verdicts``: digest ->
-    ``{"concluded": bool, "ruling": True | False | None (the DAO's),
-    "settled": True | False | None (ToolBond's final verdict)}``.
+    ``{"concluded": bool, "dao": True | False | None}`` (the DAO's latest
+    word: designated malware, cleared, none).
     """
     from eth_utils import keccak
 
@@ -481,16 +484,19 @@ def tool_review_snapshot_from_logs(
                 "unscored_bps": int(a["unscoredBps"])})
         elif name == "Concluded":
             verdicts.setdefault(_hex32(a["digest"]), {
-                "concluded": False, "ruling": None, "settled": None})["concluded"] = True
-        elif name == "MalwareRuled":
-            verdicts.setdefault(_hex32(a["digest"]), {
-                "concluded": True, "ruling": None, "settled": None})["ruling"] = bool(a["malware"])
-        elif name == "MalwareSettled":
-            verdicts.setdefault(_hex32(a["digest"]), {
-                "concluded": True, "ruling": None, "settled": None})["settled"] = bool(a["malware"])
+                "concluded": False, "dao": None})["concluded"] = True
+        elif name == "MalwareSlashed":
+            # A designation is the DAO's word; the reviewers' verdict is
+            # the close's own (its concluded leaf). Both slash the stake.
+            if int(a["by"]) == _BY_DAO:
+                verdicts.setdefault(_hex32(a["digest"]), {
+                    "concluded": False, "dao": None})["dao"] = True
             b = bonds.get(_hex32(a["digest"]))
             if b is not None:
                 b["stake"] = max(0, b["stake"] - int(a["bondSlashed"]))
+        elif name == "Cleared":
+            verdicts.setdefault(_hex32(a["digest"]), {
+                "concluded": False, "dao": None})["dao"] = False
 
     excluded = {str(a).lower() for a in (excluded_reviewers or ())}
 

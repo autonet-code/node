@@ -74,7 +74,7 @@ def test_bonds_fold_from_toolbond_logs():
     logs.append(rec(4, "Bonded", author=AUTHOR, amount=50, stake=150))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST] == {
         "author": AUTHOR, "stake": 150, "unbonding": False}
-    logs.append(rec(5, "MalwareSettled", malware=True, bondSlashed=60, repBurned=0))
+    logs.append(rec(5, "MalwareSlashed", by=1, bondSlashed=60, repBurned=0))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST]["stake"] == 90
     logs.append(rec(6, "Unbonded", author=AUTHOR, amount=90))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"] == {}

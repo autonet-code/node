@@ -198,8 +198,7 @@ def _normalize_review_snapshot(
                             "fields": {...}, "axes": {...},
                             "reviews": [{"reviewer", "accuracy"}]}]},
        "bonds": {digest: {"author", "stake", "unbonding"}}, "min_stake": int,
-       "verdicts": {digest: {"concluded": bool, "ruling": bool | None,
-                             "settled": bool | None}}}
+       "verdicts": {digest: {"concluded": bool, "dao": bool | None}}}
 
     ``fields`` are the fixed review fields (``review_fields.REVIEW_FIELDS``)
     and ``axes`` the charter axes. A tool's cells cover every round
@@ -212,7 +211,8 @@ def _normalize_review_snapshot(
     yes. ``rounds`` holds the rounds finalized since the anchor before the
     snapshot; a review's ``accuracy`` is 1e18-scaled, None when
     uninformative. ``verdicts`` is ToolBond's malware verdict state per
-    tool: concluded on chain, the DAO's ruling, the settled verdict.
+    tool: concluded on chain, and the DAO's latest word (True: designated
+    malware, False: cleared, None: none; Decision 2026-11-10).
     Integers stay integers, digests lose any 0x, addresses are lowercased,
     bps clamps to [0, BPS], garbage is dropped.
     """
@@ -278,8 +278,7 @@ def _normalize_review_snapshot(
             continue
         verdicts[str(digest).lower().removeprefix("0x")] = {
             "concluded": bool(v.get("concluded")),
-            "ruling": None if v.get("ruling") is None else bool(v["ruling"]),
-            "settled": None if v.get("settled") is None else bool(v["settled"]),
+            "dao": None if v.get("dao") is None else bool(v["dao"]),
         }
     out["verdicts"] = verdicts
     return out
@@ -346,38 +345,27 @@ reviewer share with no eligible reviewer). It is normalized with the rest
 so every tool's share of the pool is fixed by its REP alone, then dropped
 before the claim tree: that ATN stays unminted and carries over."""
 
-HELD_PREFIX = "~held:"
-"""Bucket keys ``~held:<digest>:<recipient>`` carry the author side of a
-tool that concluded with a malware verdict (Decision 2026-11-09, the pay
-waits for the vote). They are split with the rest of the pool, so the
-amount is fixed in ATN at the conclusion, then taken out of the mint and
-RESERVED in the carried state (``tools[digest].held.amounts``): later
-closes divide a pool that excludes it. The DAO clearing the tool pays
-exactly the reserved amounts; a settled malware verdict returns them to
-the pool (unminted, carried over)."""
+UNPAID_PREFIX = "~unpaid:"
+"""Bucket keys ``~unpaid:<digest>:<recipient>`` carry the author side a
+tool would have paid had it not concluded on a malware verdict, its own or
+a dependency's (Decision 2026-11-10). They are split with the rest of the
+pool, so each part is fixed in ATN at the conclusion, then taken out of the
+mint: the ATN stays unminted and carries over, and the parts are recorded
+in the carried state (``tools[digest].unpaid``) so a DAO proposal that
+clears the verdict knows what to pay from the treasury. Nothing is
+reserved: a cleared tool is never paid by a close (it is paid once)."""
 
 
-def held_key(digest: str, recipient: str) -> str:
-    return f"{HELD_PREFIX}{digest}:{recipient}"
+def unpaid_key(digest: str, recipient: str) -> str:
+    return f"{UNPAID_PREFIX}{digest}:{recipient}"
 
 
-def parse_held_key(key: str) -> Optional[Tuple[str, str]]:
-    """(digest, recipient) of a held bucket key, or None."""
-    if not str(key).startswith(HELD_PREFIX):
+def parse_unpaid_key(key: str) -> Optional[Tuple[str, str]]:
+    """(digest, recipient) of an unpaid bucket key, or None."""
+    if not str(key).startswith(UNPAID_PREFIX):
         return None
-    digest, _, recipient = str(key)[len(HELD_PREFIX):].partition(":")
+    digest, _, recipient = str(key)[len(UNPAID_PREFIX):].partition(":")
     return (digest, recipient) if digest and recipient else None
-
-
-def reserved_units(state: Optional[Dict[str, Any]]) -> int:
-    """The ATN base units reserved for held author sides in a carried
-    review-round state."""
-    total = 0
-    for t in ((state or {}).get("tools") or {}).values():
-        held = t.get("held") if isinstance(t, dict) else None
-        for v in ((held or {}).get("amounts") or {}).values():
-            total += int(round(float(v) * ATN_BASE_UNITS))
-    return total
 
 
 REVIEW_DECAY_DEFAULT = 1.0
@@ -396,14 +384,20 @@ def _normalize_tool_rounds(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     "counts": {epoch: {household: n reviews}},
     "tools": {digest: {"concluded": bool, "rounds": [{"epoch", "decay",
     "reviews": [{"reviewer", "house", "rep", "n", "accuracy"}]}],
-    "held"?: {"amounts": {recipient: float}, "on": [digest]}}}}. ``held``
-    is a concluded tool's author side waiting on the malware verdicts of
-    the tools in ``on`` (itself or a dependency): ``amounts`` are its
-    author's and dependencies' parts as the conclusion fixed them (ATN once
-    the close split a pool), reserved until the vote.
+    "unpaid"?: {"amounts": {recipient: float}, "on": [digest]}}},
+    "refused": {digest: [digest]}, "pruned": [digest]}. ``unpaid`` is the
+    author side a tool concluded without, because of the malware verdicts
+    of the tools in ``on`` (itself or a dependency): its author's and
+    dependencies' parts as the conclusion fixed them (ATN once the close
+    split a pool), left unminted, kept for a proposal that clears a
+    verdict. ``refused`` maps each registration the close refused to the
+    malware tools it imports. ``pruned`` lists every tool daemons drop:
+    those with an uncleared malware verdict, the tools built on them, and
+    the refused registrations (Decision 2026-11-10).
     Derived purely from prior closes' pinned snapshots, so it is identical
     on every honest daemon (the carry-over commitment covers it)."""
-    out: Dict[str, Any] = {"pool_carry": 0, "counts": {}, "tools": {}}
+    out: Dict[str, Any] = {"pool_carry": 0, "counts": {}, "tools": {},
+                           "refused": {}, "pruned": []}
     if not state:
         return out
     try:
@@ -436,16 +430,21 @@ def _normalize_tool_rounds(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "concluded": bool(t.get("concluded")),
             "rounds": sorted(rounds, key=lambda r: r["epoch"]),
         }
-        held = t.get("held")
-        if isinstance(held, dict):
-            entry["held"] = {
+        unpaid = t.get("unpaid")
+        if isinstance(unpaid, dict):
+            entry["unpaid"] = {
                 "amounts": {str(a).lower(): round(float(v), 12)
-                            for a, v in sorted((held.get("amounts") or {}).items())
+                            for a, v in sorted((unpaid.get("amounts") or {}).items())
                             if float(v) > 0},
                 "on": sorted(str(d).lower().removeprefix("0x")
-                             for d in (held.get("on") or [])),
+                             for d in (unpaid.get("on") or [])),
             }
         out["tools"][str(digest).lower().removeprefix("0x")] = entry
+    for digest, on in sorted((state.get("refused") or {}).items()):
+        out["refused"][str(digest).lower().removeprefix("0x")] = sorted(
+            str(d).lower().removeprefix("0x") for d in (on or []))
+    out["pruned"] = sorted({str(d).lower().removeprefix("0x")
+                            for d in (state.get("pruned") or [])})
     return out
 
 
@@ -485,22 +484,24 @@ def compute_tool_mint(
         (``tool_score``). The author keeps N (the novelty mean) of it; the
         declared dependencies split 1 - N (``_composition_shares``); with
         none, 1 - N stays unminted;
-      - malware: when more than half the REP that reviewed the tool says
-        malware (in bps, as its concluded leaf carries it), or any tool it
-        depends on (transitively) has that verdict, the author side is not
-        paid: the pay waits for the vote. Its parts (the author's and the
-        dependencies', as computed now) go to ``held_key`` buckets, so the
-        close fixes them in ATN and reserves them (``held.amounts``). A
-        final malware verdict drops the reservation (``dropped``: back to
-        the pool); the DAO clearing every tool it waits on releases exactly
-        those amounts (``released``) in that close. A dependency's verdict
-        counts once its own reviewers clear the gate; a DAO ruling replaces
-        the reviewers';
+      - malware (Decision 2026-11-10): when more than half the REP that
+        reviewed the tool says malware (in bps, as its concluded leaf
+        carries it), or the DAO designated it, or any tool it depends on
+        (transitively) has such a verdict, the author side is not paid and
+        nothing waits: the verdict settles at the conclusion. The parts it
+        would have paid (the author's and the dependencies') go to
+        ``unpaid_key`` buckets, so the close fixes them in ATN, then they
+        stay unminted; the carried state keeps them (``unpaid``) for a DAO
+        proposal that clears the verdict and pays from the treasury. A
+        DAO clearing replaces any verdict, for the tools built on it too;
       - everything unpaid goes to UNMINTED and stays unminted.
+    A registration importing (transitively) a tool with an uncleared
+    malware verdict is refused: it never enters the registrations, and it
+    is pruned. ``pruned`` lists every tool daemons drop (the malware tools,
+    everything built on them, the refused registrations).
     ``concluded`` maps each tool concluding in this close to its malware
     share in bps: the anchor commits one leaf per entry, from which
-    ToolBond opens the verdict. ``released`` and ``dropped`` map digests to
-    the reserved amounts this close pays out or returns to the pool.
+    ToolBond opens the verdict.
     Not paid at all: unbonded tools and unpinned tools (they never
     conclude). Not counted: the author's own household as a reviewer,
     sanctioned households in the gate and in W.
@@ -509,17 +510,13 @@ def compute_tool_mint(
     from .library.tool_manifest import TRUST_PINNED
 
     known_regs: Dict[str, Dict[str, str]] = dict(registrations or {})
+    # This window's registrations join after the malware check below.
     reg_events = [
         e for e in events
         if e.get("kind") == "tool_registered"
         and e.get("artifact_digest") and e.get("manifest_meta")
     ]
     reg_events.sort(key=lambda e: (e.get("author_agent", ""), e.get("seq", 0)))
-    for ev in reg_events:
-        meta = dict(ev["manifest_meta"])
-        if ev.get("sender"):
-            meta.setdefault("sender", str(ev["sender"]))
-        known_regs.setdefault(ev["artifact_digest"], meta)
 
     owner_map_all = _lower_map(agent_owner_map or {}, values=True)
     rep_map = _lower_map(rep_shares) if rep_shares is not None else None
@@ -533,10 +530,10 @@ def compute_tool_mint(
             return 1.0      # local regime: every household weighs 1
         return float(rep_map.get(house, 0.0))
 
-    deps_of: Dict[str, List[str]] = {
-        d: [x for x in str(m.get("deps") or "").split(",") if x]
-        for d, m in known_regs.items()
-    }
+    def _deps(meta: Dict[str, Any]) -> List[str]:
+        return [x for x in str(meta.get("deps") or "").split(",") if x]
+
+    deps_of: Dict[str, List[str]] = {d: _deps(m) for d, m in known_regs.items()}
 
     sanctioned = {str(h).lower() for h in (sanctioned_households or ())}
     rev_snap = _normalize_review_snapshot(review_snapshot)
@@ -651,23 +648,20 @@ def compute_tool_mint(
             return None
         return max(0, int(cell["sum"]) * 100 // int(cell["mass"]))
 
-    def _ruled(digest: str) -> Optional[bool]:
-        """ToolBond's final word: the DAO's ruling, else the settled
-        verdict; None while open (or never formed on chain)."""
-        v = verdicts.get(digest) or {}
-        if v.get("ruling") is not None:
-            return bool(v["ruling"])
-        if v.get("settled") is not None:
-            return bool(v["settled"])
-        return None
+    def _dao(digest: str) -> Optional[bool]:
+        """The DAO's latest word on the tool in ToolBond: True when it
+        designated the tool malware, False when it cleared a verdict, None
+        when it said nothing."""
+        word = (verdicts.get(digest) or {}).get("dao")
+        return None if word is None else bool(word)
 
     def _malware(digest: str) -> bool:
-        """The tool's malware verdict: more than half its reviewing REP says
-        malware (in bps, as its leaf carries it), once its reviewers have
-        cleared the gate; a DAO ruling replaces the reviewers'."""
-        ruled = _ruled(digest)
-        if ruled is not None:
-            return ruled
+        """The tool's malware verdict: the DAO's word when it gave one, else
+        more than half its reviewing REP says malware (in bps, as its leaf
+        carries it), once its reviewers have cleared the gate."""
+        word = _dao(digest)
+        if word is not None:
+            return word
         bps = _share_bps(digest)
         if bps is None or bps <= verdict_bps:
             return False
@@ -694,6 +688,27 @@ def compute_tool_mint(
             stack.extend(x for x in deps_of.get(d, []) if x in deps_of)
         return sorted(found)
 
+    # This window's registrations: one importing (transitively) a tool with
+    # an uncleared malware verdict is refused and pruned (Decision
+    # 2026-11-10). Checked against the verdicts as this close starts, so a
+    # dependency that turns malware later in the close leaves its
+    # composites registered (they go unpaid at their conclusion).
+    refused_now: Dict[str, List[str]] = {}
+    for ev in reg_events:
+        digest = ev["artifact_digest"]
+        if digest in known_regs or digest in state["refused"]:
+            continue
+        meta = dict(ev["manifest_meta"])
+        if ev.get("sender"):
+            meta.setdefault("sender", str(ev["sender"]))
+        bad = sorted({m for x in _deps(meta) for m in _uses_malware(x)})
+        if bad:
+            refused_now[digest] = bad
+            state["refused"][digest] = bad
+            continue
+        known_regs[digest] = meta
+        deps_of[digest] = _deps(meta)
+
     def _own_share(digest: str) -> float:
         n = (ratings.get(digest) or {}).get("novelty")
         return COMPOSITE_ROOT_SHARE if n is None else float(n)
@@ -719,43 +734,7 @@ def compute_tool_mint(
             paid += part
         return paid
 
-    # 3. Author sides held on a malware verdict (the pay waits for the
-    # vote): their amounts were fixed and reserved at the conclusion. A
-    # final malware verdict drops the reservation (back to the pool, as
-    # unminted); the DAO clearing every tool it waits on releases exactly
-    # the reserved amounts, outside this close's pool split.
-    released: Dict[str, Dict[str, float]] = {}
-    dropped: Dict[str, Dict[str, float]] = {}
-    for digest in sorted(state["tools"]):
-        t = state["tools"][digest]
-        held = t.get("held")
-        if not held:
-            continue
-        finals = [_ruled(d) for d in held["on"]]
-        if any(f is True for f in finals):
-            dropped[digest] = dict(held.get("amounts") or {})
-            del t["held"]
-            continue
-        if not all(f is False for f in finals):
-            continue
-        still = _uses_malware(digest)
-        if still:
-            held["on"] = still
-            continue
-        amounts = dict(held.get("amounts") or {})
-        del t["held"]
-        released[digest] = amounts
-        rating = ratings.get(digest) or tool_rating(None, axis_ids, supply)
-        total = round(sum(amounts[a] for a in sorted(amounts)), 12)
-        per_digest[digest] = {
-            "author": _bonded_author(digest) or (known_regs.get(digest) or {}).get("author", ""),
-            "trust_class": TRUST_PINNED, "weight": 0.0,
-            "score": tool_score(rating), "novelty": rating.get("novelty"),
-            "malware": False, "released": True, "reviewers": 0,
-            "reviewer_mint": 0.0, "author_mint": total, "mint": total,
-        }
-
-    # 4. Conclusions.
+    # 3. Conclusions.
     for digest in sorted(state["tools"]):
         t = state["tools"][digest]
         if t["concluded"] or not t["rounds"]:
@@ -803,23 +782,22 @@ def compute_tool_mint(
                     reviewer_paid += part
 
         # Author side: the rest x the tool's score, the author keeping N and
-        # the dependencies splitting 1 - N. On a malware verdict it is held
-        # until ToolBond settles it (the DAO may clear the tool on appeal).
+        # the dependencies splitting 1 - N. On a malware verdict it is not
+        # paid; its parts are fixed in ATN and recorded (UNPAID_PREFIX).
         rating = ratings.get(digest) or tool_rating(None, axis_ids, supply)
         score = tool_score(rating)
         side = (weight - reviewer_pool) * score
-        author_paid = held_paid = 0.0
+        author_paid = unpaid = 0.0
         if malware:
-            # Fixed now, paid on the DAO's word (HELD_PREFIX).
-            held_bucket: Dict[str, float] = {}
-            held_paid = _pay_author_side(digest, author, side, held_bucket)
-            for who in sorted(held_bucket):
-                bucket[held_key(digest, who)] = held_bucket[who]
-            t["held"] = {"amounts": {a: round(v, 12) for a, v in sorted(held_bucket.items())},
-                         "on": malware_on}
+            unpaid_bucket: Dict[str, float] = {}
+            unpaid = _pay_author_side(digest, author, side, unpaid_bucket)
+            for who in sorted(unpaid_bucket):
+                bucket[unpaid_key(digest, who)] = unpaid_bucket[who]
+            t["unpaid"] = {"amounts": {a: round(v, 12) for a, v in sorted(unpaid_bucket.items())},
+                           "on": malware_on}
         else:
             author_paid = _pay_author_side(digest, author, side, bucket)
-        rest = (weight - reviewer_paid - author_paid - held_paid
+        rest = (weight - reviewer_paid - author_paid - unpaid
                 - bucket.get(UNMINTED, 0.0))
         if rest > 0:
             bucket[UNMINTED] = bucket.get(UNMINTED, 0.0) + rest
@@ -833,9 +811,25 @@ def compute_tool_mint(
             "reviewers": len([a for a in rev_w if a != UNMINTED]),
             "reviewer_mint": round(reviewer_paid, 12),
             "author_mint": round(author_paid, 12),
-            "reserved": round(held_paid, 12),
+            "unpaid": round(unpaid, 12),
             "mint": round(reviewer_paid + author_paid, 12),
         }
+
+    # Pruned (Decision 2026-11-10): every known tool with an uncleared
+    # malware verdict, its own or a dependency's, and every refused
+    # registration. Recomputed each close, so a DAO clearing un-prunes.
+    used_by: Dict[str, List[str]] = {}
+    for d in sorted(deps_of):
+        for x in deps_of[d]:
+            used_by.setdefault(x, []).append(d)
+    pruned = {d for d in set(deps_of) | set(used_by) if _malware(d)}
+    stack = sorted(pruned)
+    while stack:
+        for parent in used_by.get(stack.pop(), []):
+            if parent not in pruned:
+                pruned.add(parent)
+                stack.append(parent)
+    state["pruned"] = sorted((pruned & set(known_regs)) | set(state["refused"]))
 
     # Ratings as plain means (Decision 2026-11-09): the ToolBond-settled
     # REP-weighted mean per field and per charter axis; a same-author
@@ -874,8 +868,8 @@ def compute_tool_mint(
         "ratings_next": ratings_next,
         "tool_rounds_next": state,
         "concluded": dict(sorted(concluded_bps.items())),
-        "released": dict(sorted(released.items())),
-        "dropped": dict(sorted(dropped.items())),
+        "refused": dict(sorted(refused_now.items())),
+        "pruned": list(state["pruned"]),
     }
 
 
@@ -936,9 +930,6 @@ def federated_epoch_close(
         reviewer_min_rep_bps=reviewer_min_rep_bps,
     )
     rounds_next = tool_result["tool_rounds_next"]
-    # Author sides reserved by earlier closes (HELD_PREFIX): outside the
-    # pool, so this close cannot spend them.
-    reserved_in = reserved_units(_normalize_tool_rounds(tool_rounds))
     # The pool carries over (Decision 2026-11-07): what earlier closes left
     # unminted joins this epoch's burned fees. Substrate caps claims on the
     # cumulative pool, so the carry can be spent in any later epoch.
@@ -971,28 +962,22 @@ def federated_epoch_close(
         result["agent_mint"] = dict(sorted(
             _round_dict(result.get("agent_mint", {}), output_decimals).items()
         ))
-    # Held author sides concluding now: their parts, fixed in ATN by the
-    # split above, leave the mint and are reserved until the vote.
-    reserved_now: Dict[str, Dict[str, float]] = {}
+    # Author sides left unpaid on a malware verdict: their parts, fixed in
+    # ATN by the split above, leave the mint (unminted, carried over) and
+    # are recorded for a proposal that clears the verdict.
+    unpaid_now: Dict[str, Dict[str, float]] = {}
     for key in sorted(result["agent_mint"]):
-        parsed = parse_held_key(key)
+        parsed = parse_unpaid_key(key)
         if parsed is not None:
             digest, who = parsed
-            reserved_now.setdefault(digest, {})[who] = result["agent_mint"][key]
+            unpaid_now.setdefault(digest, {})[who] = result["agent_mint"][key]
     for digest in sorted(rounds_next["tools"]):
-        held = rounds_next["tools"][digest].get("held")
-        if held is not None and digest in tool_result["concluded"]:
-            held["amounts"] = dict(sorted((reserved_now.get(digest) or {}).items()))
-    result["agent_mint"] = {k: v for k, v in result["agent_mint"].items()
-                            if k != UNMINTED and parse_held_key(k) is None}
-    # Released author sides: exactly what their conclusion reserved, paid
-    # on top of this close's pool split.
-    for digest in sorted(tool_result["released"]):
-        amounts = tool_result["released"][digest]
-        for who in sorted(amounts):
-            result["agent_mint"][who] = round(
-                result["agent_mint"].get(who, 0.0) + float(amounts[who]), output_decimals)
-    result["agent_mint"] = dict(sorted(result["agent_mint"].items()))
+        unpaid = rounds_next["tools"][digest].get("unpaid")
+        if unpaid is not None and digest in tool_result["concluded"]:
+            unpaid["amounts"] = dict(sorted((unpaid_now.get(digest) or {}).items()))
+    result["agent_mint"] = dict(sorted(
+        (k, v) for k, v in result["agent_mint"].items()
+        if k != UNMINTED and parse_unpaid_key(k) is None))
     # Keep tool_mint in the SAME UNITS as agent_mint: when the pool
     # normalized agent mints, scale the per-digest display values by the
     # identical factor. Sorted iteration + rounding.
@@ -1001,21 +986,19 @@ def federated_epoch_close(
     _raw_total = float(result.get("raw_mint_total") or 0.0)
     if _pool is not None and _raw_total > 0.0:
         _scale = float(_pool) / _raw_total
-        # A released author side is already in ATN (fixed at conclusion).
         per_digest = {
-            d: e if e.get("released") else {
-                **e, "mint": round(e["mint"] * _scale, output_decimals),
+            d: {**e, "mint": round(e["mint"] * _scale, output_decimals),
                 "reviewer_mint": round(e.get("reviewer_mint", 0.0) * _scale,
                                        output_decimals),
                 "author_mint": round(e.get("author_mint", 0.0) * _scale,
                                      output_decimals),
-                "reserved": round(e.get("reserved", 0.0) * _scale, output_decimals)}
+                "unpaid": round(e.get("unpaid", 0.0) * _scale, output_decimals)}
             for d, e in sorted(per_digest.items())
         }
-    for d in sorted(reserved_now):
+    for d in sorted(unpaid_now):
         if d in per_digest:
-            per_digest[d] = {**per_digest[d], "reserved": round(
-                sum(reserved_now[d].values()), output_decimals)}
+            per_digest[d] = {**per_digest[d], "unpaid": round(
+                sum(unpaid_now[d].values()), output_decimals)}
     # Sanctions: withhold the mint of every agent whose household is
     # sanctioned. Applied AFTER the pool split, so the withheld amount stays
     # unminted instead of raising everyone else's share: a sanction never
@@ -1051,27 +1034,26 @@ def federated_epoch_close(
     result["tool_mint"] = per_digest
     result["tool_registrations"] = tool_result["registrations_next"]
     if emission_pool is not None:
-        # Conservation: pool + reserved before = minted + carry + reserved
-        # after. A release moves reserved ATN into the mint, a dropped
-        # reservation and withheld mint fall into the carry, and new
-        # reservations come out of this pool.
+        # Conservation: pool = minted + carry. Malware-unpaid parts and
+        # withheld mint fall into the carry.
         pool_raw = int(round(float(emission_pool) * ATN_BASE_UNITS))
         minted_raw = sum(int(round(float(v) * ATN_BASE_UNITS))
                          for v in result["agent_mint"].values())
-        reserved_out = reserved_units(rounds_next)
-        rounds_next["pool_carry"] = max(
-            0, pool_raw + reserved_in - reserved_out - minted_raw)
+        rounds_next["pool_carry"] = max(0, pool_raw - minted_raw)
         logger.info(
             "tool mint: %d tool(s) concluded, minted %.6f of a %.6f pool, "
-            "%.6f carried over, %.6f reserved for malware votes",
+            "%.6f carried over",
             len(tool_result["per_digest"]),
             minted_raw / ATN_BASE_UNITS, pool_raw / ATN_BASE_UNITS,
-            rounds_next["pool_carry"] / ATN_BASE_UNITS,
-            reserved_out / ATN_BASE_UNITS)
-    result["reserved_mint"] = {
-        d: dict(rounds_next["tools"][d]["held"].get("amounts") or {})
-        for d in sorted(rounds_next["tools"]) if rounds_next["tools"][d].get("held")}
+            rounds_next["pool_carry"] / ATN_BASE_UNITS)
+    # What each tool concluding on a malware verdict would have paid, for a
+    # proposal that clears the verdict (kept in tool_rounds too).
+    result["malware_unpaid"] = {
+        d: dict(rounds_next["tools"][d]["unpaid"])
+        for d in sorted(unpaid_now) if rounds_next["tools"].get(d, {}).get("unpaid")}
     result["tool_rounds"] = rounds_next
+    result["pruned"] = list(rounds_next["pruned"])
+    result["refused"] = tool_result["refused"]
     result["tool_ratings"] = tool_result["ratings_next"]
     result["concluded"] = tool_result["concluded"]
     result["epoch_root"] = canonical.epoch_root().hex()

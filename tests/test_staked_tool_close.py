@@ -261,15 +261,15 @@ class TestReviewSnapshotFold:
 
     def test_verdict_events_fold_per_tool(self):
         recs = self._round1() + [
-            _rec(20, "Concluded", digest=D, anchorIndex=3, malwareShare=6 * E18 // 10,
-                 appealEnds=99),
-            _rec(21, "MalwareRuled", digest=D, malware=False),
-            _rec(22, "MalwareSettled", digest=D, malware=False, bondSlashed=0,
-                 repBurned=0)]
-        assert _fold(recs)["verdicts"][DIGEST] == {
-            "concluded": True, "ruling": False, "settled": False}
-        assert _fold(recs, block=20)["verdicts"][DIGEST] == {
-            "concluded": True, "ruling": None, "settled": None}
+            _rec(20, "Concluded", digest=D, anchorIndex=3, malwareShare=6 * E18 // 10),
+            _rec(20, "MalwareSlashed", digest=D, by=1, bondSlashed=0, repBurned=0),
+            _rec(21, "MalwareSlashed", digest=D, by=2, bondSlashed=0, repBurned=0),
+            _rec(22, "Cleared", digest=D, household="0x" + "aa" * 20, repReturned=0)]
+        # The reviewers' verdict is the close's own; only the DAO's word is
+        # carried: designated (by 2), then cleared (Decision 2026-11-10).
+        assert _fold(recs, block=20)["verdicts"][DIGEST] == {"concluded": True, "dao": None}
+        assert _fold(recs, block=21)["verdicts"][DIGEST] == {"concluded": True, "dao": True}
+        assert _fold(recs)["verdicts"][DIGEST] == {"concluded": True, "dao": False}
 
     def test_settlement_and_epoch_logs_replace_the_views(self):
         # ReviewSettled carries each accuracy and EpochStarted the axis ids

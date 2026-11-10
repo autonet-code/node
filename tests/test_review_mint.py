@@ -6,8 +6,9 @@ the breakthrough gate. Its share of the pool is the REP behind its reviews
 whatever the scores, split by accuracy among households above the REP
 minimum; the author side is the rest x V x C x S, of which the author keeps
 N and the dependencies split 1 - N; a malware verdict leaves the author side
-unpaid, also for composites using the tool; anything unpaid stays unminted
-and the pool carries over.
+unpaid, also for composites using the tool, and settles at the conclusion
+(Decision 2026-11-10: no hold, the DAO clears or designates by proposal);
+anything unpaid stays unminted and the pool carries over.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from nodes.common.canonical_ordering import canonical_order
 from nodes.common.event_gossip import Keypair
 from nodes.common.federated_reconcile import (
     UNMINTED,
-    held_key,
+    unpaid_key,
     compute_tool_mint,
     federated_epoch_close,
     tool_rating,
@@ -232,11 +233,13 @@ class TestMalware:
         tot = _totals(out)
         assert AUTHOR not in tot
         assert tot[R1] == pytest.approx(0.5 * 0.4 * 0.5)
-        # The author side is fixed now and held for the vote, not unminted.
+        # What the author side would have paid is fixed now under its own
+        # key, so the close can record it in ATN; it is never minted.
         assert UNMINTED not in tot
-        assert tot[held_key(DIGEST, AUTHOR)] == pytest.approx(0.5 * 0.6)
+        assert tot[unpaid_key(DIGEST, AUTHOR)] == pytest.approx(0.5 * 0.6)
         assert out["per_digest"][DIGEST]["malware"] is True
-        assert out["per_digest"][DIGEST]["reserved"] == pytest.approx(0.5 * 0.6)
+        assert out["per_digest"][DIGEST]["unpaid"] == pytest.approx(0.5 * 0.6)
+        assert out["per_digest"][DIGEST]["author_mint"] == 0.0
 
     def test_half_is_not_more_than_half(self):
         out = _mint({DIGEST: [_round(1, _rev(R1))]}, snap={"malware": 0.5})
@@ -277,44 +280,50 @@ class TestMalware:
 
 
 class TestVerdictFlow:
-    """The pay waits for the vote: a malware verdict holds the author side
-    until ToolBond settles it (Decision 2026-11-09)."""
+    """The verdict settles at the conclusion; the DAO's word replaces it at
+    any time (Decision 2026-11-10)."""
 
     def _concluded_malware(self):
         out = _mint({DIGEST: [_round(1, _rev(R1), _rev(R2))]}, snap={"malware": 0.6})
         return out, out["tool_rounds_next"]
 
-    def _later(self, state, verdict, **kw):
+    def _later(self, state, dao, **kw):
         snap = _snap({}, tools={DIGEST: tool_cells(malware=0.6)})
-        snap["verdicts"] = {DIGEST: {"concluded": True, **verdict}}
+        snap["verdicts"] = {DIGEST: {"concluded": True, "dao": dao}}
         return _mint(None, snapshot=snap, state=state, **kw)
 
-    def test_the_author_side_is_held_and_the_leaf_carries_the_share(self):
+    def test_the_unpaid_side_is_recorded_and_the_leaf_carries_the_share(self):
         out, state = self._concluded_malware()
         assert out["concluded"] == {DIGEST: 6000}
-        assert state["tools"][DIGEST]["held"] == {
+        assert state["tools"][DIGEST]["unpaid"] == {
             "amounts": {AUTHOR: pytest.approx(0.5 * 0.6)}, "on": [DIGEST]}
+        assert state["pruned"] == [DIGEST]
 
-    def test_a_dao_ruling_of_no_malware_pays_it_in_that_close(self):
+    def test_a_dao_clearing_pays_nothing_in_a_close_and_unprunes(self):
         _, state = self._concluded_malware()
-        waiting = self._later(state, {"ruling": None, "settled": None})
-        assert waiting["node_agent"] == {}
-        assert "held" in waiting["tool_rounds_next"]["tools"][DIGEST]
-        cleared = self._later(state, {"ruling": False, "settled": None})
-        # Exactly the reserved amounts, outside this close's pool split.
-        assert cleared["node_agent"] == {}
-        assert cleared["released"] == {DIGEST: state["tools"][DIGEST]["held"]["amounts"]}
-        assert cleared["per_digest"][DIGEST]["released"] is True
-        assert cleared["per_digest"][DIGEST]["author_mint"] == pytest.approx(0.5 * 0.6)
-        assert "held" not in cleared["tool_rounds_next"]["tools"][DIGEST]
-        assert cleared["concluded"] == {}          # it concluded before
+        cleared = self._later(state, False)
+        # Paid once: a cleared tool is paid from the treasury, not a close.
+        assert cleared["node_agent"] == {} and cleared["per_digest"] == {}
+        assert cleared["concluded"] == {}
+        assert cleared["pruned"] == []
+        # The record stays for the proposal that pays it.
+        assert cleared["tool_rounds_next"]["tools"][DIGEST]["unpaid"]["amounts"] == {
+            AUTHOR: pytest.approx(0.5 * 0.6)}
 
-    def test_a_settled_malware_verdict_drops_it(self):
-        _, state = self._concluded_malware()
-        out = self._later(state, {"ruling": None, "settled": True})
-        assert out["node_agent"] == {} and out["released"] == {}
-        assert out["dropped"] == {DIGEST: state["tools"][DIGEST]["held"]["amounts"]}
-        assert "held" not in out["tool_rounds_next"]["tools"][DIGEST]
+    def test_a_dao_designation_needs_no_reviews(self):
+        snap = _snap({DIGEST: [_round(1, _rev(R1))]}, tools={DIGEST: tool_cells()})
+        snap["verdicts"] = {DIGEST: {"concluded": False, "dao": True}}
+        out = _mint(None, snapshot=snap)
+        assert out["per_digest"][DIGEST]["malware"] is True
+        assert AUTHOR not in _totals(out)
+        assert out["pruned"] == [DIGEST]
+
+    def test_a_dao_clearing_replaces_the_reviewers_verdict_before_conclusion(self):
+        snap = _snap({DIGEST: [_round(1, _rev(R1))]}, tools={DIGEST: tool_cells(malware=0.9)})
+        snap["verdicts"] = {DIGEST: {"concluded": False, "dao": False}}
+        out = _mint(None, snapshot=snap)
+        assert out["per_digest"][DIGEST]["malware"] is False
+        assert _totals(out)[AUTHOR] > 0
 
     def test_the_leaf_share_is_floored_bps(self):
         out = _mint({DIGEST: [_round(1, _rev(R1))]},
@@ -322,6 +331,62 @@ class TestVerdictFlow:
                                    tools={DIGEST: tool_cells(malware=0.0)}))
         assert out["concluded"] == {DIGEST: 0}
         assert out["per_digest"][DIGEST]["malware"] is False
+
+
+class TestRefusedAndPruned:
+    """A registration importing a malware tool is refused; malware tools and
+    everything built on them are pruned (Decision 2026-11-10)."""
+
+    MAL_STATE = {"tools": {DEP: {"concluded": True, "rounds": []}}}
+    MAL_TOOLS = {DEP: tool_cells(malware=0.9)}
+
+    def _snap(self):
+        return _snap({}, tools=dict(self.MAL_TOOLS))
+
+    def test_a_composite_importing_a_malware_tool_is_refused(self):
+        ev = _registration_event(1, digest=DIGEST, deps=DEP)
+        out = compute_tool_mint(
+            [ev], registrations={DEP: COMPOSITE_REGS[DEP]}, rep_shares=SHARES,
+            review_snapshot=self._snap(), tool_rounds=self.MAL_STATE)
+        assert DIGEST not in out["registrations_next"]
+        assert out["refused"] == {DIGEST: [DEP]}
+        assert out["pruned"] == sorted([DEP, DIGEST])
+        # The refusal is carried, so a later gossip copy stays out.
+        again = compute_tool_mint(
+            [ev], registrations=out["registrations_next"], rep_shares=SHARES,
+            review_snapshot=self._snap(), tool_rounds=out["tool_rounds_next"])
+        assert DIGEST not in again["registrations_next"]
+        assert again["refused"] == {} and DIGEST in again["pruned"]
+
+    def test_a_transitive_import_is_refused_too(self):
+        mid = "dd" * 32
+        regs = {DEP: COMPOSITE_REGS[DEP],
+                mid: {"trust_class": "pinned", "author": "mid", "deps": DEP}}
+        ev = _registration_event(1, digest=DIGEST, deps=mid)
+        out = compute_tool_mint(
+            [ev], registrations=regs, rep_shares=SHARES,
+            review_snapshot=self._snap(), tool_rounds=self.MAL_STATE)
+        assert out["refused"] == {DIGEST: [DEP]}
+        assert out["pruned"] == sorted([DEP, mid, DIGEST])
+
+    def test_a_clean_import_registers(self):
+        ev = _registration_event(1, digest=DIGEST, deps=DEP)
+        out = compute_tool_mint(
+            [ev], registrations={DEP: COMPOSITE_REGS[DEP]}, rep_shares=SHARES,
+            review_snapshot=_snap({}, tools={DEP: tool_cells()}))
+        assert DIGEST in out["registrations_next"]
+        assert out["refused"] == {} and out["pruned"] == []
+
+    def test_a_composite_registered_before_the_verdict_is_pruned_after(self):
+        out = _mint(None, regs=COMPOSITE_REGS, snapshot=self._snap(),
+                    state=self.MAL_STATE)
+        assert out["pruned"] == sorted([DEP, DIGEST])
+
+    def test_a_dao_clearing_unprunes_the_composites(self):
+        snap = self._snap()
+        snap["verdicts"] = {DEP: {"concluded": True, "dao": False}}
+        out = _mint(None, regs=COMPOSITE_REGS, snapshot=snap, state=self.MAL_STATE)
+        assert out["pruned"] == []
 
 
 class TestRatingsCarry:
@@ -384,10 +449,10 @@ class TestCloseCarry:
         assert a["node_agent"] == b["node_agent"]
 
 
-class TestReservedAuthorSide:
-    """A held author side is fixed in ATN at its conclusion and reserved:
-    later pools exclude it, the DAO's no pays exactly it, a settled malware
-    verdict returns it to the pool (Decision 2026-11-09)."""
+class TestUnpaidAuthorSide:
+    """The author side a malware verdict leaves unpaid is fixed in ATN at the
+    conclusion, recorded, and left unminted: it carries over, and nothing is
+    reserved (Decision 2026-11-10)."""
 
     def _conclude(self, pool=10.0):
         kp = Keypair.generate()
@@ -397,75 +462,57 @@ class TestReservedAuthorSide:
             canonical, emission_pool=pool, tool_registrations=REGS,
             rep_shares=SHARES, review_snapshot=snap)
 
-    def _next(self, canonical, first, verdict, pool=3.0):
+    def _next(self, canonical, first, dao, pool=3.0):
         snap = _snap({}, tools={DIGEST: tool_cells(malware=0.6)})
-        snap["verdicts"] = {DIGEST: {"concluded": True, **verdict}}
+        snap["verdicts"] = {DIGEST: {"concluded": True, "dao": dao}}
         return federated_epoch_close(
             canonical, emission_pool=pool, tool_registrations=REGS,
             rep_shares=SHARES, review_snapshot=snap,
             tool_rounds=first["tool_rounds"])
 
-    def test_fixed_in_atn_and_reserved_out_of_the_carry(self):
+    def test_fixed_in_atn_recorded_and_carried(self):
         _, first = self._conclude()
-        # One tool takes the whole 10 ATN pool: 4 to its reviewers, the
-        # author side 6 x score 1 reserved, nothing carried.
-        assert first["reserved_mint"] == {DIGEST: {AUTHOR: 6.0}}
-        assert first["tool_rounds"]["tools"][DIGEST]["held"]["amounts"] == {AUTHOR: 6.0}
+        # One tool takes the whole 10 ATN pool: 4 to its reviewers; the
+        # author side, 6 x score 1, is recorded and carried over.
+        assert first["malware_unpaid"] == {DIGEST: {"amounts": {AUTHOR: 6.0}, "on": [DIGEST]}}
+        assert first["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == {AUTHOR: 6.0}
         assert sum(first["agent_mint"].values()) == pytest.approx(4.0)
-        assert first["tool_rounds"]["pool_carry"] == 0
-        assert first["tool_mint"][DIGEST]["reserved"] == pytest.approx(6.0)
+        assert first["tool_rounds"]["pool_carry"] == 6_000_000
+        assert first["tool_mint"][DIGEST]["unpaid"] == pytest.approx(6.0)
+        assert first["pruned"] == [DIGEST]
 
-    def test_an_intermediate_close_cannot_spend_it(self):
+    def test_a_later_close_spends_the_carry(self):
         canonical, first = self._conclude()
-        waiting = self._next(canonical, first, {"ruling": None, "settled": None})
-        assert waiting["agent_mint"] == {}
-        # Only this close's own 3 ATN carries; the 6 stay reserved.
-        assert waiting["tool_rounds"]["pool_carry"] == 3_000_000
-        assert waiting["reserved_mint"] == {DIGEST: {AUTHOR: 6.0}}
+        later = self._next(canonical, first, None)
+        assert later["agent_mint"] == {} and later["malware_unpaid"] == {}
+        assert later["tool_rounds"]["pool_carry"] == 9_000_000
 
-    def test_the_daos_no_pays_exactly_the_reserved_amount(self):
+    def test_a_clearing_mints_nothing_and_keeps_the_record(self):
         canonical, first = self._conclude()
-        waiting = self._next(canonical, first, {"ruling": None, "settled": None})
-        cleared = self._next(canonical, {"tool_rounds": waiting["tool_rounds"]},
-                             {"ruling": False, "settled": False}, pool=1.0)
-        assert cleared["agent_mint"] == {AUTHOR.lower(): 6.0}
-        assert cleared["tool_mint"][DIGEST]["author_mint"] == 6.0
-        assert cleared["reserved_mint"] == {}
-        # Its own pool and the earlier carry are untouched: 3 + 1 carried.
-        assert cleared["tool_rounds"]["pool_carry"] == 4_000_000
+        cleared = self._next(canonical, first, False)
+        assert cleared["agent_mint"] == {}
+        assert cleared["tool_rounds"]["pool_carry"] == 9_000_000
+        assert cleared["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == {AUTHOR: 6.0}
+        assert cleared["pruned"] == []
 
-    def test_a_malware_yes_returns_it_to_the_pool(self):
-        canonical, first = self._conclude()
-        dropped = self._next(canonical, first, {"ruling": None, "settled": True})
-        assert dropped["agent_mint"] == {} and dropped["reserved_mint"] == {}
-        assert dropped["tool_rounds"]["pool_carry"] == 9_000_000
-
-    def test_the_carry_bundle_holds_the_reservation(self):
-        """A joiner or a rewind installs the anchored carry bundle and pays
-        the same reserved amount on release."""
+    def test_the_carry_bundle_holds_the_record_and_the_pruned_list(self):
         from nodes.common.authoritative_encoding import (
             decode_carry_bundle, encode_carry_bundle)
-        canonical, first = self._conclude()
+        _, first = self._conclude()
         blob = encode_carry_bundle({"tool_registrations": first["tool_registrations"],
                                     "tool_rounds": first["tool_rounds"],
                                     "tool_ratings": first["tool_ratings"]}, epoch_id="e1")
         carry = decode_carry_bundle(blob)["carry"]
-        assert carry["tool_rounds"]["tools"][DIGEST]["held"]["amounts"] == {AUTHOR: 6.0}
-        joiner = self._next(canonical, {"tool_rounds": carry["tool_rounds"]},
-                            {"ruling": False, "settled": False})
-        assert joiner["agent_mint"] == {AUTHOR.lower(): 6.0}
+        assert carry["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == {AUTHOR: 6.0}
+        assert carry["tool_rounds"]["pruned"] == [DIGEST]
 
     def test_conservation_across_closes(self):
         canonical, first = self._conclude()
-        for verdict in ({"ruling": False, "settled": False},
-                        {"ruling": True, "settled": True}):
-            nxt = self._next(canonical, first, verdict)
+        for dao in (None, False, True):
+            nxt = self._next(canonical, first, dao)
             minted = sum(round(v * 1_000_000) for d in (first, nxt)
                          for v in d["agent_mint"].values())
-            left = nxt["tool_rounds"]["pool_carry"] + sum(
-                round(v * 1_000_000) for a in nxt["reserved_mint"].values()
-                for v in a.values())
-            assert minted + left == 13_000_000
+            assert minted + nxt["tool_rounds"]["pool_carry"] == 13_000_000
 
 
 class TestSanctionedReviewer:
