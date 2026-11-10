@@ -628,6 +628,9 @@ def daemon_env(home: Path) -> Dict[str, str]:
     env["PYTHONUNBUFFERED"] = "1"
     # Keep the child's ollama pointed where we probed.
     env["OLLAMA_HOST"] = OLLAMA_URL
+    # The agents here are native (the daemon runs their loop on ollama), a
+    # mode that is off on a fresh daemon (atn/native_mode.py).
+    env["ATN_NATIVE_AGENTS"] = "1"
     return env
 
 
@@ -764,6 +767,21 @@ class DaemonClient:
                 f"{self.label}: {frame.get('type')} failed — "
                 f"{reply.get('error')}")
         return reply.get("result") or {}
+
+    async def export_key(self, agent_id: str, owner_acct: Any) -> Dict[str, Any]:
+        """``export_agent_key`` with the owner wallet's signature over a
+        one-use challenge, which the daemon requires for any key export
+        (OWNER_SIGNED_MESSAGES in atn/ws_server.py)."""
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        ch = await self.ok({"type": "owner_challenge",
+                            "action": "export_agent_key"})
+        sig = Account.sign_message(encode_defunct(text=ch["challenge"]),
+                                   owner_acct.key).signature
+        return await self.ok({
+            "type": "export_agent_key", "agent_id": agent_id,
+            "owner_nonce": ch["nonce"], "owner_sig": "0x" + bytes(sig).hex()})
 
     async def close(self) -> None:
         if self._ws is not None:
@@ -925,11 +943,10 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         # ------------------------------------------------------------------
         s3 = board.stage(3, "provider daemon (real `python -m atn` subprocess)")
         try:
-            # The seller's daemon config. `sponsor_provider: ollama` is what
-            # makes the inference-service dispatch resolve the LOCAL MODEL:
-            # `_resolve_sponsor_provider` otherwise guesses by model-name
-            # prefix and defaults to anthropic (an API key we deliberately do
-            # not have here).
+            # The seller's daemon config. The service it lists names its
+            # upstream (inference.provider "ollama", stage 6), which the
+            # provider manager builds from `providers.ollama` below; nothing
+            # is guessed from the model's name.
             prov_autonet: Dict[str, Any] = {
                     "enabled": False,          # no p2p/epoch machinery needed
                     "local_ws_port": PROVIDER_PORT,
@@ -939,9 +956,6 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     "chain_id": CHAIN_ID,
                     "substrate_address": addresses["substrate"],
                     "service_registry_address": addresses["serviceRegistry"],
-                    # The seller sells cognition off its own stack.
-                    "sponsor_provider": "ollama",
-                    "sponsor_model": model,
             }
             if PROVIDER_OFFBOX:
                 # The privileged listener is loopback-pinned in atn/cli.py, so
@@ -1086,8 +1100,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     "system_prompt": "You sell cognition.",
                     "provider": "ollama", "model": model,
                 })
-                exported = await prov_client.ok({
-                    "type": "export_agent_key", "agent_id": prov_agent})
+                exported = await prov_client.export_key(prov_agent, owner_prov)
                 prov_key = exported["private_key"]
                 prov_addr = Web3.to_checksum_address(exported["address"])
 
@@ -1105,10 +1118,8 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                                      "nothing more. Never use tools.",
                     "provider": "ollama", "model": model,
                 })
-                p_exp = await cons_client.ok({
-                    "type": "export_agent_key", "agent_id": parent_agent})
-                c_exp = await cons_client.ok({
-                    "type": "export_agent_key", "agent_id": child_agent})
+                p_exp = await cons_client.export_key(parent_agent, owner_cons)
+                c_exp = await cons_client.export_key(child_agent, owner_cons)
                 parent_addr = Web3.to_checksum_address(p_exp["address"])
                 child_addr = Web3.to_checksum_address(c_exp["address"])
                 child_key = c_exp["private_key"]
@@ -1222,24 +1233,32 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 # ATN-denominated by construction (ratified 2026-07-10;
                 # the vestigial `ask.token` was dropped 2026-07-26).
                 "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
-                "inference": {"model": model,
+                "inference": {"provider": "ollama", "model": model,
                               "max_tokens_cap": MAX_TOKENS_CAP},
             })
             spec_digest = reg["digest"]
-            # The gate verifies the payment recipient against author_pubkey, so
-            # the spec must be stamped with the selling agent's own 0x.
             listed = await prov_client.ok({"type": "list_services"})
             mine = next(s for s in listed["services"]
                         if s["digest"] == spec_digest)
+            assert mine["inference"].get("provider") == "ollama", mine
             assert mine["inference"].get("model") == model, mine
             assert mine["inference"].get("max_tokens_cap") == MAX_TOKENS_CAP
 
-            # On-chain listing, signed by the selling AGENT's key.
-            send_tx(w3,
-                    registry_c.functions.registerService(
-                        bytes.fromhex(spec_digest), SERVICE_ASK),
-                    prov_key, prov_addr)
-            service_id = registry_c.functions.serviceCount().call()
+            # On-chain listing, signed by the selling AGENT's key: the daemon
+            # registers it itself; only if it could not is it sent here.
+            if reg.get("on_chain"):
+                service_id = reg.get("service_id")
+            else:
+                log(f"the daemon did not register on chain "
+                    f"({reg.get('reason')}); registering from here")
+                send_tx(w3,
+                        registry_c.functions.registerService(
+                            bytes.fromhex(spec_digest), SERVICE_ASK),
+                        prov_key, prov_addr)
+                service_id = registry_c.functions.serviceCount().call()
+            entry = registry_c.functions.services(int(service_id)).call()
+            assert str(entry[0]).lower() == prov_addr.lower(), entry
+            assert int(entry[2]) == SERVICE_ASK, entry
 
             # Publish the reachable ws endpoint ON CHAIN. This is how the
             # consumer finds the counterparty — nothing is hardcoded on the
@@ -1555,10 +1574,12 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 ok_rows = [r for r in mine_rows if r.get("ok")]
                 assert ok_rows, (
                     f"the provider logged only FAILED requests: {mine_rows}")
-                assert (ok_rows[-1].get("client", "").lower()
+                # The payer the gate verified, not a client field the
+                # request carried.
+                assert (ok_rows[-1].get("payer", "").lower()
                         == child_addr.lower()), (ok_rows[-1], child_addr)
                 s8.note("provider_log_rows", len(mine_rows))
-                s8.note("provider_log_client", ok_rows[-1].get("client"))
+                s8.note("provider_log_payer", ok_rows[-1].get("payer"))
                 step(f"provider request log recorded {len(ok_rows)} served "
                      f"item(s) for the child")
 
