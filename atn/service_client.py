@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from typing import Any
@@ -83,6 +84,81 @@ def recover_request_signer(signature: str, request_id: str, spec_digest: str,
     msg = encode_defunct(primitive=request_auth_hash(
         request_id, spec_digest, args, provider))
     return Account.recover_message(msg, signature=signature)
+
+
+# The provider signs each reply (``receipt_sig``) with the key of the
+# address the buyer paid, the service's on-chain provider. A relay, or
+# whoever answers a wss URL, can drop a request but cannot make up its
+# answer: a reply the buyer cannot verify is not treated as served.
+REPLY_AUTH_DOMAIN = "autonet:service_reply:v1"
+
+
+def _reply_body(reply: dict[str, Any]) -> bytes:
+    body = {"ok": bool(reply.get("ok")), "result": reply.get("result"),
+            "error": reply.get("error")}
+    return json.dumps(body, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True).encode("utf-8")
+
+
+def reply_auth_hash(request_id: str, spec_digest: str,
+                    reply: dict[str, Any]) -> bytes:
+    """keccak over (domain, request id, spec digest, sha256 of the reply's
+    ``ok``, ``result`` and ``error`` as canonical JSON): what the provider
+    signs. Ids and digests are compared lowercase without ``0x``."""
+    import hashlib
+
+    from eth_abi import encode
+    from eth_utils import keccak
+
+    rid = str(request_id or "").strip().lower().removeprefix("0x")
+    return keccak(encode(
+        ["string", "string", "string", "bytes32"],
+        [REPLY_AUTH_DOMAIN, rid, normalize_digest(spec_digest),
+         hashlib.sha256(_reply_body(reply)).digest()]))
+
+
+def sign_reply(private_key: str, request_id: str, spec_digest: str,
+               reply: dict[str, Any]) -> dict[str, Any]:
+    """``reply`` with ``result`` and ``error`` in their JSON form (what the
+    buyer will parse) and ``receipt_sig`` over them."""
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    out = dict(reply)
+    for key in ("result", "error"):
+        if key in out:
+            out[key] = json.loads(json.dumps(out[key], default=str))
+    msg = encode_defunct(primitive=reply_auth_hash(request_id, spec_digest, out))
+    key = private_key if private_key.startswith("0x") else "0x" + private_key
+    out["receipt_sig"] = "0x" + bytes(
+        Account.sign_message(msg, key).signature).hex()
+    return out
+
+
+def reply_signer(reply: Any, request_id: str, spec_digest: str) -> str:
+    """The address that signed ``reply``, or "" when unsigned or invalid."""
+    if not isinstance(reply, dict):
+        return ""
+    sig = str(reply.get("receipt_sig") or "").strip()
+    if not sig:
+        return ""
+    try:
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        return str(Account.recover_message(
+            encode_defunct(primitive=reply_auth_hash(
+                request_id, spec_digest, reply)),
+            signature=sig))
+    except Exception:  # noqa: BLE001 (a bad signature is just unsigned)
+        return ""
+
+
+def reply_from_provider(reply: Any, request_id: str, spec_digest: str,
+                        provider: str) -> bool:
+    """Whether ``reply`` is signed by ``provider``, the address paid."""
+    signer = reply_signer(reply, request_id, spec_digest)
+    return bool(signer) and signer.lower() == str(provider or "").strip().lower()
+
 
 log = logging.getLogger(__name__)
 
@@ -162,40 +238,101 @@ async def resolve_provider_peer_id(config: Any, provider_address: str,
     return ""
 
 
+# A libp2p service request waits in a thread for the host's trio loop, for
+# as long as the provider takes (minutes for an inference). Those threads
+# come from this pool, not from the default executor every asyncio.to_thread
+# in the daemon shares (chain reads among them), and there are at most this
+# many at once: one more is refused as undelivered rather than queued, since
+# its wait would start only when a thread frees.
+P2P_REQUEST_WORKERS = 16
+_p2p_executor: Any = None
+_p2p_slots = threading.BoundedSemaphore(P2P_REQUEST_WORKERS)
+_p2p_executor_lock = threading.Lock()
+
+
+def _p2p_pool() -> Any:
+    global _p2p_executor
+    with _p2p_executor_lock:
+        if _p2p_executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _p2p_executor = ThreadPoolExecutor(
+                max_workers=P2P_REQUEST_WORKERS,
+                thread_name_prefix="service-p2p")
+        return _p2p_executor
+
+
 async def p2p_request(host: Any, peer_id: str, frame: dict[str, Any],
-                      timeout: float) -> dict[str, Any]:
+                      timeout: float, accept: Any = None) -> dict[str, Any]:
     """Run ``host.request_service`` (trio, in the host's thread) from
-    asyncio, blocking only an executor thread.
+    asyncio, blocking a thread of this module's own bounded pool.
+
+    ``accept(reply)`` tells the host whether a relayed reply is the
+    provider's own (see ``AutonetHost.request_service``).
 
     Raises ``ConnectionError`` when the request reached no path to the
-    provider, ``TimeoutError`` when it was delivered but not answered."""
+    provider (or every request thread is busy), ``TimeoutError`` when it
+    was delivered but not answered."""
     import trio
 
     token = getattr(host, "_trio_token", None)
     if token is None:
         raise ConnectionError("libp2p host not running")
+    if not _p2p_slots.acquire(blocking=False):
+        raise ConnectionError(
+            f"{P2P_REQUEST_WORKERS} service requests are already in flight "
+            "over libp2p")
 
     def call() -> dict:
-        async def _do():
-            return await host.request_service(peer_id, frame, timeout=timeout)
-        return trio.from_thread.run(_do, trio_token=token)
-    return await asyncio.get_running_loop().run_in_executor(None, call)
+        try:
+            async def _do():
+                return await host.request_service(
+                    peer_id, frame, timeout=timeout, accept=accept)
+            return trio.from_thread.run(_do, trio_token=token)
+        finally:
+            _p2p_slots.release()
+    try:
+        pending = asyncio.get_running_loop().run_in_executor(_p2p_pool(), call)
+    except RuntimeError:
+        # The pool refused the job (interpreter shutdown): it never ran, so
+        # its slot is still held.
+        _p2p_slots.release()
+        raise ConnectionError("libp2p request pool is shut down") from None
+    return await pending
+
+
+# Requests a provider serves over libp2p at once. Each waits in a trio
+# worker thread for the daemon's asyncio handler; they get their own
+# limiter, not trio's default one the host's other to_thread calls share.
+SERVE_P2P_WORKERS = 16
 
 
 def host_service_handler(serve: Any, loop: asyncio.AbstractEventLoop,
-                         timeout: float = 900.0) -> Any:
+                         timeout: float = 900.0,
+                         workers: int = SERVE_P2P_WORKERS) -> Any:
     """Wrap an asyncio ``serve(msg) -> reply`` coroutine function (the
     daemon's shared ``service_request`` handler) as the trio handler
     ``AutonetHost.set_service_handler`` expects. The call runs on
-    ``loop``; the trio side waits in a worker thread."""
+    ``loop``; the trio side waits in a worker thread, at most ``workers``
+    at once. A request past that is answered "busy" at once: it never
+    reached the payment gate, so its payment is still unspent."""
     import trio
 
+    limiter: list = []
+
     async def handle(msg: dict) -> dict:
+        if not limiter:
+            limiter.append(trio.CapacityLimiter(max(1, int(workers))))
+        if limiter[0].available_tokens < 1:
+            return {"msg_id": msg.get("msg_id"), "ok": False,
+                    "error": "provider busy: too many requests in progress; "
+                             "nothing was charged, try again"}
+
         def run() -> dict:
             return asyncio.run_coroutine_threadsafe(
                 serve(msg), loop).result(timeout)
         try:
-            return await trio.to_thread.run_sync(run, abandon_on_cancel=True)
+            return await trio.to_thread.run_sync(
+                run, abandon_on_cancel=True, limiter=limiter[0])
         except Exception as exc:  # noqa: BLE001
             log.warning("service request over libp2p failed: %s", exc)
             return {"msg_id": msg.get("msg_id"), "ok": False,
@@ -295,12 +432,15 @@ async def request_service(
     through a payment channel instead of ``tx_hash``; the request is then
     signed by ``payer_key`` under ``request_id`` all the same.
 
-    Returns ``{ok, result, error, endpoint, transport, delivered}``;
-    ``{"error": ..., "delivered": False}`` when the request never left this
-    daemon or reached no path to the provider. ``delivered`` is True once
-    the provider may have received it (a reply, a provider error, or a
-    timeout after sending). ``endpoint`` may be passed in to skip the chain
-    read (the provider caches it).
+    Returns ``{ok, result, error, endpoint, transport, delivered,
+    authenticated}``; ``{"error": ..., "delivered": False}`` when the
+    request never left this daemon or reached no path to the provider.
+    ``delivered`` is True once the provider may have received it (a reply,
+    a provider error, or a timeout after sending). ``authenticated`` says
+    the reply carries the signature of ``provider_address`` (the address
+    paid) over this request id and its content; a reply without it, from a
+    relay or whoever answers the wss URL, is never ``ok``. ``endpoint`` may
+    be passed in to skip the chain read (the provider caches it).
     """
     from .on_chain import OnChainService
 
@@ -310,6 +450,10 @@ async def request_service(
         return {"error": "Missing spec_digest"}
     if not isinstance(args, dict):
         return {"error": "'args' must be an object"}
+    if not request_id and not (voucher or tx_hash):
+        # Unpaid (a free service, or no chain): the provider still needs an
+        # id, and the reply's signature covers it.
+        request_id = new_request_id()
 
     msg_id = uuid.uuid4().hex[:12]
     frame: dict[str, Any] = {
@@ -334,15 +478,36 @@ async def request_service(
         frame["payer_signature"] = sign_request(
             payer_key, request_id, spec_digest, args, provider_address)
 
-    def _reply(reply: dict[str, Any], via: str, where: str) -> dict[str, Any]:
-        return {
+    def _authentic(reply: Any) -> bool:
+        return reply_from_provider(reply, request_id, spec_digest,
+                                   provider_address)
+
+    def _reply(reply: Any, via: str, where: str) -> dict[str, Any]:
+        reply = reply if isinstance(reply, dict) else {}
+        out = {
             "ok": bool(reply.get("ok")),
             "result": reply.get("result"),
             "error": reply.get("error"),
             "endpoint": where if via == "wss" else endpoint,
             "transport": via,
             "delivered": True,
+            "authenticated": True,
         }
+        if not _authentic(reply):
+            # Not the provider's word: not served, whatever it says.
+            claimed = reply.get("error") or (
+                "ok" if reply.get("ok") else "")
+            log.warning("service reply over %s for %s is not signed by "
+                        "provider %s", via, str(request_id)[:18],
+                        provider_address[:10])
+            out.update({
+                "ok": False, "result": None, "authenticated": False,
+                "error": (f"the reply is not signed by the provider "
+                          f"{provider_address[:10]}, so it is not treated as "
+                          "served" + (f" (unverified reply: {claimed})"
+                                      if claimed else "")),
+            })
+        return out
 
     # --- 1. libp2p ---------------------------------------------------------
     p2p_error = ""
@@ -354,7 +519,8 @@ async def request_service(
             p2p_error = "no peer id on chain for the provider"
         else:
             try:
-                reply = await p2p_request(host, peer, frame, timeout)
+                reply = await p2p_request(host, peer, frame, timeout,
+                                          accept=_authentic)
                 return _reply(reply, "libp2p", peer)
             except TimeoutError as exc:
                 return {"error": f"Provider did not reply within "
