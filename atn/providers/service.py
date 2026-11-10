@@ -30,7 +30,7 @@ Configured with the two facts that name a purchase:
 
 Two ways a purchase reaches an agent, differing ONLY in whose key signs:
 
-- **Daemon-level purchase** — ``providers.service`` in config.yaml, paid as
+- **Daemon-level purchase**: ``providers.service`` in config.yaml, paid as
   the household's operator (the configured daemon key, else the vault-held
   operator key; Decision 2026-11-08).
 - **Per-agent binding** (ratified 2026-07-26, employer-chooses-the-tool) —
@@ -358,7 +358,7 @@ class ServiceProvider(Provider):
                                         provider, ask)
             if voucher.get("error"):
                 raise ProviderError(
-                    f"service provider: payment failed, aborting the call — "
+                    f"service provider: payment failed, aborting the call: "
                     f"{voucher['error']}",
                     provider=self.name,
                 )

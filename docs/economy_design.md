@@ -84,6 +84,12 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   presence (robots). Anything that is only know-how ends up a tool. They
   earn money only: no mint, no REP, no standing; trust in them is
   behavioral.
+- **Paying for services** (Decision 2026-11-10): holding ATN is the
+  household's credit in the service economy, and a payment channel is its
+  prepaid balance with one provider. The buyer signs the running total per
+  unit consumed, so neither side risks more than one unit, and no request
+  needs its own transaction. Each service's spec says what one unit is
+  (`unit`); its price per unit is on chain only.
 - **OPEN:** a legal opinion (EU, MiCA) on the vault sale and on any
   redemption from treasury reserves, which would turn the ceiling into a
   peg; the launch parity; and a monetary model of ATN earned against ATN

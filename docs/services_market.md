@@ -9,7 +9,9 @@ reviews (§4). The voucher-per-call client flow is BUILT for agents'
 per payer and provider; a voucher counts once the provider's signed reply
 says it kept the payment, or when the outcome is unknown; refunds swept
 after the window; the provider closes to collect, Decision 2026-11-10);
-the `service` inference provider still pays each call up front.
+the `service` inference provider pays the same way since 2026-11-10
+(Decision "the unit of work; metered on channels"); only the owner's
+`invoke_service` still pays each item up front with `payForService`.
 `ServiceRegistry` + `PaymentChannel`
 (`contracts/core/ServiceMarket.sol`) are deployed on the Autonet
 jurisdiction (Etherlink Shadownet; addresses in `registry.json` under
@@ -45,6 +47,55 @@ mint, NO decay math. The trust basis is purely behavioral:
 Master-disable / fingerprinting is fleet hygiene for honest daemons,
 not a defense against dishonest ones. The defense is that lying has a
 wallet attached and receipts are forever.
+
+## Decision (2026-11-10): the unit of work; metered on channels
+
+Decided by the owner.
+
+- **Holding ATN is the household's credit** in the jurisdiction's service
+  economy, and a payment channel is its prepaid balance with one provider.
+  Buying avoids a transaction per request: a channel costs one deposit to
+  open and one settlement to close, however many requests come between.
+- **The spec declares the unit of work.** `unit` (required) is a text saying
+  what one work item is: "one completion up to 4,000 output tokens", "one
+  minute of RTX 5090 time", "one ice cream". It is the meaning of the price,
+  not a price: the price per unit stays on chain only (`askAmount`, Decision
+  "the chain is the only reference"). `hardware` (optional) names the
+  hardware of a compute service, so a buyer can check its throughput
+  against what that hardware documents. Both are signed with the spec (a
+  new unit is a new spec), bounded to 200 characters each, embedded for the
+  semantic half of search, and shown by `find_services`, `market_services`
+  and `list_services`. `register_service` (agent tool and WS handler)
+  refuses a registration without `unit`.
+- **The buyer pays as usage accrues**: it signs the running total per unit
+  consumed, so neither side risks more than one unit. For the request/reply
+  services there are today, one request is one unit, and the voucher per
+  request already does this. `service_channels.voucher_for(..., units=N)`
+  signs N units in one step (amount N x price), for metering several units
+  inside one long interaction; that needs the buyer-seller stream, built
+  separately. The provider's gate still takes one price per voucher.
+- **The `service` model provider pays on the channel**
+  (`atn/providers/service.py`), the daemon-level purchase and a parent's
+  per-agent binding alike, exactly as the `request_service` agent tool
+  pays: one channel per payer and provider, opened with ten calls' worth,
+  and a voucher for one unit per call, written down as pending before the
+  request goes out, counted when the provider's signed reply says
+  `charged: true` or when the outcome is unknown, and dropped on
+  `charged: false`. A failed call is not paid. The daemon-level purchase
+  pays as the operator. The provider shares the daemon's `ChannelBook` and
+  its lock per channel (`service_channels.channel_lock`) with the agent
+  tools, so two buys never sign the same running total. With the chain
+  configured and no PaymentChannel, a call is refused before anything is
+  sent; there is no fallback to a direct `payForService`.
+- Proven by `scripts/local_e2e_service_provider.py` (the child's provider
+  opens one channel and pays a voucher per call; a price changed on chain
+  applies to the next voucher; a replayed request id and a voucher that
+  adds nothing are refused; a failed call costs nothing through the
+  provider or through the agent tool on the same channel; the seller
+  collects once the deposit no longer covers the price; the buyer takes
+  the remainder back) and `scripts/local_e2e_cross_daemon_inference.py` (a
+  real agent turn paid with a voucher from the child's wallet, both books
+  equal, the provider's kept voucher collected on chain net of the fee).
 
 ## Decision (2026-11-10): not served = not paid, signed replies, providers collect
 
@@ -221,9 +272,14 @@ The v1 slice, costs eaten deliberately:
 3. **Settlement**: direct `payForService` per call. Coarse but already
    verified end to end by the payment gate. Channel vouchers (open
    once, voucher per call) are the v2 upgrade the gate already accepts.
+   (Superseded 2026-11-10: the `service` provider pays a voucher per call
+   on the payment channel, Decision "the unit of work; metered on
+   channels".)
 4. **Pricing**: `per_call` against a declared `max_tokens` cap. True
    per-token metering arrives with channels (voucher sized to the cap,
-   actual usage under it).
+   actual usage under it). (Since 2026-11-10 the spec's `unit` says what
+   one call buys, e.g. "one completion up to 4,000 output tokens"; metering
+   inside one interaction waits for the buyer-seller stream.)
 5. **NOT in v1**: streaming (responses buffer; the agent loop consumes
    whole completions anyway), fingerprint verification (substitution is
    deterred behaviorally by payer-signed reviews, same as everywhere
@@ -238,10 +294,11 @@ The v1 slice, costs eaten deliberately:
 ### As built: the consumer side (`service` provider type)
 
 `atn/providers/service.py`, resolved by `atn/runtime/provider_manager.py`
-alongside `rpb`. The three consumer mechanics (fresh request id, sign
-`payForService`, dial + `service_request`, read the on-chain ask) live in
-`atn/service_client.py`, shared verbatim with the `pay_for_service` /
-`request_service` agent tools so there is ONE copy of the chain code.
+alongside `rpb`. The consumer mechanics (fresh request id, dial +
+`service_request`, read the on-chain ask) live in `atn/service_client.py`,
+and the channel (book, voucher, lock) in `atn/service_channels.py`, both
+shared verbatim with the `request_service` agent tool so there is ONE copy
+of the chain code.
 
 Configuration is daemon-level: it names ONE purchase, the same way
 `autonet.sponsor_address` names one employer. There is no per-agent
@@ -258,10 +315,15 @@ providers:
 
 Point an agent at `provider: service` and it does ordinary completions.
 
-- **Operator spend.** The payment is signed with the operator key (the
-  configured daemon key, else the vault-held operator key): the household
-  buys as its operator (Decision 2026-11-08), not with a per-agent key.
-  An agent cannot mint itself a cheaper provider.
+- **Operator spend.** The channel is opened and every voucher signed
+  with the operator key (the configured daemon key, else the vault-held
+  operator key): the household buys as its operator (Decision
+  2026-11-08), not with a per-agent key. An agent cannot mint itself a
+  cheaper provider.
+- **Paid on the channel** (Decision 2026-11-10): a voucher for one unit
+  per call on the payer's one channel to the provider, counted or dropped
+  by the provider's signed `charged`; a call the provider refuses or fails
+  is not paid.
 - **Price read per call, request id fresh.** The service's
   `ServiceRegistry` number is scanned out once by `(provider, spec_digest)`
   (there is no digest→id index); the price is read from that entry on
@@ -282,8 +344,8 @@ Point an agent at `provider: service` and it does ordinary completions.
   payment is the credential, so degrading open there would hand any peer
   who knows a digest unlimited free work (inference off the owner's
   provider stack included) on nothing worse than an RPC outage. With
-  chain configured, a failed payment ABORTS the call before anything is
-  sent.
+  chain configured, a call that cannot be paid (no key, no PaymentChannel,
+  no channel opened) ABORTS before anything is sent.
 
 Covered by `tests/atn/test_service_provider.py` (mocked transport +
 mocked chain client).
@@ -352,6 +414,8 @@ sha256-addressed JSON, same rail as tool manifests:
   "input_schema": { ... },          // work-item request shape
   "output_schema": { ... },
   "author": "<agent-id>",
+  "unit": "one transcribed audio minute",  // required: what one work item is (the price is on chain)
+  "hardware": "one RTX 5090, 32 GB",       // optional: what a compute service runs on
   "author_pubkey": "0x...",         // the spec's signer; the payee is the registry entry's provider
   "author_sig": "...",              // over canonical bytes, sig excluded
   "endpoint_hint": "wss://...",     // mutable presence lives on-chain, this is advisory
@@ -385,8 +449,9 @@ factory + N deployments + growing audit surface. Instead:
   refunds after a challenge window. Theft ceiling = ONE voucher, sized
   by the client, worth less than the review history it burns. No
   arbitration, no fulfillment oracle, two txs for N requests. Metered
-  hardware (GPU/sponsor-pipe inference) fits natively: the ask's
-  `unit` meters, vouchers stream against consumption. Streaming
+  hardware (GPU/sponsor-pipe inference) fits natively: the spec's
+  `unit` says what one work item is, and the vouchers grow by one price
+  per unit consumed (Decision 2026-11-10). Streaming
   contracts (Sablier-style) only for subscription-shaped services: the
   wrong default for per-item work.
   - **Fee at settlement (ATN-only, ratified 2026-07-10, closes G1).**

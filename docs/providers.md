@@ -24,7 +24,7 @@ There are five authentication shapes:
 | **api_key** | a key you paste, stored in the daemon's credential store | Anthropic, OpenAI, Gemini, DeepSeek |
 | **local** | nothing to authenticate; it runs on your machine | Ollama, World-Model Substrate |
 | **rpb** | peer-to-peer: a sponsor daemon pays for your tokens (see `sponsored_inference.md`) | RPB Network |
-| **service** | pays ATN per call to another agent's daemon against a purchased spec, with no credential of your own (see `services_market.md`) | Marketplace Service |
+| **service** | pays ATN per call to another agent's daemon against a purchased spec, a voucher per call on a payment channel, with no credential of your own (see `services_market.md`) | Marketplace Service |
 
 Bridges are the cheapest path if you already pay for a subscription: they
 spend your existing plan rather than metered API credit. API-key providers
@@ -101,8 +101,10 @@ providers:
     timeout: 60                     # optional, seconds
 ```
 
-That daemon-level block is an owner purchase for the whole fleet, signed
-with `autonet.private_key`. A parent may instead bind one child to a
+That daemon-level block is a purchase for the whole fleet, paid as the
+household's operator (the configured daemon key, else the vault-held
+operator key) with a voucher per call on its payment channel to the
+provider; a failed call is not paid. A parent may instead bind one child to a
 purchase of its own (`service_provider` on the agent definition), in which
 case the child's own key signs and the child pays from its own wallet. An
 agent can never set this for itself. See `services_market.md` for the rail

@@ -579,7 +579,7 @@ class ProviderManager:
         purchased marketplace inference service backs an agent's provider.
         Two sources for the same two facts, differing in WHOSE KEY PAYS:
 
-        **Daemon-level purchase** — ``binding=None``. Read from config.yaml;
+        **Daemon-level purchase**: ``binding=None``. Read from config.yaml;
         the household pays as its operator (the configured daemon key, else
         the vault-held operator key, Decision 2026-11-08):
 

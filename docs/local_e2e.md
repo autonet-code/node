@@ -181,8 +181,15 @@ behind NAT or ZeroTier the reachable address is not the bind address, and
 it is the *reachable* one that must go on chain.
 
 The consumer half additionally reads what the hold side prints:
-`E2E_SUBSTRATE`, `E2E_SERVICE_REGISTRY`, `E2E_SPEC_DIGEST`,
-`E2E_PROVIDER_ADDR`, `E2E_MODEL`.
+`E2E_SUBSTRATE`, `E2E_SERVICE_REGISTRY`, `E2E_PAYMENT_CHANNEL`,
+`E2E_SPEC_DIGEST`, `E2E_PROVIDER_ADDR`, `E2E_MODEL`.
+
+Since 2026-11-10 the child's provider pays on the payment channel (a
+voucher per call, `services_market.md`, Decision "the unit of work;
+metered on channels"), so stage 8 checks the channel from the child's
+wallet, the buyer's and the provider's books, the refusal of a replayed
+request id and of a voucher that adds nothing, and, on one box, the
+provider's kept voucher collected on chain net of the fee.
 
 ## The two-box run (verified 2026-07-26)
 
