@@ -50,11 +50,13 @@ interface IPastVotes {
 /// Each epoch's election is one DAO proposal whose only action is
 /// `anchorWinner(epochNumber, attempt)` on this contract, with the
 /// description `descriptionOf(epochNumber, attempt)`, so every daemon
-/// derives the same proposal id. While the proposal is Pending (the voting
-/// delay), the agents drawn as proposers each register one option, from
-/// their own wallet. The Governor's options counting module tallies one
-/// vote per account by option index; on execution the winning option is
-/// anchored on Substrate.
+/// derives the same proposal id. While the proposal is Pending or Active,
+/// the agents drawn as proposers each register one option, from their own
+/// wallet, so a proposal opened early locks no close out. Voting index 0 is
+/// reject ("none of these"); registered options start at 1. The Governor's
+/// options counting module tallies one vote per account by index; on
+/// execution the winning option is anchored on Substrate, or, if reject won,
+/// nothing is and the daemons open the next attempt.
 ///
 /// The draw is threshold sortition, checked locally per account: a live
 /// agent with REP share s (votes at the proposal's creation / total REP)
@@ -83,6 +85,7 @@ contract AnchorElection {
 
     /// @notice Expected number of drawn proposers per epoch.
     uint256 public proposers = 3;
+    uint8 private constant ACTIVE_STATE = 1;
     /// @notice Minimum REP share (parts per million) to be drawn.
     uint256 public proposerFloorPpm = 0;
     /// @notice Most options one election may hold.
@@ -193,12 +196,13 @@ contract AnchorElection {
     }
 
     /// @notice Register the caller's option for an epoch's election, while
-    ///         its proposal is Pending. One option per drawn agent;
+    ///         its proposal is Pending or Active. One option per drawn agent;
     ///         identical content registers once.
     function registerOption(uint256 epochNumber, uint256 attempt,
                             Option calldata option) external returns (uint256) {
         uint256 pid = proposalIdOf(epochNumber, attempt);
-        if (governor.state(pid) != PENDING) revert NotPending(pid);
+        uint8 st = governor.state(pid);
+        if (st != PENDING && st != ACTIVE_STATE) revert NotPending(pid);
         if (!substrate.isLive(msg.sender)) revert NotLiveAgent(msg.sender);
         uint256 timepoint = drawTimepoint(pid);
         if (timepoint >= block.timestamp) revert SnapshotNotPast();
@@ -214,14 +218,14 @@ contract AnchorElection {
         _seenOption[pid][h] = true;
         _options[pid].push(option);
         _proposerOf[pid].push(msg.sender);
-        uint256 index = _options[pid].length - 1;
+        uint256 index = _options[pid].length;   // voting index: 0 is reject
         emit OptionRegistered(pid, epochNumber, index, msg.sender, h);
         return index;
     }
 
     /// @notice IOptionSource: the options of a proposal.
     function optionCount(uint256 proposalId) external view returns (uint256) {
-        return _options[proposalId].length;
+        return _options[proposalId].length + 1;
     }
 
     /// @notice IOptionSource: an option's content hash (ties go to the
@@ -229,13 +233,14 @@ contract AnchorElection {
     function optionHash(uint256 proposalId, uint256 index)
         external view returns (bytes32)
     {
-        return optionHashOf(_options[proposalId][index]);
+        if (index == 0) return bytes32(0);
+        return optionHashOf(_options[proposalId][index - 1]);
     }
 
     function getOption(uint256 proposalId, uint256 index)
         external view returns (Option memory option, address proposer)
     {
-        return (_options[proposalId][index], _proposerOf[proposalId][index]);
+        return (_options[proposalId][index - 1], _proposerOf[proposalId][index - 1]);
     }
 
     // ---------------------------------------------------------------------
@@ -252,7 +257,8 @@ contract AnchorElection {
         uint256 pid = proposalIdOf(epochNumber, attempt);
         (bool decided, uint256 index) = governor.winningOption(pid);
         if (!decided) revert Undecided(pid);
-        Option storage o = _options[pid][index];
+        if (index == 0) return;   // reject won: nothing anchors, a new attempt follows
+        Option storage o = _options[pid][index - 1];
         substrate.anchor(
             o.epochId, o.epochRoot, o.prevEpochRoot, o.prevAnchorHash,
             o.agentMintCid, o.payloadHash, o.agentMintRoot, o.cutoff);

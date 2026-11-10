@@ -29,13 +29,14 @@ from typing import Any, List, Optional, Tuple
 
 from .tx_nonce import next_nonce
 from .governed_anchor import (
-    ACTIVE, CANCELED, DEFEATED, EXPIRED, GOVERNOR_ABI, PENDING,
+    ACTIVE, CANCELED, DEFEATED, EXECUTED, EXPIRED, GOVERNOR_ABI, PENDING,
     QUEUED, STATE_NAMES, SUCCEEDED, Voter, _addr_of,
 )
 
 logger = logging.getLogger(__name__)
 
 _RETRY = {DEFEATED, EXPIRED, CANCELED}
+REJECT_OPTION = 0   # voting index 0 is "none of these"; real options start at 1
 # A queued election whose winner still hasn't executed this long after its
 # eta can't anchor (the winning option is one Substrate rejects): re-post
 # as a new attempt instead of waiting out the driver's give-up.
@@ -118,6 +119,9 @@ class ElectionAnchorer:
         if st == PENDING:
             self._register(e, voters)
         elif st == ACTIVE:
+            # Options stay open while voting runs, so a proposal made before
+            # this daemon closed can't lock its close out.
+            self._register(e, voters)
             self._vote(e, voters)
             st = self.state(e)
         if st == SUCCEEDED:
@@ -137,6 +141,8 @@ class ElectionAnchorer:
                                    "has not executed %ds past its eta",
                                    e.epoch_id, e.attempt, now - eta)
                     st = CANCELED   # treated like a failed attempt below
+        if st == EXECUTED and int(self._substrate.functions.anchorCount().call())                 < e.epoch_number:
+            st = CANCELED   # reject won: nothing anchored, a new attempt follows
         if st in _RETRY:
             logger.warning("epoch %s: election attempt %d %s; re-posting as "
                            "attempt %d", e.epoch_id, e.attempt,
@@ -212,8 +218,8 @@ class ElectionAnchorer:
         index = self._option_index(e)
         if index is None:
             logger.info("epoch %s: no registered option matches this daemon's "
-                        "close; not voting", e.epoch_id)
-            return
+                        "close; voting reject", e.epoch_id)
+            index = REJECT_OPTION
         pid = self.proposal_id(e)
         snap = int(self._governor.functions.proposalSnapshot(pid).call())
         for v in voters:
