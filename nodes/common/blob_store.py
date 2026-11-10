@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _pruned(content_hash: str) -> bool:
+    from .pruned_tools import is_pruned
+    return is_pruned(content_hash)
+
+
 class BlobStore:
     """Content-addressed blob storage for Autonet nodes.
 
@@ -94,6 +99,8 @@ class BlobStore:
         if blob_path.exists():
             logger.debug(f"Local hit: {content_hash[:16]}...")
             return blob_path.read_bytes()
+        if _pruned(content_hash):
+            return None       # a pruned tool is never pulled (Decision 2026-11-10)
 
         # 2. Try peer nodes
         for peer_url in self.peer_urls:
@@ -137,12 +144,12 @@ class BlobStore:
         # of replacing it (which would silently stop serving blobs other
         # components published, e.g. world checkpoints / carry bundles).
         from .blob_resolver import host_blob_server
-        host_blob_server(host).add_source(self.get_bytes_local)
+        host_blob_server(host).add_source(self.serve_local)
         logger.info("BlobStore wired to P2P host — serving blobs to peers")
 
     async def _serve_blob_for_p2p(self, content_hash: str) -> Optional[bytes]:
         """P2P blob handler: serve a locally-stored blob to a requesting peer."""
-        return self.get_bytes_local(content_hash)
+        return self.serve_local(content_hash)
 
     async def get_bytes_async(self, content_hash: str) -> Optional[bytes]:
         """
@@ -156,6 +163,8 @@ class BlobStore:
         if blob_path.exists():
             logger.debug(f"Local hit: {content_hash[:16]}...")
             return blob_path.read_bytes()
+        if _pruned(content_hash):
+            return None
 
         # 2. HTTP peers (sync, run in thread to not block trio)
         if self.peer_urls:
@@ -266,7 +275,7 @@ class BlobStore:
                     return
 
                 content_hash = self.path[len("/blob/"):]
-                data = store.get_bytes_local(content_hash)
+                data = store.serve_local(content_hash)
                 if data is not None:
                     self.send_response(200)
                     self.send_header("Content-Type", "application/octet-stream")
@@ -299,8 +308,15 @@ class BlobStore:
             logger.info("Blob server stopped")
 
     def get_bytes_local(self, content_hash: str) -> Optional[bytes]:
-        """Get bytes from local store only (no peer fetch). Used by HTTP server."""
+        """Get bytes from local store only (no peer fetch)."""
         blob_path = self.data_dir / content_hash
         if blob_path.exists():
             return blob_path.read_bytes()
         return None
+
+    def serve_local(self, content_hash: str) -> Optional[bytes]:
+        """A local blob to serve a peer: never a pruned tool's, even one this
+        household keeps for itself (Decision 2026-11-10)."""
+        if _pruned(content_hash):
+            return None
+        return self.get_bytes_local(content_hash)

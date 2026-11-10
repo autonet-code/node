@@ -127,6 +127,9 @@ class HostBlobServer:
                 self._sources.append(source)
 
     def lookup(self, cid: str) -> Optional[bytes]:
+        from .pruned_tools import is_pruned
+        if is_pruned(cid):
+            return None       # never served (Decision 2026-11-10)
         blob = self.get_local(cid)
         if blob is not None:
             return blob

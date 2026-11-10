@@ -230,6 +230,10 @@ class ToolStore:
         # federated_reconcile.tool_rating) or None; wired by the autonet
         # service, read by search and the adopt replies.
         self.rating_provider: Any = None
+        # A pruned tool's blobs stay on disk only for what this household
+        # installed (Decision 2026-11-10): what to run is its own policy.
+        from nodes.common import pruned_tools
+        pruned_tools.add_keeper(self._keeps_blob)
         # Optional sanction lookup (callable: address -> entry | None, may
         # block on a chain read): an agent may not propose adopting a tool
         # whose author's household the DAO has sanctioned; the owner sees
@@ -1754,6 +1758,26 @@ class ToolStore:
     # Adoption (docs/tool_substrate.md — Adoption rail)
     # ------------------------------------------------------------------
 
+    def _keeps_blob(self, digest: str) -> bool:
+        """True for the manifest or code blob of a tool installed here."""
+        if digest in self._records:
+            return True
+        return any(str(r.manifest.get("code_digest") or "") == digest
+                   for r in list(self._records.values()))
+
+    @staticmethod
+    def _pruned_refusal(digest: str, what: str = "") -> dict[str, Any] | None:
+        """The refusal for adopting a pruned tool (Decision 2026-11-10): a
+        malware verdict, its own or a dependency's, or a refused
+        registration. None when the tool is not pruned."""
+        from nodes.common.pruned_tools import is_pruned
+        if not is_pruned(digest):
+            return None
+        label = what or digest
+        return {"error": f"cannot adopt: {label} has a malware verdict (its own "
+                         "or a dependency's) and the network has pruned it",
+                "pruned": digest}
+
     async def propose_adoption(
         self, caller_id: str | None, digest: str, reason: str = "",
     ) -> dict[str, Any]:
@@ -1774,6 +1798,9 @@ class ToolStore:
                              "(probe the substrate to find one)"}
         if digest in self._records:
             return {"error": "already available locally"}
+        refused = self._pruned_refusal(digest)
+        if refused is not None:
+            return refused
         existing = self._proposals.get(digest)
         if existing is not None and existing.get("status") == "pending":
             return {"status": "pending", "digest": digest,
@@ -1885,6 +1912,10 @@ class ToolStore:
                 if not dep or dep in seen:
                     continue
                 seen.add(dep)
+                refused = self._pruned_refusal(dep, f"its dependency {dep}")
+                if refused is not None:
+                    refused["dependency"] = dep
+                    return [], refused
                 if dep in self._records:
                     continue  # already installed here
                 dep_payload = await self.fetch_payload(dep)
@@ -1968,6 +1999,13 @@ class ToolStore:
         if proposal is None or proposal.get("status") not in (
                 "pending", ADOPTION_APPROVED_PENDING):
             return {"error": "no pending proposal for that digest"}
+        # A verdict may have landed since the proposal (Decision 2026-11-10).
+        for d in [digest] + [b["digest"] for b in proposal.get("bundle") or []]:
+            refused = self._pruned_refusal(d)
+            if refused is not None:
+                proposal["status"] = "refused"
+                self._save_proposals()
+                return refused
         # A retry keeps the owner's original acknowledgment.
         core_replacement_ack = bool(core_replacement_ack
                                     or proposal.get("core_replacement_ack"))

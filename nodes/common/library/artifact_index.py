@@ -129,6 +129,18 @@ class ArtifactIndex:
         """True if ``digest`` is present in the in-memory index."""
         return digest in self._vectors
 
+    def remove(self, digests: Any) -> int:
+        """Drop ``digests`` from the index (pruned tools) and rewrite the
+        jsonl. The blobs are the caller's. Returns how many were dropped."""
+        gone = [d for d in digests if d in self._vectors]
+        for d in gone:
+            self._vectors.pop(d, None)
+            self._labels.pop(d, None)
+        if gone:
+            self._matrix = None
+            self._rewrite_all()
+        return len(gone)
+
     def get(self, digest: str) -> Optional[np.ndarray]:
         """Return the stored embedding for ``digest``, or None."""
         return self._vectors.get(digest)

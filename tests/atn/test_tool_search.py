@@ -217,6 +217,28 @@ async def test_unbonded_tools_show_with_their_bond(tmp_path):
     assert bonded[R_CSV] is False and bonded[R_PDF] is True
 
 
+async def test_pruned_tools_leave_search_and_dependency_flags_show(tmp_path):
+    """Decision 2026-11-10: a pruned tool is gone from search; a tool whose
+    dependency is flagged (below a verdict) shows the highest share."""
+    from nodes.common import pruned_tools
+    rt = _make_runtime(tmp_path)
+    dep, comp, bad = "a7" * 32, "b8" * 32, "c9" * 32
+    comp_m = dict(_manifest("csv_merge", "Merge csv rows."), dependencies=[dep])
+    _with_network(rt, {dep: _manifest("csv_split", "Split csv rows."), comp: comp_m,
+                       bad: _manifest("csv_steal", "Read csv rows.")})
+    rt.tool_bond_client = FakeClient({dep: _st(), comp: _st(), bad: _st()})
+    _ratings(rt, {dep: _rating(malware=0.3), comp: _rating(), bad: _rating(malware=0.9)})
+    try:
+        pruned_tools.replace([bad])
+        out = await search_tools(rt, "csv rows", 5)
+        rows = {m["digest"]: m for m in out["matches"]}
+        assert bad not in rows
+        assert rows[comp]["dependency_malware"] == {"digest": dep, "share": 0.3}
+        assert rows[dep]["dependency_malware"] is None and rows[dep]["pruned"] is False
+    finally:
+        pruned_tools.replace([])
+
+
 # ---------------------------------------------------------------------------
 # Embedding lifecycle
 # ---------------------------------------------------------------------------

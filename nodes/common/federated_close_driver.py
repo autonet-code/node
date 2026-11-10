@@ -566,6 +566,27 @@ class FederatedCloseDriver:
         self._tool_registrations = self._load_tool_registrations()
         self._tool_rounds = self._load_tool_rounds()
         self._tool_ratings = self._load_tool_ratings()
+        # The anchored state's pruned tools (Decision 2026-11-10).
+        try:
+            library = getattr(self.gossip, "library", None)
+            apply = getattr(library, "apply_pruned", None)
+            if apply is not None:
+                apply(list(self._tool_rounds.get("pruned") or []))
+        except Exception as e:  # noqa: BLE001 - pruning never blocks the install
+            logger.warning("applying the anchored pruned tools failed: %s", e)
+
+    def pruned_tools(self) -> List[str]:
+        """The tools the latest close (or installed anchor) pruned."""
+        return sorted(str(d) for d in (self._tool_rounds.get("pruned") or []))
+
+    def tool_unpaid(self, digest: str) -> Optional[Dict[str, Any]]:
+        """What the tool's author side would have paid had it not concluded
+        on a malware verdict (``{"amounts": {recipient: ATN}, "on":
+        [digests]}``), or None: the amounts a clearing proposal pays from
+        the treasury (Decision 2026-11-10)."""
+        key = str(digest).lower().removeprefix("0x")
+        entry = ((self._tool_rounds.get("tools") or {}).get(key) or {}).get("unpaid")
+        return dict(entry) if isinstance(entry, dict) else None
 
     def seed_marker_path(self) -> Optional[Path]:
         """Marker recording the installed genesis seed (its carry_cid),

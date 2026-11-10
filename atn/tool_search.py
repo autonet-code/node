@@ -20,8 +20,12 @@ held. Order is relevance only: the rating (correctness, simplicity,
 novelty, the malware share, the charter values and the REP behind them),
 bond state, author context and this household's own relation to the tool
 come back as metadata on each match, never as a weight. Every tool the
-daemon holds can match, unbonded or rated malware included: what to run is
-the household's own policy (Decision 2026-11-09).
+daemon holds can match, unbonded or flagged included: what to run is the
+household's own policy (Decision 2026-11-09). A tool the close pruned (a
+malware verdict, its own or a dependency's, Decision 2026-11-10) is not in
+the library any more; one this household installed still shows, marked
+``pruned``. Each match also carries the highest malware share among the
+tools it depends on (``dependency_malware``).
 
 Until the model is loaded (the first run downloads it), results are keyword
 matches and the reply says semantic search is not ready, with the download
@@ -407,7 +411,8 @@ def candidate_manifests(runtime: Any, caller_id: Optional[str]) -> dict[str, dic
     plus the local tool store's records the caller may see (an agent never
     learns the names of private tools it may not call). The daemon's own
     harness modules (``atn_*``) are not library tools."""
-    out = dict(network_manifests(runtime))
+    from nodes.common.pruned_tools import is_pruned
+    out = {d: m for d, m in network_manifests(runtime).items() if not is_pruned(d)}
     store = getattr(runtime, "tool_store", None)
     if store is not None:
         for record in store.visible_to(caller_id):
@@ -561,9 +566,39 @@ async def search_tools(runtime: Any, query: str, k: int = 8, *,
             for h in ranked[:k]]
     rows = await annotate_probe_rows(runtime, rows)
     reviews = household_reviews(runtime)
+    from nodes.common.pruned_tools import is_pruned
     for row in rows:
         row["household"] = household_relation(runtime, row["digest"], reviews)
+        row["pruned"] = is_pruned(row["digest"])
+        row["dependency_malware"] = dependency_malware(runtime, manifests, row["digest"])
     return {"matches": rows, "semantic": semantic}
+
+
+def dependency_malware(runtime: Any, manifests: dict[str, dict[str, Any]],
+                       digest: str, *, max_depth: int = 4) -> Optional[dict[str, Any]]:
+    """The highest malware share among the tools ``digest`` depends on
+    (transitively, as deep as composition runs), as of the latest close:
+    ``{"digest", "share"}``, or None when no dependency is flagged."""
+    from .tool_security import rating_for
+
+    best: Optional[dict[str, Any]] = None
+    seen: set[str] = {digest}
+    frontier = [str(d).lower() for d in (manifests.get(digest) or {}).get("dependencies") or []]
+    for _ in range(max_depth):
+        nxt: list[str] = []
+        for dep in frontier:
+            if dep in seen:
+                continue
+            seen.add(dep)
+            share = (rating_for(runtime, dep) or {}).get("malware")
+            if share is not None and float(share) > 0 and (
+                    best is None or float(share) > best["share"]):
+                best = {"digest": dep, "share": float(share)}
+            nxt.extend(str(d).lower() for d in (manifests.get(dep) or {}).get("dependencies") or [])
+        frontier = nxt
+        if not frontier:
+            break
+    return best
 
 
 def warm(runtime: Any) -> None:

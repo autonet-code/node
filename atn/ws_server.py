@@ -844,14 +844,22 @@ class WebSocketBridge:
                 usage["last_epoch"] = {
                     k: entry.get(k, 0)
                     for k in ("mint", "reviewer_mint", "author_mint",
-                              "reserved", "released", "reviewers", "score",
+                              "unpaid", "reviewers", "score",
                               "novelty", "malware", "weight")
                 }
+        # What a malware verdict left unpaid, per recipient, for a proposal
+        # that clears it (Decision 2026-11-10); None when nothing was.
+        autonet = getattr(self.runtime, "autonet", None)
+        service = getattr(autonet, "_service", None) if autonet else None
+        drv = getattr(service, "_federated_close_driver", None) if service else None
+        unpaid_of = getattr(drv, "tool_unpaid", None)
         return {
             "digest": digest,
             "reviews": reviews,
             "rating": rating,
             "usage": usage,
+            "malware_unpaid": unpaid_of(digest) if unpaid_of is not None else None,
+            "pruned": digest in set(getattr(library, "pruned_tool_digests", lambda: [])()),
         }
 
     def _network_status_payload(self, anchored: dict[str, Any] | None = None

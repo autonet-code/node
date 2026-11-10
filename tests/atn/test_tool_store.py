@@ -669,6 +669,43 @@ class TestAdoption:
         assert "error" in res
 
     @pytest.mark.asyncio
+    async def test_a_pruned_tool_is_never_adopted(self, tmp_path):
+        """Decision 2026-11-10: a tool with a malware verdict (its own or a
+        dependency's) is pruned, and adoption refuses it, also when the
+        verdict lands between the proposal and the approval."""
+        from nodes.common import pruned_tools
+        _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        try:
+            pruned_tools.replace([digest])
+            out = await store.propose_adoption("worker", digest, reason="r")
+            assert out["pruned"] == digest and "malware verdict" in out["error"]
+            pruned_tools.replace([])
+            assert (await store.propose_adoption("worker", digest))["status"] == "pending"
+            pruned_tools.replace([digest])
+            res = await store.approve_adoption(digest)
+            assert res["pruned"] == digest and store.get(digest) is None
+        finally:
+            pruned_tools.replace([])
+
+    @pytest.mark.asyncio
+    async def test_a_composite_with_a_pruned_dependency_is_refused(self, tmp_path):
+        from nodes.common import pruned_tools
+        rt_a, dep, blobs = await self._publish_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        payload = dict(blobs.get_json(dep))
+        payload["name"] = "composite_on_dep"
+        payload["dependencies"] = [dep]
+        comp = blobs.add_json(payload)
+        try:
+            pruned_tools.replace([dep])
+            out = await rt.tool_store.propose_adoption("worker", comp)
+            assert out["dependency"] == dep and "malware verdict" in out["error"]
+        finally:
+            pruned_tools.replace([])
+
+    @pytest.mark.asyncio
     async def test_adopted_cannot_be_republished(self, tmp_path):
         _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
         rt = await self._adopter(tmp_path, blobs)

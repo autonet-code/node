@@ -24,6 +24,7 @@ Nothing here is consensus state: the close's inputs live with the driver
 from __future__ import annotations
 
 import collections
+import hashlib
 import json
 import logging
 import os
@@ -89,6 +90,11 @@ class LibraryService:
         self.epochs_dir = self.state_dir / "epochs"
         self.epochs_dir.mkdir(exist_ok=True)
         self._economy_path = self.state_dir / "economy.json"
+        self._pruned_path = self.state_dir / "pruned.json"
+        # The close's pruned tools (manifest digests) and their blobs, each
+        # mapped to its tool (Decision 2026-11-10), persisted across restarts.
+        self._pruned_tools: set = set()
+        self._blob_owners: Dict[str, str] = {}
         self._lock = threading.RLock()
         # Close records wait here for their subscribers, which run AFTER
         # the lock is released: a subscriber that waits on another thread
@@ -136,6 +142,7 @@ class LibraryService:
         self._closes: List[Dict[str, Any]] = []
         self._load_economy()
         self._load_epoch_history()
+        self._load_pruned()
 
     # ------------------------------------------------------------------
     # Epoch tick
@@ -329,7 +336,7 @@ class LibraryService:
         with self._lock:
             while self._pending_remote_manifests and len(out) < limit:
                 digest, _meta = self._pending_remote_manifests.popitem(last=False)
-                if self._artifact_index.has(digest):
+                if self._artifact_index.has(digest) or digest in self._pruned_tools:
                     continue
                 out.append(digest)
         return out
@@ -342,6 +349,10 @@ class LibraryService:
         if not is_tool_manifest(manifest):
             return None
         with self._lock:
+            # The digest add_json would give it (json.dumps, sorted keys).
+            digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest()
+            if digest in self._pruned_tools:
+                return None
             try:
                 return self._artifact_index.add_artifact(manifest)
             except Exception:
@@ -358,6 +369,8 @@ class LibraryService:
         per-tool mint for the economy graph."""
         regs = close_result.get("tool_registrations")
         ratings = close_result.get("tool_ratings")
+        if "pruned" in close_result:
+            self.apply_pruned(close_result.get("pruned") or [])
         with self._lock:
             if isinstance(regs, dict):
                 self._registrations = {str(k): dict(v) for k, v in regs.items()
@@ -373,6 +386,77 @@ class LibraryService:
             })
             self._closes = self._closes[-CLOSES_KEEP:]
             self._save_economy()
+
+    def apply_pruned(self, digests: List[str]) -> Dict[str, int]:
+        """Make the close's pruned list this daemon's (Decision 2026-11-10):
+        drop newly pruned manifests from the index and delete their blobs
+        (the manifest and the code it names), except blobs the household
+        keeps for a tool it installed; stop serving and fetching them all. A
+        tool no longer listed (the DAO cleared its verdict) is fetchable
+        again. Returns counts for logging."""
+        from . import pruned_tools
+
+        tools = {str(d).lower().removeprefix("0x") for d in digests if d}
+        with self._lock:
+            new = sorted(tools - self._pruned_tools)
+            # blob -> the pruned tool it belongs to; a cleared tool's go.
+            owners = {b: o for b, o in self._blob_owners.items() if o in tools}
+            for d in sorted(tools):
+                owners[d] = d
+                payload = self._local_json(d)
+                code = str(payload.get("code_digest") or "") if isinstance(payload, dict) else ""
+                if code:
+                    owners[code] = d
+            dropped = self._artifact_index.remove(new)
+            deleted = 0
+            for b in sorted(owners):
+                if self._blob_store.has(b) and not pruned_tools.kept(b):
+                    deleted += 1 if self._blob_store.delete(b) else 0
+            self._pruned_tools = tools
+            self._blob_owners = owners
+            for d in new:
+                self._pending_remote_manifests.pop(d, None)
+            pruned_tools.replace(set(tools) | set(owners))
+            self._save_pruned()
+        if new or deleted:
+            logger.info("pruned %d tool(s) (%d newly), %d index entries, %d blob(s) deleted",
+                        len(tools), len(new), dropped, deleted)
+        return {"tools": len(tools), "new": len(new), "indexed": dropped, "deleted": deleted}
+
+    def pruned_tool_digests(self) -> List[str]:
+        with self._lock:
+            return sorted(self._pruned_tools)
+
+    def _local_json(self, digest: str) -> Any:
+        raw = getattr(self._blob_store, "get_bytes_local", None)
+        data = raw(digest) if raw is not None else None
+        if not data:
+            return None
+        try:
+            return json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def _load_pruned(self) -> None:
+        from . import pruned_tools
+
+        try:
+            data = json.loads(self._pruned_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        self._pruned_tools = {str(d) for d in data.get("tools") or []}
+        self._blob_owners = {str(b): str(o) for b, o in (data.get("blobs") or {}).items()}
+        pruned_tools.replace(self._pruned_tools | set(self._blob_owners))
+
+    def _save_pruned(self) -> None:
+        try:
+            _write_json_atomic(self._pruned_path, {
+                "tools": sorted(self._pruned_tools),
+                "blobs": dict(sorted(self._blob_owners.items()))})
+        except OSError:
+            logger.warning("failed to persist the pruned tools", exc_info=True)
 
     def read_economy_graph(self, *, last_n_epochs: int = 10) -> Dict[str, Any]:
         """The tool-economy graph from the latest federated closes.
@@ -463,7 +547,8 @@ class LibraryService:
                 meta = ev.get("manifest_meta")
                 if not digest or not isinstance(meta, dict) or not meta:
                     continue
-                if self._artifact_index.has(digest) or digest in self._pending_remote_manifests:
+                if (self._artifact_index.has(digest) or digest in self._pending_remote_manifests
+                        or digest in self._pruned_tools):
                     continue
                 self._pending_remote_manifests[digest] = {
                     str(k): str(v) for k, v in meta.items()}
