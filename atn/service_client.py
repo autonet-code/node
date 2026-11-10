@@ -395,6 +395,32 @@ async def request_service(
                 "endpoint": endpoint, "transport": "wss", "delivered": sent}
 
 
+async def read_service(config: Any, service_id: int) -> dict[str, Any]:
+    """One ServiceRegistry entry by number: ``{service_id, provider,
+    spec_digest, ask_amount, active}`` or ``{"error": ...}``. The chain is
+    the only reference for a service's price, active flag and payee
+    (Decision 2026-11-10)."""
+    from .on_chain import ServiceMarketClient
+
+    smc = ServiceMarketClient(config)
+    if not smc.registry_available:
+        return {"error": "ServiceRegistry not configured (missing "
+                         "service_registry_address or rpc_url)."}
+    try:
+        s = await smc.get_service(int(service_id))
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"ServiceRegistry read failed: {exc}"}
+    if s is None:
+        return {"error": f"no on-chain service #{service_id}"}
+    try:
+        ask_amount = int(str(s.get("ask_amount") or "0"))
+    except (TypeError, ValueError):
+        ask_amount = 0
+    return {"service_id": s.get("service_id"), "provider": s.get("provider"),
+            "spec_digest": s.get("spec_digest"), "ask_amount": ask_amount,
+            "active": bool(s.get("active"))}
+
+
 async def lookup_service_ask(
     config: Any,
     provider_address: str,

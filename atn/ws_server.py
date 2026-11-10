@@ -1954,7 +1954,21 @@ class WebSocketBridge:
             name = msg.get("name", "")
             description = msg.get("description", "")
             input_schema = msg.get("input_schema") or {}
-            ask = msg.get("ask") or {}
+            # The price goes on chain only (Decision 2026-11-10): the spec
+            # carries none. The app sends {"ask": {"amount"}}; agents send
+            # "ask_amount".
+            ask = msg.get("ask")
+            ask_raw = (ask.get("amount") if isinstance(ask, dict)
+                       else msg.get("ask_amount"))
+            try:
+                ask_amount = int(str(ask_raw if ask_raw is not None else "0")
+                                 or "0")
+            except (TypeError, ValueError):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "ask.amount must be an integer (ATN base units)"}
+            if ask_amount < 0:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "ask.amount must be non-negative"}
             author = msg.get("agent_id") or "user"
             # The Flutter client sends `tool_digest`; agent-side callers send
             # `backing_tool`. Accept both — a service whose backing tool is
@@ -1983,7 +1997,6 @@ class WebSocketBridge:
                     description=description,
                     input_schema=input_schema,
                     author=author,
-                    ask=ask,
                     backing_tool=backing_tool,
                     output_schema=msg.get("output_schema"),
                     endpoint_hint=msg.get("endpoint_hint", ""),
@@ -2002,11 +2015,6 @@ class WebSocketBridge:
             # buyer can pay for it. Same half agent_tools._register_service
             # already does; a failure here downgrades to local-only rather
             # than discarding the persisted spec.
-            try:
-                ask_amount = int(str(result["spec"]["ask"].get("amount") or "0")
-                                 or "0")
-            except (TypeError, ValueError, KeyError):
-                ask_amount = 0
             chain = await self._register_service_on_chain(
                 author, result["digest"], ask_amount)
             return {"msg_id": msg_id, "ok": True,
@@ -2020,19 +2028,22 @@ class WebSocketBridge:
             for record in self.runtime.service_store.list(
                     include_retired=include_retired):
                 s = record.spec
+                chain = await self._chain_service(record)
                 services.append({
                     "digest": record.digest,
                     "name": record.name,
                     "description": s.get("description", ""),
                     "author": record.author,
-                    # The payment address stamped into the spec at
-                    # registration — the SAME recipient the provider gate
-                    # verifies against. Surfaced so a buyer paying with
-                    # their own wallet can address the payment correctly
-                    # instead of guessing from `author` (an agent id, not
-                    # necessarily a 0x address).
                     "author_pubkey": s.get("author_pubkey", ""),
-                    "ask": record.ask,
+                    # From the ServiceRegistry entry, the only reference for
+                    # them (Decision 2026-11-10): the provider is the address
+                    # paid, the one the gate verifies against.
+                    "service_id": chain.get("service_id"),
+                    "provider": chain.get("provider", ""),
+                    "ask": ({"amount": str(chain["ask_amount"]),
+                             "unit": "per_item"}
+                            if "ask_amount" in chain else None),
+                    "active": chain.get("active"),
                     "endpoint_hint": s.get("endpoint_hint", ""),
                     "image_uri": s.get("image_uri", ""),
                     "backing_tool": record.backing_tool,
@@ -3069,7 +3080,7 @@ class WebSocketBridge:
                             "name": rec.name,
                             "description": str(rec.spec.get("description") or ""),
                             "author": rec.author,
-                            "ask": rec.ask,
+                            "service_id": rec.service_id,
                             "backing_tool": rec.backing_tool,
                             "retired": rec.retired,
                         })
@@ -4359,11 +4370,9 @@ class WebSocketBridge:
         if record.retired:
             return {"msg_id": msg_id, "ok": False, "error": "Service retired"}
 
-        ask = record.ask
-        amount = str(ask.get("amount", ""))
-
         # Payment/voucher validation gate (Stage B — real on-chain verify).
         gate = await self._validate_service_payment(msg, record, local=local)
+        amount = str(gate.get("ask_amount", ""))
         if not gate.get("ok"):
             self.runtime.service_store.record_request(
                 spec_digest, request_id, client, ok=False,
@@ -4529,14 +4538,90 @@ class WebSocketBridge:
     def _service_signing_key(self, author: str) -> str:
         """The key that signs ServiceRegistry writes for ``author``.
 
-        "user" (the owner surface) signs with the owner key; an agent
-        author signs with its own stored key. Empty when none is held."""
+        "user" (the owner surface) signs with the operator key, the address
+        the owner's services are registered and paid under; an agent author
+        signs with its own stored key (an external agent's is the
+        operator's). Empty when none is held."""
         if not author or author == "user":
-            return self._owner_signing_key()
+            try:
+                return str(self._operator_key() or "").strip()
+            except Exception:                               # noqa: BLE001
+                return ""
         registry = getattr(self.runtime, "registry", None)
         if registry is not None and hasattr(registry, "get_agent_key"):
             return str(registry.get_agent_key(author) or "").strip()
         return ""
+
+    def _service_provider_address(self, author: str) -> str:
+        """The address ``author``'s services are registered under: the
+        address of the key that signs its ServiceRegistry writes."""
+        key = self._service_signing_key(author)
+        if not key:
+            return ""
+        try:
+            from eth_account import Account
+            return str(Account.from_key(key).address)
+        except Exception:                                   # noqa: BLE001
+            return ""
+
+    async def _chain_service(self, record: Any) -> dict[str, Any]:
+        """The ServiceRegistry entry of one of this daemon's services.
+
+        The chain is the only reference for a service's price, whether it
+        is active and who is paid (Decision 2026-11-10); the spec carries
+        none of them. The entry is the number this daemon's registration
+        returned; a record without one is matched by digest among the
+        entries of the address that registers ``record.author``'s
+        services, never another address (anyone can register a copy of a
+        public spec). Returns ``{service_id, provider, ask_amount, active}``
+        or ``{"error": ...}``; never raises."""
+        from . import service_client
+        from .on_chain import ServiceMarketClient
+
+        config = self.runtime._config.rpb
+        try:
+            smc = ServiceMarketClient(config)
+            if not smc.registry_available:
+                return {"error": "ServiceRegistry not configured (missing "
+                                 "service_registry_address or rpc_url)"}
+            expected = self._service_provider_address(record.author)
+            if record.service_id is not None:
+                sid = int(record.service_id)
+                entry = await self._offload(lambda: smc.get_service(sid))
+                if entry is None:
+                    return {"error": f"no on-chain service #{sid}"}
+                if (service_client.normalize_digest(
+                        str(entry.get("spec_digest") or ""))
+                        != service_client.normalize_digest(record.digest)):
+                    return {"error": f"on-chain service #{sid} names another "
+                                     "spec"}
+            else:
+                if not expected:
+                    return {"error": f"no signing key held for "
+                                     f"'{record.author}', so its on-chain "
+                                     "listing cannot be identified"}
+                found = await self._offload(
+                    lambda: service_client.lookup_service_ask(
+                        config, expected, record.digest))
+                if found.get("error"):
+                    return {"error": str(found["error"])}
+                entry = found
+                if found.get("service_id") is not None:
+                    self.runtime.service_store.set_service_id(
+                        record.digest, int(found["service_id"]))
+            provider = str(entry.get("provider") or "")
+            if expected and provider.lower() != expected.lower():
+                return {"error": "the on-chain listing is registered under "
+                                 "another address"}
+            return {"service_id": entry.get("service_id"),
+                    "provider": provider,
+                    "ask_amount": int(str(entry.get("ask_amount") or "0")
+                                      or "0"),
+                    "active": bool(entry.get("active"))}
+        except Exception as exc:                            # noqa: BLE001
+            log.warning("ServiceRegistry read for %s failed: %s",
+                        record.digest[:16], exc)
+            return {"error": f"ServiceRegistry read failed: {exc}"}
 
     # A buyer of an inference-backed service sends a chat request (see
     # the inference fulfilment path: args {messages, max_tokens?}).
@@ -4601,6 +4686,9 @@ class WebSocketBridge:
             return {"on_chain": False,
                     "reason": f"On-chain registration failed: "
                               f"{res.get('error')}"}
+        if res.get("service_id") is not None:
+            self.runtime.service_store.set_service_id(
+                digest, int(res["service_id"]))
         return {"on_chain": True,
                 "service_id": res.get("service_id"),
                 "tx_hash": res.get("tx_hash")}
@@ -4614,7 +4702,6 @@ class WebSocketBridge:
         buyer path pays BEFORE dispatch — so a stale row keeps taking money
         for a service that then answers "Service retired". Returns
         ``{on_chain: bool, service_id?, tx_hash?, reason?}``; never raises."""
-        from . import service_client
         from .on_chain import ServiceMarketClient
 
         try:
@@ -4623,10 +4710,7 @@ class WebSocketBridge:
                 return {"on_chain": False,
                         "reason": "ServiceRegistry not configured, so the "
                                   "service is retired locally only."}
-            provider = str(record.spec.get("author_pubkey") or "")
-            found = await self._offload(
-                lambda: service_client.lookup_service_ask(
-                    self.runtime._config.rpb, provider, record.digest))
+            found = await self._chain_service(record)
             if found.get("error"):
                 return {"on_chain": False, "reason": str(found["error"])}
             service_id = found.get("service_id")
@@ -4743,18 +4827,17 @@ class WebSocketBridge:
         """
         from . import service_client
 
-        ask = record.ask
-        amount_raw = ask.get("amount", "")
-        try:
-            amount = int(str(amount_raw or "0") or "0")
-        except (TypeError, ValueError):
-            amount = 0
-        # Same recipient resolution the gate verifies against: the spec's
-        # author_pubkey, stamped at registration. Fall back to this
-        # daemon's own owner wallet — for a locally published service
-        # that IS the seller.
-        recipient = (str(record.spec.get("author_pubkey") or "")
-                     or self._owner_client_address())
+        # Same price and payee the gate verifies against: the service's
+        # ServiceRegistry entry (Decision 2026-11-10). Without a registry
+        # (local dev) there is nothing to pay; the gate degrades the same.
+        chain = await self._chain_service(record)
+        if chain.get("error") is None and not chain.get("active"):
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Service {record.name or record.digest[:16]} is "
+                             "retired on chain: nothing to buy."}
+        amount = int(chain.get("ask_amount") or 0)
+        amount_raw = str(amount)
+        recipient = str(chain.get("provider") or "")
 
         if not record.inference and not record.backing_tool:
             # Answer before spending: an unfulfillable listing must not
@@ -5038,21 +5121,6 @@ class WebSocketBridge:
 
         config = self.runtime._config.rpb
         oc = OnChainService(config)
-        # Resolve the serving agent's address (the payment recipient) — the
-        # spec's author_pubkey is stamped at registration time. The owner
-        # wallet fallback mirrors the PAYER's resolution in
-        # `_invoke_local_service`: without it, a legacy owner-authored spec
-        # (stamped before ServiceStore._author_address learned the owner
-        # fallback) takes the buyer's money and is then refused here.
-        recipient = (str(record.spec.get("author_pubkey") or "")
-                     or self._owner_client_address())
-
-        ask = record.ask
-        try:
-            ask_amount = int(str(ask.get("amount", "0")) or "0")
-        except (TypeError, ValueError):
-            ask_amount = 0
-
         # --- Config escape hatch: no chain ----------------------------------
         # Local listener: degrade loud-and-open (the dev demo).
         # Remote listener: fail CLOSED — see the docstring.
@@ -5074,10 +5142,24 @@ class WebSocketBridge:
                 record.name or record.digest[:16])
             return {"ok": True, "reason": "chain not configured (dev degrade)"}
 
+        # The price, the active flag and the payee come from the service's
+        # ServiceRegistry entry, the only reference for them (Decision
+        # 2026-11-10): a price changed by updateServiceAsk applies at once,
+        # and a service retired on chain is refused.
+        chain = await self._chain_service(record)
+        if chain.get("error"):
+            return {"ok": False,
+                    "reason": f"cannot read this service's on-chain listing: "
+                              f"{chain['error']}"}
+        if not chain.get("active"):
+            return {"ok": False, "reason": "service retired on chain"}
+        recipient = str(chain.get("provider") or "")
+        ask_amount = int(chain.get("ask_amount") or 0)
+
         # A free service needs no payment proof (payForService accepts zero,
         # but a zero ask has nothing to pay; the client sends no proof).
         if ask_amount <= 0:
-            return {"ok": True, "reason": "free service"}
+            return {"ok": True, "reason": "free service", "ask_amount": 0}
 
         store = self.runtime.service_store
         tx_hash = str(request.get("tx_hash") or "").strip()
@@ -5104,7 +5186,7 @@ class WebSocketBridge:
             if not recipient:
                 return {"ok": False,
                         "reason": "service has no on-chain provider address "
-                                  "(author_pubkey) to verify payment against"}
+                                  "to verify payment against"}
             # Only the payer may redeem its payment: the request must be
             # signed by the key that paid (service_client.sign_request). A
             # request id copied off the chain carries no such signature.
@@ -5146,7 +5228,7 @@ class WebSocketBridge:
                 store.mark_request_served(request_id)
             finally:
                 inflight.discard(request_id)
-            return {"ok": True, "reason": "ok"}
+            return {"ok": True, "reason": "ok", "ask_amount": ask_amount}
 
         # --- Voucher (PaymentChannel) path ----------------------------------
         if channel_id is not None and signature and cumulative is not None:
@@ -5208,7 +5290,7 @@ class WebSocketBridge:
                 # settle.
                 store.record_channel_voucher(cid, cum, str(signature),
                                              provider=str(res.get("provider", "")))
-            return {"ok": True, "reason": "ok"}
+            return {"ok": True, "reason": "ok", "ask_amount": ask_amount}
 
         return {"ok": False,
                 "reason": "no payment proof: provide {tx_hash, request_id} or "

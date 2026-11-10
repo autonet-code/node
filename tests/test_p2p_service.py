@@ -189,11 +189,12 @@ async def test_relayed_request_runs_the_providers_payment_gate(tmp_path, monkeyp
     from atn import service_client
     from atn.ws_server import WebSocketBridge
     from tests.test_service_payment_gate import (
-        PAYER_KEY, _make_runtime, _payer, _register_service)
+        PAYER_KEY, _make_runtime, _patch_listing, _payer, _register_service)
 
+    _patch_listing(monkeypatch)
     rt = _make_runtime(tmp_path, chain=True)
     record = _register_service(rt)
-    provider_addr = record.spec["author_pubkey"]
+    provider_addr = record.test_listing["provider"]
 
     async def _verify(self, *, request_id, recipient, min_amount,
                       tx_hash=None, payer=None):

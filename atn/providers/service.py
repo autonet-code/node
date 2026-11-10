@@ -99,10 +99,12 @@ class ServiceProvider(Provider):
         # config purchase) or "agent" (per-agent parent-set binding).
         self._payer_kind = payer_kind or "owner"
         self._payer_id = payer_id or ""
-        # Cached on-chain ask (base units) and the resolved wss endpoint.
-        # Both are stable for a registered service, so one read serves many
-        # completions; ``updateServiceAsk`` / ``updateEndpoint`` are rare and
-        # a stale value fails loudly at the gate rather than silently.
+        # The service's ServiceRegistry number, found by one registry scan
+        # and kept; the price is re-read from that entry on every call, since
+        # the chain is the only reference for it and ``updateServiceAsk``
+        # changes it in place (Decision 2026-11-10). ``_ask_amount`` is the
+        # last price read. The wss endpoint is cached.
+        self._service_id: int | None = None
         self._ask_amount: int | None = None
         self._endpoint: str = ""
 
@@ -156,16 +158,31 @@ class ServiceProvider(Provider):
             return False
 
     async def _resolve_ask(self) -> int:
-        """The service's on-chain ask, cached after the first read.
+        """The service's on-chain ask, read for every call.
 
-        Raises ProviderError when the service can't be found on chain —
-        paying an unknown ask is not something to guess at.
+        The first call scans the registry for the (provider, digest) entry
+        and keeps its number; later calls read that one entry. Raises
+        ProviderError when the service can't be found on chain — paying an
+        unknown ask is not something to guess at.
         """
-        if self._ask_amount is not None:
-            return self._ask_amount
         from .. import service_client
-        found = await service_client.lookup_service_ask(
-            self._config, self._provider_address, self._spec_digest)
+        found: dict[str, Any] = {}
+        if self._service_id is not None:
+            found = await service_client.read_service(
+                self._config, self._service_id)
+            if (found.get("error")
+                    or str(found.get("provider") or "").lower()
+                    != self._provider_address.lower()
+                    or service_client.normalize_digest(
+                        str(found.get("spec_digest") or ""))
+                    != service_client.normalize_digest(self._spec_digest)):
+                found = {}
+                self._service_id = None
+        if not found:
+            found = await service_client.lookup_service_ask(
+                self._config, self._provider_address, self._spec_digest)
+            if found.get("service_id") is not None and not found.get("error"):
+                self._service_id = int(found["service_id"])
         if found.get("error"):
             raise ProviderError(
                 f"service provider: cannot read the on-chain ask for "

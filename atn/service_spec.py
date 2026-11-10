@@ -2,8 +2,10 @@
 
 Design: ``docs/services_market.md``. A Service is a remote API published
 by an agent (ultimately by its human benefactor): general-purpose,
-priced per work item, ATN-denominated (ratified 2026-07-10 — the ask is
-``{amount, unit}``, no token field). Unlike a tool manifest, a
+priced per work item in ATN. The price is NOT in the spec: the chain is
+the only reference for it (Decision 2026-11-10, ``ServiceRegistry``'s
+``askAmount``, changed in place by ``updateServiceAsk``), as it is for
+whether the service is active and who is paid. Unlike a tool manifest, a
 service spec carries NO substrate standing, NO verdict-layer claims, NO
 mint — the trust basis is purely behavioral (signed identity, atomic
 payment, receipt-gated reviews). It rides the same sha256-addressed blob
@@ -14,8 +16,8 @@ This module is the atn-side analogue of
 carries NO ``nodes.*`` dependency: ``canonical_service_bytes`` is
 implemented locally so the ATN daemon can build/validate/sign a spec on
 a standalone install. Identity is the digest; a revision is a NEW spec
-whose ``version_of`` points at its predecessor (content-addressed, so a
-changed ask = a new digest — see ``ServiceStore.update_ask``).
+whose ``version_of`` points at its predecessor. A new price is not a
+revision: it changes on chain under the same digest.
 """
 
 from __future__ import annotations
@@ -30,14 +32,11 @@ SERVICE_SPEC_KIND = "service_spec"
 # spec cannot be re-attributed after signing.
 _SIG_FIELD = "author_sig"
 
-_REQUIRED_FIELDS = ("kind", "name", "description", "input_schema", "author", "ask")
-
-# Ask "unit" vocabulary (advisory; pricing policy is the spec's business).
-_ASK_UNITS = ("per_item", "per_minute", "per_token", "per_call", "flat")
+_REQUIRED_FIELDS = ("kind", "name", "description", "input_schema", "author")
 
 # Default output-token ceiling for an inference-backed service when the
 # author names a model but no cap. Bounds the provider's own upstream
-# spend per paid call (the ask is priced against the cap).
+# spend per paid call (the on-chain price is set against the cap).
 DEFAULT_MAX_TOKENS_CAP = 4096
 
 
@@ -47,7 +46,6 @@ def build_service_spec(
     description: str,
     input_schema: Dict[str, Any],
     author: str,
-    ask: Dict[str, Any],
     output_schema: Optional[Dict[str, Any]] = None,
     author_pubkey: str = "",
     endpoint_hint: str = "",
@@ -62,10 +60,8 @@ def build_service_spec(
     ``created_ts`` is caller-supplied (no wall-clock reads here; the
     store stamps it).
 
-    ``ask`` is normalized to ``{amount, unit}`` — a legacy ``token``
-    field is stripped rather than rejected (settlement is ATN-only,
-    ratified 2026-07-10), so old callers keep working and the signed
-    bytes stay canonical.
+    The spec carries no price (Decision 2026-11-10): the provider sets
+    it on chain when registering and changes it there.
 
     ``image_uri`` is display-plane only (a listing card banner), like
     ``endpoint_hint``: advisory, unvalidated, inside the signed payload
@@ -87,7 +83,6 @@ def build_service_spec(
         "description": description,
         "input_schema": input_schema,
         "author": author,
-        "ask": normalize_ask(ask),
         "endpoint_hint": endpoint_hint,
         "image_uri": image_uri,
         "version_of": version_of,
@@ -130,9 +125,9 @@ def validate_service_spec(payload: Dict[str, Any]) -> List[str]:
     if output_schema is not None and not isinstance(output_schema, dict):
         errors.append("output_schema must be a JSON-schema dict or absent")
 
-    ask = payload.get("ask")
-    if ask is not None and ask != "":
-        errors.extend(_validate_ask(ask))
+    if "ask" in payload:
+        errors.append("a service spec carries no price: the asking price "
+                      "lives on chain (ServiceRegistry askAmount)")
 
     version_of = payload.get("version_of")
     if version_of is not None and not isinstance(version_of, str):
@@ -180,53 +175,6 @@ def normalize_inference(inference: Dict[str, Any]) -> Dict[str, Any]:
         out["model"] = model.strip()
     if isinstance(cap, int) and not isinstance(cap, bool):
         out["max_tokens_cap"] = int(cap)
-    return out
-
-
-def _validate_ask(ask: Any) -> List[str]:
-    """The ask names the price: {amount, unit}. Payment/voucher
-    validation is the contracts workstream's job — here we only check the
-    shape so a well-formed ask reaches the payment-channel seam.
-
-    Settlement is ATN-only (ratified 2026-07-10), so the ask carries NO
-    ``token`` field — a spec is ATN-denominated by construction. Old
-    callers and old persisted specs may still carry one; it is ignored
-    here and stripped by ``normalize_ask``."""
-    errors: List[str] = []
-    if not isinstance(ask, dict):
-        return ["ask must be a dict of {amount, unit}"]
-    amount = ask.get("amount")
-    # amount is a decimal string (base units) to avoid float rounding on
-    # ATN quantities — mirror the on-chain uint representation.
-    if amount in (None, ""):
-        errors.append("ask.amount is required (decimal string, base units)")
-    elif not isinstance(amount, (str, int)):
-        errors.append("ask.amount must be a decimal string or int")
-    else:
-        try:
-            if int(str(amount)) < 0:
-                errors.append("ask.amount must be non-negative")
-        except (TypeError, ValueError):
-            errors.append("ask.amount must parse as an integer base-unit amount")
-    unit = ask.get("unit")
-    if unit is not None and unit not in _ASK_UNITS:
-        errors.append(f"ask.unit must be one of {_ASK_UNITS}, got {unit!r}")
-    return errors
-
-
-def normalize_ask(ask: Any) -> Dict[str, Any]:
-    """Canonicalize an ask to ``{amount, unit}``.
-
-    Drops the vestigial ``token`` field (settlement is ATN-only, ratified
-    2026-07-10) and any other stray key, so a caller that still passes an
-    ERC20 address doesn't break AND doesn't poison the signed bytes. Not
-    a dict? Returned untouched — validation reports that."""
-    if not isinstance(ask, dict):
-        return ask
-    out: Dict[str, Any] = {"amount": ask.get("amount")}
-    unit = ask.get("unit")
-    if unit is not None:
-        out["unit"] = unit
     return out
 
 

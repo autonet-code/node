@@ -923,9 +923,49 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         failed = True
 
     # ------------------------------------------------------------------
-    # Stage 8 — teardown
+    # Stage 8 — the chain is the only reference for the price (Decision
+    # 2026-11-10): updateServiceAsk applies to the next call, on both sides
     # ------------------------------------------------------------------
-    s8 = board.stage(8, "teardown")
+    s8 = board.stage(8, "price changed on chain applies to the next call")
+    try:
+        if provider is None or s7.status != "PASS":
+            raise RuntimeError("stage 7 did not complete")
+        record = rt_seller.service_store.get(spec_digest)
+        sid = record.service_id
+        assert sid is not None, "the seller's daemon kept no service number"
+        new_ask = SERVICE_ASK * 3
+        send_tx(w3, registry_c.functions.updateServiceAsk(sid, new_ask),
+                seller_key, seller_addr)
+        assert registry_c.functions.getService(sid).call()[2] == new_ask
+        assert "ask" not in record.spec, "the spec still names a price"
+
+        child_before = substrate.functions.balanceOf(child_addr).call()
+        seen_before = set(rt_seller.service_store._seen_requests)
+        resp3 = await provider.send(
+            messages=[{"role": "user", "content": "at the new price?"}],
+            max_tokens=64)
+        assert resp3.text == CANNED_REPLY
+        child_after = substrate.functions.balanceOf(child_addr).call()
+        assert child_before - child_after == new_ask, (
+            f"child paid {child_before - child_after}, expected {new_ask}")
+        assert len(rt_seller.service_store._seen_requests) == \
+            len(seen_before) + 1, "the gate did not verify the new payment"
+        s8.note("service_id", sid)
+        s8.note("new_ask", new_ask)
+        s8.note("child_debited", child_before - child_after)
+        step(f"price changed on chain to {new_ask}: the buyer paid it and "
+             "the gate verified it, with no new spec")
+        s8.status = "PASS"
+    except Exception as e:
+        s8.status = "FAIL"
+        s8.note("error", repr(e))
+        log(traceback.format_exc())
+        failed = True
+
+    # ------------------------------------------------------------------
+    # Stage 9 — teardown
+    # ------------------------------------------------------------------
+    s9 = board.stage(9, "teardown")
     try:
         if ws_server is not None:
             await ws_server.stop()
@@ -937,10 +977,10 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     pass
         kill_hardhat(hh_proc)
         hh_proc = None
-        s8.status = "PASS"
+        s9.status = "PASS"
     except Exception as e:
-        s8.status = "FAIL"
-        s8.note("error", repr(e))
+        s9.status = "FAIL"
+        s9.note("error", repr(e))
         log(traceback.format_exc())
         failed = True
     finally:

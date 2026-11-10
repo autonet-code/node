@@ -45,7 +45,40 @@ Master-disable / fingerprinting is fleet hygiene for honest daemons,
 not a defense against dishonest ones. The defense is that lying has a
 wallet attached and receipts are forever.
 
+## Decision (2026-11-10): the chain is the only reference for price, status and payee
+
+A service's price, whether it is active and the address paid are read
+from its `ServiceRegistry` entry and nowhere else. The spec carries none
+of them: `validate_service_spec` refuses a spec with an `ask` field, and
+the price is set at `registerService` and changed in place by
+`updateServiceAsk` (any Agent with the selling grant can send it through
+`send_transaction`; the digest does not change). Before this, the
+provider's gate charged the price written in the spec while buyers read
+the chain's, so an on-chain price change split the two, and
+`ServiceStore.update_ask` (a new spec version per price) is removed.
+
+- The daemon keeps the number each registration returned
+  (`ServiceRecord.service_id`, persisted) and reads that entry
+  (`WebSocketBridge._chain_service`). A record without one is matched by
+  digest only among the entries of the address that signs for its
+  author: anyone can register a copy of a public spec, at price 0.
+- The gate refuses a request when the entry cannot be read or is
+  inactive, charges the entry's `askAmount` and verifies payment to the
+  entry's `provider`. The spec's `author_pubkey` only names the signer of
+  the spec.
+- The owner surface (author `user`) registers, retires and is paid under
+  the operator's address: `_service_signing_key("user")` is the operator
+  key. It used the configured daemon key, empty in a normal install, so
+  an owner-published service never reached the chain.
+- The buyer's `service` provider scans the registry once for the entry's
+  number and reads the price from that entry on every call.
+- Proven by `scripts/local_e2e_service_provider.py` stage 8: after
+  `updateServiceAsk`, the next call pays the new price and the gate
+  verifies it, with no new spec.
+
 ## Decision (2026-07-26): the vestigial `ask.token` field is dropped
+
+(Superseded 2026-11-10: the spec carries no price at all.)
 
 ATN-only settlement was ratified 2026-07-10, but `ask.token` survived as
 required dead weight: `validate_ask` demanded a non-empty ERC20 address
@@ -125,11 +158,12 @@ Point an agent at `provider: service` and it does ordinary completions.
   fleet is an owner act, matching the sponsor pipe's
   dependent-is-the-owner-wallet doctrine. An agent cannot mint itself a
   cheaper provider.
-- **Ask cached, request id fresh.** The on-chain ask (scanned out of
-  `ServiceRegistry` by `(provider, spec_digest)`, since there is no digest→id
-  index) and the resolved wss endpoint are read once per provider
-  instance; the `request_id` is regenerated per call because the
-  provider-side gate persists seen ids and treats a reuse as a replay.
+- **Price read per call, request id fresh.** The service's
+  `ServiceRegistry` number is scanned out once by `(provider, spec_digest)`
+  (there is no digest→id index); the price is read from that entry on
+  every call (Decision 2026-11-10), and the wss endpoint is cached. The
+  `request_id` is regenerated per call because the provider-side gate
+  persists seen ids and treats a reuse as a replay.
 - **Wire args**: `{messages, max_tokens?, system?, temperature?}`;
   success envelope `{request_id, content, model, usage, stop_reason,
   max_tokens}`. An empty served `model` is legitimate (the seller resolves
@@ -214,9 +248,8 @@ sha256-addressed JSON, same rail as tool manifests:
   "input_schema": { ... },          // work-item request shape
   "output_schema": { ... },
   "author": "<agent-id>",
-  "author_pubkey": "0x...",
+  "author_pubkey": "0x...",         // the spec's signer; the payee is the registry entry's provider
   "author_sig": "...",              // over canonical bytes, sig excluded
-  "ask": { "amount": "1000000", "unit": "per_item" },   // ATN-denominated (ratified 2026-07-10)
   "endpoint_hint": "wss://...",     // mutable presence lives on-chain, this is advisory
   "image_uri": "https://...jpg",    // display-plane only: listing-card banner, advisory, not embedded
   "version_of": null,
@@ -285,8 +318,9 @@ it later without a new protocol: `spec_digest` names what's being
 served; pricing policy is the spec's business.
 
 Daemon-side components:
-- `ServiceStore` (mirror of ToolStore): specs authored here, ask
-  management, publish = register on-chain + blob push.
+- `ServiceStore` (mirror of ToolStore): specs authored here, the
+  on-chain service number kept, publish = register on-chain + blob push.
+  The price lives on chain only.
 - Service-host handler on the existing WS server: authenticates the
   channel, validates vouchers, dispatches to the backing implementation
   (which is just a local tool run on the provider's daemon, since a
@@ -347,7 +381,8 @@ So `service_request`, and only `service_request`, is dispatched pre-auth
 on the remote listener (`PAYMENT_AUTHORIZED_MESSAGES` in
 `atn/ws_server.py`). What authorizes it is `_validate_service_payment`:
 fetch the on-chain `ServicePayment` receipt, check recipient == the
-serving agent and amount >= the ask, consume the `request_id` against a
+service's on-chain provider and amount >= its on-chain ask, consume the
+`request_id` against a
 persisted replay set. That is strictly stronger than a session login (it
 costs ATN per call and cannot be replayed), and it is the only surface
 such a session can reach.

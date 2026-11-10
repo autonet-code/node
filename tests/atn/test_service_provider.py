@@ -55,6 +55,7 @@ class _Recorder:
             },
         }
         self.ask_calls: list[tuple] = []
+        self.read_calls: list = []
         self.pay_calls: list[dict] = []
         self.request_calls: list[dict] = []
         self._rid = 0
@@ -66,6 +67,10 @@ class _Recorder:
     async def lookup_service_ask(self, config, provider_address, spec_digest):
         self.ask_calls.append((provider_address, spec_digest))
         return dict(self.ask_result)
+
+    async def read_service(self, config, service_id):
+        self.read_calls.append(service_id)
+        return {"spec_digest": DIGEST, **self.ask_result}
 
     async def pay_for_service(self, config, key, recipient, amount,
                               request_id=""):
@@ -95,8 +100,8 @@ def _make_provider(rec: _Recorder, monkeypatch, *, chain: bool = True,
                    owner_key: str = OWNER_KEY) -> ServiceProvider:
     import atn.service_client as real_client
 
-    for name in ("new_request_id", "lookup_service_ask", "pay_for_service",
-                 "request_service"):
+    for name in ("new_request_id", "lookup_service_ask", "read_service",
+                 "pay_for_service", "request_service"):
         monkeypatch.setattr(real_client, name, getattr(rec, name))
 
     prov = ServiceProvider(
@@ -314,17 +319,32 @@ class TestNoChainDegrade:
 
 class TestAskCaching:
     @pytest.mark.asyncio
-    async def test_ask_read_once_across_completions(self, monkeypatch):
+    async def test_one_scan_then_the_price_is_read_each_call(self, monkeypatch):
+        """The registry is scanned once for the service's number; the price
+        is read from that entry on every call, so a change by
+        updateServiceAsk applies to the next payment (Decision 2026-11-10)."""
         rec = _Recorder()
         prov = _make_provider(rec, monkeypatch)
 
-        for _ in range(3):
+        for _ in range(2):
             await prov.send(messages=MESSAGES)
+        rec.ask_result = {**rec.ask_result, "ask_amount": 2500}
+        await prov.send(messages=MESSAGES)
 
         assert len(rec.ask_calls) == 1          # one registry scan
-        assert len(rec.pay_calls) == 3          # but a payment per call
-        assert prov.cached_ask == 1000
-        assert all(c["amount"] == 1000 for c in rec.pay_calls)
+        assert rec.read_calls == [7, 7]         # then the entry, each call
+        assert [c["amount"] for c in rec.pay_calls] == [1000, 1000, 2500]
+        assert prov.cached_ask == 2500
+
+    @pytest.mark.asyncio
+    async def test_retired_after_the_first_call_is_refused(self, monkeypatch):
+        rec = _Recorder()
+        prov = _make_provider(rec, monkeypatch)
+        await prov.send(messages=MESSAGES)
+        rec.ask_result = {**rec.ask_result, "active": False}
+        with pytest.raises(Exception, match="retired on chain"):
+            await prov.send(messages=MESSAGES)
+        assert len(rec.pay_calls) == 1
 
 
 # ---------------------------------------------------------------------------

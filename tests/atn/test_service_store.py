@@ -1,7 +1,7 @@
 """ServiceStore + services-market WS rail — provider-side coverage.
 
 Design: docs/services_market.md. Covers spec build/validation, register +
-reload persistence, version_of lineage on update_ask, retire, the
+reload persistence, the on-chain service number, retire, the
 provider-side service_request dispatch end-to-end through a registered
 echo tool, and the request log + summary the reviews later ride on.
 """
@@ -21,6 +21,25 @@ from atn.service_spec import (
     validate_service_spec,
 )
 from atn.service_store import ServiceStore
+
+
+@pytest.fixture(autouse=True)
+def _chain_listing(monkeypatch):
+    """Each service's ServiceRegistry entry, the only reference for its price,
+    its active flag and its payee (Decision 2026-11-10). By default: listed
+    under the address that signs for its author, at ASK, active until
+    retired. A test sets ``record.test_listing`` to describe another."""
+    from atn.ws_server import WebSocketBridge
+
+    async def _chain(self, record):
+        listing = getattr(record, "test_listing", None)
+        if listing is not None:
+            return dict(listing)
+        return {"service_id": 1,
+                "provider": self._service_provider_address(record.author),
+                "ask_amount": int(ASK["amount"]),
+                "active": not record.retired}
+    monkeypatch.setattr(WebSocketBridge, "_chain_service", _chain)
 
 
 def _make_runtime(tmp_path: Path):
@@ -79,10 +98,10 @@ class TestServiceSpec:
     def test_build_valid(self):
         spec = build_service_spec(
             name="transcribe", description="Speech to text.",
-            input_schema=SCHEMA, author="agent-1", ask=ASK, created_ts=7)
+            input_schema=SCHEMA, author="agent-1", created_ts=7)
         assert spec["kind"] == "service_spec"
         assert spec["name"] == "transcribe"
-        assert spec["ask"] == ASK
+        assert "ask" not in spec      # the price lives on chain only
         assert spec["version_of"] is None
         assert spec["created_ts"] == 7
         assert validate_service_spec(spec) == []
@@ -92,42 +111,15 @@ class TestServiceSpec:
         assert any("name" in e for e in errors)
         assert any("description" in e for e in errors)
         assert any("input_schema" in e for e in errors)
-        assert any("ask" in e for e in errors)
 
-    def test_bad_ask_rejected(self):
-        with pytest.raises(ValueError):
-            build_service_spec(
-                name="s", description="d", input_schema=SCHEMA,
-                author="a", ask={"amount": "x"})  # non-int amount
+    def test_spec_refuses_a_price(self):
+        """The chain is the only reference for a service's price (Decision
+        2026-11-10): a spec that names one is invalid."""
         errors = validate_service_spec({
-            "kind": "service_spec", "name": "s", "description": "d",
+            "kind": "service_spec", "name": "n", "description": "d",
             "input_schema": SCHEMA, "author": "a",
-            "ask": {"amount": "-5", "unit": "weird"}})
-        assert any("non-negative" in e for e in errors)
-        assert any("unit" in e for e in errors)
-
-    def test_legacy_ask_token_stripped_not_rejected(self):
-        """The vestigial `ask.token` was dropped 2026-07-26 (settlement is
-        ATN-only). Removal is TOLERANT: an old caller still passing an
-        ERC20 address is neither rejected nor allowed to poison the
-        signed bytes — the field is stripped."""
-        legacy = {"token": "0xC0ffee", "amount": "1000000", "unit": "per_item"}
-        assert validate_service_spec({
-            "kind": "service_spec", "name": "s", "description": "d",
-            "input_schema": SCHEMA, "author": "a", "ask": legacy}) == []
-
-        spec = build_service_spec(
-            name="s", description="d", input_schema=SCHEMA,
-            author="a", ask=legacy, created_ts=1)
-        assert spec["ask"] == {"amount": "1000000", "unit": "per_item"}
-        assert "token" not in spec["ask"]
-
-    def test_ask_without_token_is_valid(self):
-        """An ask is {amount, unit} — no token field required."""
-        assert validate_service_spec({
-            "kind": "service_spec", "name": "s", "description": "d",
-            "input_schema": SCHEMA, "author": "a",
-            "ask": {"amount": "5", "unit": "per_call"}}) == []
+            "ask": {"amount": "5", "unit": "per_item"}})
+        assert any("on chain" in e for e in errors)
 
     def test_image_uri_optional_and_signed_not_embedded(self):
         """image_uri is display-plane: covered by the signature (so it
@@ -137,14 +129,14 @@ class TestServiceSpec:
 
         bare = build_service_spec(
             name="s", description="d", input_schema=SCHEMA,
-            author="a", ask=ASK, created_ts=1)
+            author="a", created_ts=1)
         assert bare["image_uri"] == ""            # absent -> empty, still valid
         assert validate_service_spec(bare) == []
 
         url = "https://example.invalid/services/s.jpg"
         withimg = build_service_spec(
             name="s", description="d", input_schema=SCHEMA,
-            author="a", ask=ASK, image_uri=url, created_ts=1)
+            author="a", image_uri=url, created_ts=1)
         assert withimg["image_uri"] == url
         assert validate_service_spec(withimg) == []
         # inside the signed payload
@@ -162,12 +154,12 @@ class TestServiceSpec:
 
         bare = build_service_spec(
             name="s", description="d", input_schema=SCHEMA,
-            author="a", ask=ASK, created_ts=1)
+            author="a", created_ts=1)
         assert "inference" not in bare
 
         inf = build_service_spec(
             name="s", description="d", input_schema=SCHEMA,
-            author="a", ask=ASK, created_ts=1,
+            author="a", created_ts=1,
             inference={"model": "llama-3.1-8b", "max_tokens_cap": 512})
         assert inf["inference"] == {"model": "llama-3.1-8b",
                                     "max_tokens_cap": 512}
@@ -182,7 +174,7 @@ class TestServiceSpec:
 
         spec = build_service_spec(
             name="s", description="d", input_schema=SCHEMA, author="a",
-            ask=ASK, created_ts=1, inference={"model": "  gpt-4o-mini  "})
+            created_ts=1, inference={"model": "  gpt-4o-mini  "})
         assert spec["inference"] == {"model": "gpt-4o-mini",
                                      "max_tokens_cap": DEFAULT_MAX_TOKENS_CAP}
 
@@ -190,7 +182,7 @@ class TestServiceSpec:
         # drift on whatever a caller happened to pass.
         spec2 = build_service_spec(
             name="s", description="d", input_schema=SCHEMA, author="a",
-            ask=ASK, created_ts=1,
+            created_ts=1,
             inference={"model": "m", "max_tokens_cap": 8, "junk": True})
         assert spec2["inference"] == {"model": "m", "max_tokens_cap": 8}
 
@@ -210,21 +202,21 @@ class TestServiceSpec:
         with pytest.raises(ValueError):
             build_service_spec(
                 name="s", description="d", input_schema=SCHEMA, author="a",
-                ask=ASK, inference={"max_tokens_cap": 10})
+                inference={"max_tokens_cap": 10})
 
     def test_canonical_bytes_excludes_sig(self):
         spec = build_service_spec(
             name="s", description="d", input_schema=SCHEMA,
-            author="a", ask=ASK, created_ts=1)
+            author="a", created_ts=1)
         base = canonical_service_bytes(spec)
         spec["author_sig"] = "0xdeadbeef"
         assert canonical_service_bytes(spec) == base  # sig excluded
 
     def test_canonical_bytes_deterministic_and_sorted(self):
         a = build_service_spec(name="s", description="d", input_schema=SCHEMA,
-                               author="a", ask=ASK, created_ts=1)
+                               author="a", created_ts=1)
         b = build_service_spec(name="s", description="d", input_schema=SCHEMA,
-                               author="a", ask=ASK, created_ts=1)
+                               author="a", created_ts=1)
         assert canonical_service_bytes(a) == canonical_service_bytes(b)
 
 
@@ -240,7 +232,7 @@ class TestServiceStore:
         await _register_agent(rt, "child")
         res = rt.service_store.register(
             name="svc", description="A service.", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool="deadbeef")
+            author="child", backing_tool="deadbeef")
         assert len(res["digest"]) == 64
         assert res["spec"]["author"] == "child"
 
@@ -252,61 +244,43 @@ class TestServiceStore:
         assert not record.retired
 
     @pytest.mark.asyncio
+    async def test_service_number_survives_reload(self, tmp_path):
+        """The ServiceRegistry number a registration returned is how the
+        daemon finds its own entry (price, active flag, payee) on chain."""
+        rt = _make_runtime(tmp_path)
+        res = rt.service_store.register(
+            name="numbered", description="d", input_schema=SCHEMA,
+            author="user")
+        assert rt.service_store.get(res["digest"]).service_id is None
+        assert rt.service_store.set_service_id(res["digest"], 9)
+        reloaded = ServiceStore(rt, rt._config.data_dir / "services")
+        assert reloaded.get(res["digest"]).service_id == 9
+
+    def test_owner_services_sign_with_the_operator_key(self, tmp_path,
+                                                       monkeypatch):
+        """The owner surface registers, retires and is paid under the
+        operator's address: its ServiceRegistry writes use the operator key
+        even when no daemon key is configured."""
+        rt = _make_runtime(tmp_path)
+        rt._config.rpb.private_key = ""
+        server = _server(rt)
+        key = "0x" + "55" * 32
+        monkeypatch.setattr(server, "_operator_key", lambda: key)
+        assert server._service_signing_key("user") == key
+        from eth_account import Account
+        assert (server._service_provider_address("user")
+                == Account.from_key(key).address)
+
+    @pytest.mark.asyncio
     async def test_resolve_by_name_prefix_digest(self, tmp_path):
         rt = _make_runtime(tmp_path)
         res = rt.service_store.register(
             name="uniq", description="d", input_schema=SCHEMA,
-            author="user", ask=ASK)
+            author="user")
         store = rt.service_store
         assert store.resolve("uniq").digest == res["digest"]
         assert store.resolve(f"svc_{res['digest'][:12]}").digest == res["digest"]
         assert store.resolve(res["digest"]).digest == res["digest"]
-
-    @pytest.mark.asyncio
-    async def test_update_ask_lineage(self, tmp_path):
-        rt = _make_runtime(tmp_path)
-        v1 = rt.service_store.register(
-            name="svc", description="d", input_schema=SCHEMA,
-            author="user", ask=ASK, backing_tool="tool-a")
-        new_ask = {"amount": "2000000", "unit": "per_item"}
-        v2 = rt.service_store.update_ask(v1["digest"], new_ask)
-
-        assert v2["digest"] != v1["digest"]              # changed ask = new digest
-        assert v2["spec"]["version_of"] == v1["digest"]  # lineage link
-        assert v2["spec"]["ask"] == new_ask
-        # backing_tool carried forward
-        assert rt.service_store.get(v2["digest"]).backing_tool == "tool-a"
-        # predecessor soft-retired; live list resolves to current
-        assert rt.service_store.get(v1["digest"]).retired
-        assert rt.service_store.resolve("svc").digest == v2["digest"]
-
-    @pytest.mark.asyncio
-    async def test_legacy_persisted_spec_with_ask_token_loads(self, tmp_path):
-        """Specs written before the 2026-07-26 field removal carry
-        `ask.token`. They must LOAD unchanged — the store reads blobs,
-        it does not re-validate, so an old listing never disappears."""
-        rt = _make_runtime(tmp_path)
-        await _register_agent(rt, "child")
-        res = rt.service_store.register(
-            name="legacy_svc", description="Old.", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool="deadbeef")
-
-        # Rewrite the persisted blob with the legacy ask shape, keeping
-        # the registry row's digest (content-addressing is not the point
-        # here — surviving the read is).
-        blobs = rt.service_store._blob_store()
-        spec = dict(blobs.get_json(res["digest"]))
-        spec["ask"] = {"token": "0xC0ffee", **spec["ask"]}
-        blob_path = blobs.data_dir / res["digest"]
-        assert blob_path.exists()
-        blob_path.write_text(json.dumps(spec), encoding="utf-8")
-
-        reloaded = ServiceStore(rt, rt._config.data_dir / "services")
-        record = reloaded.get(res["digest"])
-        assert record is not None
-        assert record.name == "legacy_svc"
-        assert record.ask["amount"] == ASK["amount"]
-        assert record.ask["token"] == "0xC0ffee"   # carried, not fatal
 
     @pytest.mark.asyncio
     async def test_image_uri_round_trips_through_list(self, tmp_path):
@@ -316,10 +290,10 @@ class TestServiceStore:
         url = "https://example.invalid/services/with-image.jpg"
         withimg = rt.service_store.register(
             name="with_image", description="Has a banner.",
-            input_schema=SCHEMA, author="user", ask=ASK, image_uri=url)
+            input_schema=SCHEMA, author="user", image_uri=url)
         without = rt.service_store.register(
             name="no_image", description="No banner.",
-            input_schema=SCHEMA, author="user", ask=ASK)
+            input_schema=SCHEMA, author="user")
 
         assert rt.service_store.get(withimg["digest"]).image_uri == url
         assert rt.service_store.get(without["digest"]).image_uri == ""
@@ -338,26 +312,13 @@ class TestServiceStore:
         assert rows["no_image"]["image_uri"] == ""
 
     @pytest.mark.asyncio
-    async def test_image_uri_carried_across_update_ask(self, tmp_path):
-        rt = _make_runtime(tmp_path)
-        url = "https://example.invalid/services/priced.jpg"
-        v1 = rt.service_store.register(
-            name="priced", description="d", input_schema=SCHEMA,
-            author="user", ask=ASK, image_uri=url)
-        v2 = rt.service_store.update_ask(
-            v1["digest"],
-            {"amount": "3000000", "unit": "per_item"})
-        assert v2["spec"]["image_uri"] == url
-
-    @pytest.mark.asyncio
     async def test_register_inference_backed(self, tmp_path):
         """An inference-backed service round-trips through the signed spec
         blob, so the backing survives a reload with no sidecar state."""
         rt = _make_runtime(tmp_path)
         res = rt.service_store.register(
             name="cognition", description="Chat completions, per call.",
-            input_schema=SCHEMA, author="user", ask=ASK,
-            inference={"model": "qwen2.5:14b", "max_tokens_cap": 1024})
+            input_schema=SCHEMA, author="user",             inference={"model": "qwen2.5:14b", "max_tokens_cap": 1024})
 
         rec = rt.service_store.get(res["digest"])
         assert rec.inference == {"model": "qwen2.5:14b", "max_tokens_cap": 1024}
@@ -374,7 +335,7 @@ class TestServiceStore:
         rt = _make_runtime(tmp_path)
         res = rt.service_store.register(
             name="cognition", description="d", input_schema=SCHEMA,
-            author="user", ask=ASK, inference={"model": "m"})
+            author="user", inference={"model": "m"})
         assert (rt.service_store.get(res["digest"]).max_tokens_cap
                 == DEFAULT_MAX_TOKENS_CAP)
 
@@ -386,7 +347,7 @@ class TestServiceStore:
         with pytest.raises(ValueError, match="mutually exclusive"):
             rt.service_store.register(
                 name="both", description="d", input_schema=SCHEMA,
-                author="user", ask=ASK, backing_tool="deadbeef",
+                author="user", backing_tool="deadbeef",
                 inference={"model": "m", "max_tokens_cap": 8})
         assert rt.service_store.list() == []
 
@@ -396,32 +357,18 @@ class TestServiceStore:
         with pytest.raises(ValueError, match="model"):
             rt.service_store.register(
                 name="nomodel", description="d", input_schema=SCHEMA,
-                author="user", ask=ASK, inference={"max_tokens_cap": 8})
+                author="user", inference={"max_tokens_cap": 8})
         with pytest.raises(ValueError, match="max_tokens_cap"):
             rt.service_store.register(
                 name="badcap", description="d", input_schema=SCHEMA,
-                author="user", ask=ASK,
-                inference={"model": "m", "max_tokens_cap": -1})
-
-    @pytest.mark.asyncio
-    async def test_inference_carried_across_update_ask(self, tmp_path):
-        rt = _make_runtime(tmp_path)
-        v1 = rt.service_store.register(
-            name="cognition", description="d", input_schema=SCHEMA,
-            author="user", ask=ASK,
-            inference={"model": "m", "max_tokens_cap": 64})
-        v2 = rt.service_store.update_ask(
-            v1["digest"],
-            {"amount": "9", "unit": "per_call"})
-        assert v2["spec"]["inference"] == {"model": "m", "max_tokens_cap": 64}
-        assert rt.service_store.get(v2["digest"]).backing_tool == ""
+                author="user",                 inference={"model": "m", "max_tokens_cap": -1})
 
     @pytest.mark.asyncio
     async def test_retire(self, tmp_path):
         rt = _make_runtime(tmp_path)
         res = rt.service_store.register(
             name="svc", description="d", input_schema=SCHEMA,
-            author="user", ask=ASK)
+            author="user")
         assert rt.service_store.retire(res["digest"])
         assert rt.service_store.get(res["digest"]).retired
         assert rt.service_store.list() == []
@@ -554,7 +501,7 @@ class TestServiceRequestDispatch:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="Echo service.", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
 
         out = await _svc_request(rt, svc["digest"], "req-1", {"x": "hi"})
         assert out["ok"] is True
@@ -580,7 +527,7 @@ class TestServiceRequestDispatch:
         # No backing tool -> failure recorded.
         svc = rt.service_store.register(
             name="ghost", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK)
+            author="child")
         out = await _svc_request(rt, svc["digest"], "r", {"x": "1"})
         assert out["ok"] is False and "backing" in out["error"]
 
@@ -600,7 +547,7 @@ class TestServiceRequestDispatch:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
         await _svc_request(rt, svc["digest"], "req-1", {"x": "a"})
         await _svc_request(rt, svc["digest"], "req-2", {"x": "b"}, client="0xOther")
 
@@ -694,8 +641,7 @@ def _inference_svc(rt, *, model="qwen2.5:14b", cap=100, name="cognition"):
         name=name, description="Chat completions, per call.",
         input_schema={"type": "object",
                       "properties": {"messages": {"type": "array"}}},
-        author="user", ask=ASK,
-        inference={"model": model, "max_tokens_cap": cap})
+        author="user",         inference={"model": model, "max_tokens_cap": cap})
 
 
 class TestInferenceServiceDispatch:
@@ -906,7 +852,7 @@ class TestInvokeServiceLocal:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="Echo service.", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
 
         out = await _invoke(rt, svc["digest"], {"x": "hi"})
         assert out["ok"] is True
@@ -944,7 +890,7 @@ class TestInvokeServiceLocal:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="Echo service.", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
 
         server = _server(rt)
         rid = "0x" + "ab" * 32
@@ -1005,7 +951,7 @@ class TestInvokeServiceLocal:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
 
         first = await _invoke(rt, svc["digest"], {"x": "a"})
         second = await _invoke(rt, svc["digest"], {"x": "b"})
@@ -1047,7 +993,7 @@ class TestInvokeServiceLocal:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
         rt.service_store.retire(svc["digest"])
 
         out = await _invoke(rt, svc["digest"], {"x": "1"})
@@ -1064,7 +1010,7 @@ class TestInvokeServiceLocal:
         await _register_agent(rt, "child")
         svc = rt.service_store.register(
             name="ghost", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK)
+            author="child")
 
         out = await _invoke(rt, svc["digest"], {"x": "1"})
         assert out["ok"] is False
@@ -1109,7 +1055,7 @@ class TestInvokeServicePayment:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
         self._configure_chain(rt)
 
         from atn import service_client
@@ -1135,7 +1081,7 @@ class TestInvokeServicePayment:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
         self._configure_chain(rt)
 
         from atn import service_client
@@ -1183,18 +1129,17 @@ class TestInvokeServicePayment:
         assert real_gate is not None
 
     @pytest.mark.asyncio
-    async def test_owner_authored_service_falls_back_to_owner_wallet(
+    async def test_owner_service_is_paid_at_its_registered_address(
             self, tmp_path, monkeypatch):
-        """An owner-published service (author "user") has no agent identity,
-        so its spec carries no author_pubkey. The seller IS this daemon's
-        owner, so that wallet is the recipient — not an empty string that
-        would abort the payment."""
+        """An owner-published service (author "user") is registered under
+        the operator's address, and the chain names that address as the
+        payee (Decision 2026-11-10), not the owner wallet."""
         rt = _make_runtime(tmp_path)
         await _register_agent(rt, "child")
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="owner_svc", description="d", input_schema=SCHEMA,
-            author="user", ask=ASK, backing_tool=tool["digest"])
+            author="user", backing_tool=tool["digest"])
         # The key is omitted entirely, not stored empty.
         assert not rt.service_store.get(svc["digest"]).spec.get("author_pubkey")
         self._configure_chain(rt)
@@ -1216,8 +1161,11 @@ class TestInvokeServicePayment:
 
         out = await _invoke(rt, svc["digest"], {"x": "hi"}, server=server)
         assert out["ok"] is True
-        assert seen == [rt._config.rpb.owner_wallet]
-        assert out["result"]["receipt"]["recipient"] == rt._config.rpb.owner_wallet
+        provider = server._service_provider_address("user")
+        assert provider.startswith("0x")
+        assert provider.lower() != rt._config.rpb.owner_wallet.lower()
+        assert seen == [provider]
+        assert out["result"]["receipt"]["recipient"] == provider
 
     @pytest.mark.asyncio
     async def test_no_owner_key_is_a_payment_failure(self, tmp_path):
@@ -1226,7 +1174,7 @@ class TestInvokeServicePayment:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
         self._configure_chain(rt)
         rt._config.rpb.private_key = ""
 
@@ -1236,26 +1184,21 @@ class TestInvokeServicePayment:
         assert svc["digest"] not in rt.service_store.summary()
 
     @pytest.mark.asyncio
-    async def test_owner_service_stamps_owner_wallet_and_real_gate_agrees(
+    async def test_owner_service_payer_and_real_gate_agree(
             self, tmp_path, monkeypatch):
-        """The payer and the gate must resolve the SAME recipient.
-
-        Before the fix an owner-authored spec stamped an EMPTY
-        author_pubkey: the payer fell back to the owner wallet and paid,
-        and the gate (with no such fallback) then refused to verify. The
-        buyer's money moved and nothing was served. This runs the REAL
-        gate, not a stub."""
+        """The payer and the gate must resolve the SAME recipient: both read
+        it from the service's on-chain entry. This runs the REAL gate, not
+        a stub."""
         rt = _make_runtime(tmp_path)
         await _register_agent(rt, "child")
         tool = await _register_echo_tool(rt)
         self._configure_chain(rt)
-        owner = rt._config.rpb.owner_wallet
         svc = rt.service_store.register(
             name="owner_svc", description="d", input_schema=SCHEMA,
-            author="user", ask=ASK, backing_tool=tool["digest"])
-        # The payable address is stamped at registration, not guessed later.
-        assert (rt.service_store.get(svc["digest"]).spec["author_pubkey"]
-                == owner)
+            author="user", backing_tool=tool["digest"])
+        server = _server(rt)
+        provider = server._service_provider_address("user")
+        assert provider.startswith("0x")
 
         from atn import on_chain, service_client
         seen: list[str] = []
@@ -1275,11 +1218,11 @@ class TestInvokeServicePayment:
         monkeypatch.setattr(on_chain.OnChainService,
                             "verify_service_payment", _verify)
 
-        out = await _invoke(rt, svc["digest"], {"x": "hi"})
+        out = await _invoke(rt, svc["digest"], {"x": "hi"}, server=server)
         assert out["ok"] is True, out
-        # Payer and gate agreed on one recipient: the owner wallet.
-        assert seen == [owner]
-        assert verified == [owner]
+        # Payer and gate agreed on one recipient: the on-chain provider.
+        assert seen == [provider]
+        assert verified == [provider]
 
     # ---- no chain config: local degrades open, REMOTE fails closed -------
     #
@@ -1296,7 +1239,7 @@ class TestInvokeServicePayment:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
         assert not rt._config.rpb.substrate_address
 
         out = await _svc_request(rt, svc["digest"], "req-remote",
@@ -1313,7 +1256,7 @@ class TestInvokeServicePayment:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", ask=ASK, backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
 
         out = await _svc_request(rt, svc["digest"], "req-local",
                                  {"x": "hi"}, local=True)
@@ -1429,8 +1372,10 @@ class TestInvokeServicePayment:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="free_svc", description="d", input_schema=SCHEMA,
-            author="child", ask={"amount": "0", "unit": "per_item"},
-            backing_tool=tool["digest"])
+            author="child", backing_tool=tool["digest"])
+        rt.service_store.get(svc["digest"]).test_listing = {
+            "service_id": 1, "provider": "0x" + "44" * 20, "ask_amount": 0,
+            "active": True}
         self._configure_chain(rt)
 
         from atn import service_client

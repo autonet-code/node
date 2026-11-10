@@ -2,16 +2,17 @@
 
 Design: ``docs/services_market.md``. A Service is a remote API an agent
 (ultimately its human benefactor) offers to the market: general-purpose,
-priced per work item, ATN-denominated (ratified 2026-07-10 — the ask is
-``{amount, unit}``, no token field). It rides the same
+priced per work item in ATN. The price, whether the service is active
+and who is paid live on chain only (``ServiceRegistry``, Decision
+2026-11-10); the spec carries none of them. It rides the same
 content-addressed blob rail as tool manifests, but — unlike a tool — a
 service gets NO substrate standing, NO verdict claims, NO mint. Trust is
 behavioral: signed identity, atomic payment, receipt-gated reviews.
 
-This is the provider-side store: specs are AUTHORED here, ask managed
-here, publish = register-on-chain + blob push (chain wiring lives in the
-contracts workstream; this store owns spec build/sign/persist and the
-local request log that later reviews ride).
+This is the provider-side store: specs are AUTHORED here, publish =
+register-on-chain + blob push. This store owns spec build/sign/persist,
+the on-chain service number each registration returned, and the local
+request log that later reviews ride.
 
 The backing implementation of a v1 service is just a local tool run on
 the provider's daemon — "a Service is a tool the OWNER chose to sell"
@@ -64,6 +65,10 @@ class ServiceRecord:
     backing_tool: str = ""      # digest of the local tool that fulfils requests
     retired: bool = False
     registered_ts: int = 0
+    # ServiceRegistry's number for this spec, from the registration this
+    # daemon sent (None until it lands). The price, the active flag and the
+    # payee are read from that entry on chain, never from the spec.
+    service_id: int | None = None
 
     @property
     def author(self) -> str:
@@ -72,11 +77,6 @@ class ServiceRecord:
     @property
     def name(self) -> str:
         return str(self.spec.get("name") or "")
-
-    @property
-    def ask(self) -> dict[str, Any]:
-        ask = self.spec.get("ask")
-        return ask if isinstance(ask, dict) else {}
 
     @property
     def image_uri(self) -> str:
@@ -110,6 +110,7 @@ class ServiceRecord:
             "backing_tool": self.backing_tool,
             "retired": self.retired,
             "registered_ts": self.registered_ts,
+            "service_id": self.service_id,
         }
 
 
@@ -150,7 +151,6 @@ class ServiceStore:
         description: str,
         input_schema: dict[str, Any],
         author: str,
-        ask: dict[str, Any],
         backing_tool: str = "",
         output_schema: dict[str, Any] | None = None,
         endpoint_hint: str = "",
@@ -185,7 +185,6 @@ class ServiceStore:
             description=description,
             input_schema=input_schema,
             author=author,
-            ask=ask,
             output_schema=output_schema,
             author_pubkey=author_pubkey,
             endpoint_hint=endpoint_hint,
@@ -205,47 +204,18 @@ class ServiceStore:
         )
         self._records[digest] = record
         self._persist()
-        log.info("registered service %r by %s (ask %s ATN) -> %s",
-                 name, author, spec["ask"].get("amount", "?"), digest[:16])
+        log.info("registered service %r by %s -> %s",
+                 name, author, digest[:16])
         return {"digest": digest, "spec": spec}
 
-    def update_ask(
-        self,
-        digest: str,
-        ask: dict[str, Any],
-        *,
-        backing_tool: str | None = None,
-    ) -> dict[str, Any]:
-        """Publish a new spec version with a changed ask.
-
-        Content-addressed identity means a changed ask IS a new digest —
-        there is no in-place mutation. The new spec carries
-        ``version_of = <old digest>`` (artifact lineage). The predecessor
-        is soft-retired so the market resolves to the current price.
-        Returns ``{"digest", "spec"}`` or raises ValueError."""
+    def set_service_id(self, digest: str, service_id: int) -> bool:
+        """Record the ServiceRegistry number a registration returned."""
         record = self._records.get(digest)
         if record is None:
-            raise ValueError(f"unknown service digest: {digest[:16]}")
-        spec = record.spec
-        new = self.register(
-            name=str(spec.get("name") or ""),
-            description=str(spec.get("description") or ""),
-            input_schema=dict(spec.get("input_schema") or {}),
-            author=record.author,
-            ask=ask,
-            backing_tool=(backing_tool if backing_tool is not None
-                          else record.backing_tool),
-            output_schema=(dict(spec["output_schema"])
-                           if isinstance(spec.get("output_schema"), dict) else None),
-            endpoint_hint=str(spec.get("endpoint_hint") or ""),
-            image_uri=str(spec.get("image_uri") or ""),
-            inference=(dict(spec["inference"])
-                       if isinstance(spec.get("inference"), dict) else None),
-            version_of=digest,
-        )
-        record.retired = True
+            return False
+        record.service_id = int(service_id)
         self._persist()
-        return new
+        return True
 
     def retire(self, digest: str) -> bool:
         """Soft-retire a service (no longer offered; record kept for the
@@ -626,6 +596,8 @@ class ServiceStore:
                 backing_tool=str(row.get("backing_tool") or ""),
                 retired=bool(row.get("retired", False)),
                 registered_ts=int(row.get("registered_ts") or 0),
+                service_id=(int(row["service_id"])
+                            if row.get("service_id") is not None else None),
             )
 
     def _persist(self) -> None:

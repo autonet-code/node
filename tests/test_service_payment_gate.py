@@ -34,9 +34,6 @@ SUBSTRATE_ADDR = "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25"
 CHANNEL_ADDR = "0x97956A322dC5585157c91840d39292c396032508"
 ASK_AMOUNT = 1000
 
-# ATN-denominated by construction (the vestigial `ask.token` was dropped
-# 2026-07-26); SUBSTRATE_ADDR is still the payment target the gate verifies.
-ASK = {"amount": str(ASK_AMOUNT), "unit": "per_item"}
 SCHEMA = {"type": "object", "properties": {"x": {"type": "string"}}}
 
 
@@ -62,16 +59,32 @@ def _make_runtime(tmp_path: Path, *, chain: bool):
     return Runtime(EventBus(), data_dir=data_dir, config=config)
 
 
-def _register_service(rt, *, backing_tool="deadbeef", provider=PROVIDER_ADDR):
-    """Register a service whose spec carries a provider address (author_pubkey)."""
+def _register_service(rt, *, backing_tool="deadbeef", provider=PROVIDER_ADDR,
+                      ask_amount=ASK_AMOUNT, active=True, name="echo_svc"):
+    """Register a service and give it the ServiceRegistry entry the gate reads
+    (stubbed by ``_patch_listing``): the only reference for its price, its
+    active flag and its payee (Decision 2026-11-10)."""
     res = rt.service_store.register(
-        name="echo_svc", description="Echo service.", input_schema=SCHEMA,
-        author="user", ask=ASK, backing_tool=backing_tool)
+        name=name, description="Echo service.", input_schema=SCHEMA,
+        author="user", backing_tool=backing_tool)
     record = rt.service_store.get(res["digest"])
-    # The provider address is stamped as author_pubkey at registration; the
-    # owner-authored path leaves it empty, so set it explicitly for the gate.
-    record.spec["author_pubkey"] = provider
+    record.service_id = 7
+    record.test_listing = {"service_id": 7, "provider": provider,
+                           "ask_amount": ask_amount, "active": active}
     return record
+
+
+def _patch_listing(monkeypatch):
+    """Serve each record's ``test_listing`` as its on-chain entry."""
+    async def _chain(self, record):
+        return dict(getattr(record, "test_listing", None)
+                    or {"error": "no on-chain listing"})
+    monkeypatch.setattr(WebSocketBridge, "_chain_service", _chain)
+
+
+@pytest.fixture(autouse=True)
+def _listing(monkeypatch):
+    _patch_listing(monkeypatch)
 
 
 def _patch_chain(monkeypatch, *, verify=None, voucher=None):
@@ -104,7 +117,7 @@ def _payer() -> str:
 def _signed(req: dict, record, key: str = PAYER_KEY) -> dict:
     """A direct-path request signed by the paying key, as a buyer sends it."""
     from atn.service_client import sign_request
-    provider = record.spec.get("author_pubkey") or PROVIDER_ADDR
+    provider = record.test_listing["provider"] or PROVIDER_ADDR
     try:
         sig = sign_request(key, req["request_id"], record.digest, {}, provider)
     except ValueError:
@@ -191,7 +204,7 @@ class TestDirectPath:
     @pytest.mark.asyncio
     async def test_reject_no_provider_address(self, tmp_path, monkeypatch):
         rt = _make_runtime(tmp_path, chain=True)
-        record = _register_service(rt, provider="")  # no author_pubkey
+        record = _register_service(rt, provider="")  # no on-chain provider
         _patch_chain(monkeypatch, verify={"verified": True})
         server = WebSocketBridge(rt)
 
@@ -488,12 +501,150 @@ class TestSurveyHoles:
     @pytest.mark.asyncio
     async def test_free_service_needs_no_proof(self, tmp_path, monkeypatch):
         rt = _make_runtime(tmp_path, chain=True)
-        res = rt.service_store.register(
-            name="free_svc", description="Free.", input_schema=SCHEMA,
-            author="user", ask={"amount": "0", "unit": "per_item"},
-            backing_tool="deadbeef")
-        record = rt.service_store.get(res["digest"])
-        record.spec["author_pubkey"] = PROVIDER_ADDR
+        record = _register_service(rt, ask_amount=0, name="free_svc")
         server = WebSocketBridge(rt)
         out = await server._validate_service_payment({}, record)
         assert out["ok"] is True and "free" in out["reason"]
+
+
+# ---------------------------------------------------------------------------
+# The chain is the only reference (Decision 2026-11-10)
+# ---------------------------------------------------------------------------
+
+class TestChainIsTheReference:
+    @pytest.mark.asyncio
+    async def test_price_is_read_from_the_chain(self, tmp_path, monkeypatch):
+        """A price changed by updateServiceAsk applies at once: the gate
+        charges the on-chain ask, for both proofs."""
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt, ask_amount=ASK_AMOUNT * 3)
+        minimums: list = []
+
+        async def _verify(self, *, request_id, recipient, min_amount,
+                          tx_hash=None, payer=None):
+            minimums.append(min_amount)
+            return {"verified": True, "reason": "ok"}
+        monkeypatch.setattr(oc.OnChainService, "verify_service_payment", _verify)
+        _patch_chain(monkeypatch, voucher={
+            "valid": True, "status": 1, "provider": PROVIDER_ADDR})
+        monkeypatch.setattr(oc.OnChainService, "verify_service_payment", _verify)
+        server = WebSocketBridge(rt)  # verify re-patched after _patch_chain
+
+        out = await server._validate_service_payment(
+            _signed({"tx_hash": "0xabc", "request_id": "0x" + "0e" * 32},
+                    record), record)
+        assert out["ok"] is True and minimums == [ASK_AMOUNT * 3]
+        assert out["ask_amount"] == ASK_AMOUNT * 3
+
+        low = await server._validate_service_payment(
+            _vsigned({"channel_id": 4, "cumulative_amount": ASK_AMOUNT,
+                      "signature": "0xsig"}, record), record)
+        assert low["ok"] is False
+        assert f"< ask {ASK_AMOUNT * 3}" in low["reason"]
+
+    @pytest.mark.asyncio
+    async def test_retired_on_chain_is_refused(self, tmp_path, monkeypatch):
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt, active=False)
+        _patch_chain(monkeypatch, verify={"verified": True, "reason": "ok"})
+        server = WebSocketBridge(rt)
+        out = await server._validate_service_payment(
+            _signed({"tx_hash": "0xabc", "request_id": "0x" + "0f" * 32},
+                    record), record)
+        assert out["ok"] is False and "retired on chain" in out["reason"]
+
+    @pytest.mark.asyncio
+    async def test_unreadable_listing_is_refused(self, tmp_path, monkeypatch):
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        req = _signed({"tx_hash": "0xabc", "request_id": "0x" + "10" * 32},
+                      record)
+        record.test_listing = None
+        _patch_chain(monkeypatch, verify={"verified": True, "reason": "ok"})
+        server = WebSocketBridge(rt)
+        out = await server._validate_service_payment(req, record)
+        assert out["ok"] is False and "on-chain listing" in out["reason"]
+
+
+class TestChainService:
+    """WebSocketBridge._chain_service itself: which entry is a service's."""
+
+    def _server(self, rt, monkeypatch, *, entries, signer=PROVIDER_ADDR):
+        monkeypatch.setattr(oc.ServiceMarketClient, "registry_available", True,
+                            raising=False)
+
+        async def _get(self, service_id):
+            return entries.get(int(service_id))
+
+        async def _list(self, start=1, limit=None):
+            return [dict(v) for v in entries.values()]
+        monkeypatch.setattr(oc.ServiceMarketClient, "get_service", _get)
+        monkeypatch.setattr(oc.ServiceMarketClient, "list_services", _list)
+        server = WebSocketBridge(rt)
+        monkeypatch.setattr(server, "_service_provider_address",
+                            lambda author: signer)
+        return server
+
+    @staticmethod
+    def _record(rt):
+        res = rt.service_store.register(
+            name="svc", description="A service.", input_schema=SCHEMA,
+            author="user", backing_tool="deadbeef")
+        return rt.service_store.get(res["digest"])
+
+    @pytest.mark.asyncio
+    async def test_reads_the_registered_number(self, tmp_path, monkeypatch):
+        monkeypatch.undo()
+        rt = _make_runtime(tmp_path, chain=True)
+        record = self._record(rt)
+        rt.service_store.set_service_id(record.digest, 5)
+        server = self._server(rt, monkeypatch, entries={5: {
+            "service_id": 5, "provider": PROVIDER_ADDR,
+            "spec_digest": record.digest, "ask_amount": "42", "active": True}})
+        out = await server._chain_service(record)
+        assert out == {"service_id": 5, "provider": PROVIDER_ADDR,
+                       "ask_amount": 42, "active": True}
+
+    @pytest.mark.asyncio
+    async def test_refuses_an_entry_for_another_spec(self, tmp_path, monkeypatch):
+        monkeypatch.undo()
+        rt = _make_runtime(tmp_path, chain=True)
+        record = self._record(rt)
+        rt.service_store.set_service_id(record.digest, 5)
+        server = self._server(rt, monkeypatch, entries={5: {
+            "service_id": 5, "provider": PROVIDER_ADDR,
+            "spec_digest": "ab" * 32, "ask_amount": "42", "active": True}})
+        out = await server._chain_service(record)
+        assert "another spec" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_ignores_a_copy_registered_by_another_address(
+            self, tmp_path, monkeypatch):
+        """Anyone can register a public spec's digest at price 0: without a
+        number of its own, the daemon matches only its signer's entries."""
+        monkeypatch.undo()
+        rt = _make_runtime(tmp_path, chain=True)
+        record = self._record(rt)
+        server = self._server(rt, monkeypatch, entries={
+            1: {"service_id": 1, "provider": CLIENT_ADDR,
+                "spec_digest": record.digest, "ask_amount": "0", "active": True},
+            2: {"service_id": 2, "provider": PROVIDER_ADDR,
+                "spec_digest": record.digest, "ask_amount": "42",
+                "active": True}})
+        out = await server._chain_service(record)
+        assert out["service_id"] == 2 and out["ask_amount"] == 42
+        # The number is kept, so the next read goes straight to it.
+        assert rt.service_store.get(record.digest).service_id == 2
+
+    @pytest.mark.asyncio
+    async def test_refuses_a_numbered_entry_of_another_address(
+            self, tmp_path, monkeypatch):
+        monkeypatch.undo()
+        rt = _make_runtime(tmp_path, chain=True)
+        record = self._record(rt)
+        rt.service_store.set_service_id(record.digest, 1)
+        server = self._server(rt, monkeypatch, entries={1: {
+            "service_id": 1, "provider": CLIENT_ADDR,
+            "spec_digest": record.digest, "ask_amount": "0", "active": True}})
+        out = await server._chain_service(record)
+        assert "another address" in out["error"]

@@ -1389,7 +1389,10 @@ _TOOLS: list[ToolDefinition] = [
             "digest of a registered tool you own) so incoming service_requests "
             "dispatch to it, or 'inference' ({model, max_tokens_cap}) to sell "
             "cognition off this daemon's own provider stack. "
-            "Returns {service_id, tx_hash, spec_digest}."
+            "The price lives on chain only, in the ServiceRegistry entry: "
+            "change it with updateServiceAsk(service_id, ask_amount) or "
+            "retire the service with retireService(service_id) through "
+            "send_transaction. Returns {service_id, tx_hash, spec_digest}."
         ),
         input_schema={
             "type": "object",
@@ -3525,9 +3528,8 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
     if store is None:
         return {"error": "Service store not available on this daemon."}
 
-    # Asks are ATN-denominated by construction (ratified 2026-07-10) —
-    # no token field.
-    ask = {"amount": str(ask_amount), "unit": "per_item"}
+    # The price goes on chain only (Decision 2026-11-10): the spec carries
+    # none, and the provider changes it with ServiceRegistry.updateServiceAsk.
     # The second backing kind (docs/services_market.md, decision 2026-07-26):
     # sell this daemon's own inference. The store refuses it alongside a
     # backing_tool, so no check is needed here.
@@ -3540,7 +3542,6 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
             description=description,
             input_schema=schema,
             author=str(caller_id),
-            ask=ask,
             backing_tool=str(input.get("backing_tool") or ""),
             output_schema=output_schema,
             endpoint_hint=str(input.get("endpoint_hint") or ""),
@@ -3563,6 +3564,8 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
     if not result.get("success"):
         return {"error": f"On-chain registration failed: {result.get('error')}",
                 "spec_digest": spec_digest}
+    if result.get("service_id") is not None:
+        store.set_service_id(spec_digest, int(result["service_id"]))
     return {
         "service_id": result.get("service_id"),
         "tx_hash": result.get("tx_hash"),

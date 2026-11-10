@@ -336,6 +336,12 @@ built on it are listed again.
   most you can lose to a provider who doesn't answer is one request.
 - `close_service_channel` returns the unspent deposit after the challenge
   window.
+- Selling (`register_service`) needs the owner's grant. A service's price,
+  whether it is active and who is paid live on chain only, in its
+  `ServiceRegistry` entry: change the price with
+  `updateServiceAsk(serviceId, askAmount)` or retire it with
+  `retireService(serviceId)` through `send_transaction`. The spec carries
+  no price.
 
 ## 6. Money, transactions and limits
 
