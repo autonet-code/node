@@ -275,7 +275,7 @@ class TestTheProviderSignsTheVerifiedPayer:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="echo_svc", description="d", input_schema=SCHEMA,
-            author="child", backing_tool=tool["digest"])
+            author="child", unit="one echo", backing_tool=tool["digest"])
         server = _server(rt)
         provider = server._service_provider_address("child")
 

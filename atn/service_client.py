@@ -156,7 +156,12 @@ def sign_reply(private_key: str, request_id: str, spec_digest: str,
     out["payer"] = fields["payer"]
     out["amount"] = fields["amount"]
     out["channel_id"] = fields["channel_id"]
-    out["charged"] = fields["charged"]
+    # ``charged`` is signed either way (absent counts as false in the hash),
+    # but written on the reply only when the reply states it: a reply that
+    # says nothing about payment (a stream's opening reply) must not read as
+    # "not charged" to the buyer's channel book.
+    if isinstance(reply.get("charged"), bool):
+        out["charged"] = fields["charged"]
     out["receipt_sig"] = sr.sign_hash(key, sr.receipt_hash(fields))
     return out
 

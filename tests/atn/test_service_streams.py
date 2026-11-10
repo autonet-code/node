@@ -208,7 +208,7 @@ def _provider(tmp_path, monkeypatch, *, protocol=True, backing=None):
     srv = _echo_backend()
     res = rt.service_store.register(
         name="echo_stream", description="Bytes back.", input_schema=SCHEMA,
-        author="user", unit="one KiB echoed",
+        author="user", unit="one echo session",
         backing_tool=backing or f"tcp://127.0.0.1:{srv.getsockname()[1]}",
         protocol={"id": "echo/1", "description": "every byte comes back"}
         if protocol else None)
