@@ -1987,6 +1987,18 @@ class WebSocketBridge:
                 inference = None
             if not name:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'name' field"}
+            # What one work item is, the meaning of the price (Decision
+            # 2026-11-10); hardware names what a compute service runs on.
+            unit = msg.get("unit")
+            if not isinstance(unit, str) or not unit.strip():
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Missing 'unit' field: what one work item is "
+                                 "(e.g. 'one completion up to 4,000 output "
+                                 "tokens')"}
+            hardware = msg.get("hardware")
+            if hardware is not None and not isinstance(hardware, str):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "'hardware' must be a text naming the hardware"}
             if not input_schema:
                 # The app's Publish dialog names a backing, not a schema:
                 # the backing already defines what a buyer sends. Without
@@ -2000,6 +2012,8 @@ class WebSocketBridge:
                     description=description,
                     input_schema=input_schema,
                     author=author,
+                    unit=unit,
+                    hardware=hardware or "",
                     backing_tool=backing_tool,
                     output_schema=msg.get("output_schema"),
                     endpoint_hint=msg.get("endpoint_hint", ""),
@@ -2049,6 +2063,8 @@ class WebSocketBridge:
                     "active": chain.get("active"),
                     "endpoint_hint": s.get("endpoint_hint", ""),
                     "image_uri": s.get("image_uri", ""),
+                    "unit": record.unit,
+                    "hardware": record.hardware,
                     "backing_tool": record.backing_tool,
                     # {} for a tool-backed service; {provider, model,
                     # max_tokens_cap, max_input_chars} when the daemon sells

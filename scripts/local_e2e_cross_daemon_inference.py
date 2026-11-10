@@ -1233,6 +1233,8 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 # ATN-denominated by construction (ratified 2026-07-10;
                 # the vestigial `ask.token` was dropped 2026-07-26).
                 "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
+                # What one work item is: the meaning of the on-chain price.
+                "unit": f"one completion up to {MAX_TOKENS_CAP} output tokens",
                 "inference": {"provider": "ollama", "model": model,
                               "max_tokens_cap": MAX_TOKENS_CAP},
             })

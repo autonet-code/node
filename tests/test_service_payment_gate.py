@@ -66,7 +66,7 @@ def _register_service(rt, *, backing_tool="deadbeef", provider=PROVIDER_ADDR,
     active flag and its payee (Decision 2026-11-10)."""
     res = rt.service_store.register(
         name=name, description="Echo service.", input_schema=SCHEMA,
-        author="user", backing_tool=backing_tool)
+        author="user", unit="one request", backing_tool=backing_tool)
     record = rt.service_store.get(res["digest"])
     record.service_id = 7
     record.test_listing = {"service_id": 7, "provider": provider,
@@ -630,7 +630,7 @@ class TestChainService:
     def _record(rt):
         res = rt.service_store.register(
             name="svc", description="A service.", input_schema=SCHEMA,
-            author="user", backing_tool="deadbeef")
+            author="user", unit="one request", backing_tool="deadbeef")
         return rt.service_store.get(res["digest"])
 
     @pytest.mark.asyncio

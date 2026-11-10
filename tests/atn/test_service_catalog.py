@@ -36,6 +36,7 @@ def _spec(name: str, description: str, key: str = KEY_A, **extra) -> dict:
         "kind": "service_spec", "name": name, "description": description,
         "input_schema": {"type": "object", "properties": {"audio": {"type": "string"}}},
         "author": "agent", "author_pubkey": Account.from_key(key).address,
+        "unit": "one audio minute",
         "endpoint_hint": "", "image_uri": "", "version_of": None,
         "created_ts": 1, **extra,
     }
@@ -333,6 +334,48 @@ class TestSearch:
         assert rows[0]["provider"] == ADDR_A
         assert [r["service_id"] for r in cat.search("")] == [2, 1]   # newest first
 
+    def test_rows_show_the_unit_of_work_and_hardware(self):
+        """What one work item is and what it runs on travel with every row
+        (Decision 2026-11-10)."""
+        cat = _catalog()
+        gpu = _spec("render_frames", "video frame rendering",
+                    unit="one minute of RTX 5090 time",
+                    hardware="one RTX 5090, 32 GB")
+        plain = _spec("transcribe_audio", "speech to text")
+        cat._entries[1] = _entry(1, gpu, ADDR_A)
+        cat._entries[2] = _entry(2, plain, ADDR_A)
+        for sid, sp in ((1, gpu), (2, plain)):
+            assert cat.accept_announcement(announcement(sp, sid))
+        rows = {r["service_id"]: r for r in cat.search("")}
+        assert rows[1]["unit"] == "one minute of RTX 5090 time"
+        assert rows[1]["hardware"] == "one RTX 5090, 32 GB"
+        assert rows[2]["unit"] == "one audio minute"
+        assert rows[2]["hardware"] == ""
+
+    @pytest.mark.asyncio
+    async def test_find_services_passes_unit_and_hardware(self):
+        from atn.agent_tools import _find_services
+        cat = _catalog()
+        spec = _spec("render_frames", "frames", unit="one rendered frame",
+                     hardware="one H100")
+        cat._entries[1] = _entry(1, spec, ADDR_A)
+        assert cat.accept_announcement(announcement(spec, 1))
+        cat._last_block = 1
+        rt = SimpleNamespace(
+            _config=SimpleNamespace(rpb=SimpleNamespace(network_joined=True)),
+            service_catalog=cat)
+        out = await _find_services(rt, {})
+        row = out["services"][0]
+        assert row["unit"] == "one rendered frame"
+        assert row["hardware"] == "one H100"
+
+    def test_a_spec_without_a_unit_is_not_kept(self):
+        cat = _catalog()
+        spec = _spec("vague", "no unit of work")
+        spec.pop("unit")
+        cat._entries[1] = _entry(1, spec, ADDR_A)
+        assert cat.accept_announcement(announcement(spec, 1)) is False
+        assert cat.search("") == []
 
 class TestListingContext:
     def test_rows_show_the_providers_household_and_sanction(self):

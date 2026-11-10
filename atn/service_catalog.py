@@ -422,6 +422,10 @@ class ServiceCatalog:
             "active": bool(entry.get("active")),
             "name": str(spec.get("name") or "") or f"service {digest[:10]}",
             "description": str(spec.get("description") or ""),
+            # What one work item is (the meaning of the price) and, for a
+            # compute service, the hardware it runs on.
+            "unit": str(spec.get("unit") or ""),
+            "hardware": str(spec.get("hardware") or ""),
             "input_schema": spec.get("input_schema"),
             "output_schema": spec.get("output_schema"),
             "image_uri": str(spec.get("image_uri") or ""),

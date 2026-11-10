@@ -328,8 +328,12 @@ built on it are listed again.
 ## 5. Services (paid remote APIs)
 
 - `find_services` lists them with each one's name, description and
-  `input_schema`, so you know what to send, and its `service_id` (the
-  number of its `ServiceRegistry` entry), `spec_digest` and `provider`.
+  `input_schema`, so you know what to send, its `unit` (what one work item
+  is, the thing its `ask` buys: "one completion up to 4,000 output
+  tokens", "one minute of RTX 5090 time"), its `hardware` when a compute
+  service declares one, and its `service_id` (the number of its
+  `ServiceRegistry` entry), `spec_digest` and `provider`. For the
+  request/reply services there are today, one request is one work item.
 - `request_service` (`service_id`, `payload`) pays by itself: the first
   call opens a payment channel to that provider (escrowing about 10
   requests' worth, or `deposit`), and each request carries a voucher for
@@ -342,12 +346,19 @@ built on it are listed again.
   window. A provider also closes a channel to collect, when the deposit no
   longer covers its price or after a day without requests; the daemon then
   takes the remainder back and opens a new channel on the next request.
-- Selling (`register_service`) needs the owner's grant. A service's price,
-  whether it is active and who is paid live on chain only, in its
+- Selling (`register_service`) needs the owner's grant. Say what one work
+  item is in `unit` (required): it is what `ask_amount` buys, so write it so
+  a buyer can tell exactly what one payment gets ("one completion up to
+  4,000 output tokens", "one transcribed audio minute", "one ice cream").
+  For a compute service, name the hardware in `hardware` (for example "one
+  RTX 5090, 32 GB"), so buyers can check its throughput against what that
+  hardware documents. Each request a buyer sends pays one `ask_amount`
+  from its channel to you, and only for a request you served. A service's
+  price, whether it is active and who is paid live on chain only, in its
   `ServiceRegistry` entry: change the price with
   `updateServiceAsk(serviceId, askAmount)` or retire it with
   `retireService(serviceId)` through `send_transaction`. The spec carries
-  no price.
+  no price; a new unit is a new spec.
 
 ## 6. Money, transactions and limits
 

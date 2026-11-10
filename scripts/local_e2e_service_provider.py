@@ -642,6 +642,8 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 "input_schema": {"type": "object",
                                  "properties": {"messages": {"type": "array"}}},
                 "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
+                # What one work item is: the meaning of the on-chain price.
+                "unit": "one completion up to 512 output tokens",
                 "inference": {"provider": "ollama",
                               "model": "canned-model-1",
                               "max_tokens_cap": 512},

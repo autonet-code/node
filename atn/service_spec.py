@@ -18,6 +18,13 @@ implemented locally so the ATN daemon can build/validate/sign a spec on
 a standalone install. Identity is the digest; a revision is a NEW spec
 whose ``version_of`` points at its predecessor. A new price is not a
 revision: it changes on chain under the same digest.
+
+The spec declares the unit of work (Decision 2026-11-10, "the unit of work;
+metered on channels"): ``unit`` (required) says what one work item is, for
+example "one completion up to 4,000 output tokens" or "one minute of RTX
+5090 time". It is the meaning of the on-chain price, never a price itself.
+``hardware`` (optional) names the hardware a compute service runs on, so a
+buyer can check throughput against what that hardware documents.
 """
 
 from __future__ import annotations
@@ -32,7 +39,12 @@ SERVICE_SPEC_KIND = "service_spec"
 # spec cannot be re-attributed after signing.
 _SIG_FIELD = "author_sig"
 
-_REQUIRED_FIELDS = ("kind", "name", "description", "input_schema", "author")
+_REQUIRED_FIELDS = ("kind", "name", "description", "input_schema", "author",
+                    "unit")
+
+# Bounds on the unit-of-work texts: a sentence each, shown on every listing.
+MAX_UNIT_CHARS = 200
+MAX_HARDWARE_CHARS = 200
 
 # Default output-token ceiling for an inference-backed service when the
 # author names a model but no cap. Bounds the provider's own upstream
@@ -66,6 +78,8 @@ def build_service_spec(
     description: str,
     input_schema: Dict[str, Any],
     author: str,
+    unit: str = "",
+    hardware: str = "",
     output_schema: Optional[Dict[str, Any]] = None,
     author_pubkey: str = "",
     endpoint_hint: str = "",
@@ -81,7 +95,10 @@ def build_service_spec(
     store stamps it).
 
     The spec carries no price (Decision 2026-11-10): the provider sets
-    it on chain when registering and changes it there.
+    it on chain when registering and changes it there. ``unit`` (required)
+    says what one work item is, the thing that price buys; ``hardware``
+    (optional) names the hardware a compute service runs on. Both are
+    stripped, and ``hardware`` is left out of the spec when empty.
 
     ``image_uri`` is display-plane only (a listing card banner), like
     ``endpoint_hint``: advisory, unvalidated, inside the signed payload
@@ -104,6 +121,7 @@ def build_service_spec(
         "description": description,
         "input_schema": input_schema,
         "author": author,
+        "unit": unit.strip() if isinstance(unit, str) else unit,
         "endpoint_hint": endpoint_hint,
         "image_uri": image_uri,
         "version_of": version_of,
@@ -113,6 +131,10 @@ def build_service_spec(
         spec["output_schema"] = output_schema
     if author_pubkey:
         spec["author_pubkey"] = author_pubkey
+    if isinstance(hardware, str) and hardware.strip():
+        spec["hardware"] = hardware.strip()
+    elif hardware and not isinstance(hardware, str):
+        spec["hardware"] = hardware
     if inference is not None:
         spec["inference"] = normalize_inference(inference)
 
@@ -145,6 +167,22 @@ def validate_service_spec(payload: Dict[str, Any]) -> List[str]:
     output_schema = payload.get("output_schema")
     if output_schema is not None and not isinstance(output_schema, dict):
         errors.append("output_schema must be a JSON-schema dict or absent")
+
+    unit = payload.get("unit")
+    if unit not in (None, "", {}):
+        if not isinstance(unit, str) or not unit.strip():
+            errors.append("unit must be a text saying what one work item is")
+        elif len(unit) > MAX_UNIT_CHARS:
+            errors.append(f"unit must be at most {MAX_UNIT_CHARS} characters")
+
+    hardware = payload.get("hardware")
+    if hardware is not None:
+        if not isinstance(hardware, str) or not hardware.strip():
+            errors.append("hardware must be a non-empty text naming the "
+                          "hardware, or absent")
+        elif len(hardware) > MAX_HARDWARE_CHARS:
+            errors.append(f"hardware must be at most {MAX_HARDWARE_CHARS} "
+                          "characters")
 
     if "ask" in payload:
         errors.append("a service spec carries no price: the asking price "
@@ -261,15 +299,18 @@ def is_service_spec(payload: Any) -> bool:
 
 def service_embedding_text(payload: Dict[str, Any]) -> str:
     """Text a discovery index would embed for a spec: name + description
-    + sorted input-schema property names — so services are discoverable
-    by what they do AND by their interface vocabulary."""
+    + the unit of work and the hardware + sorted input-schema property
+    names, so services are discoverable by what they do, what one work
+    item is, what they run on, and their interface vocabulary."""
     name = str(payload.get("name") or "")
     description = str(payload.get("description") or "")
+    unit = str(payload.get("unit") or "")
+    hardware = str(payload.get("hardware") or "")
     props = payload.get("input_schema") or {}
     prop_names: List[str] = []
     if isinstance(props, dict):
         prop_names = sorted((props.get("properties") or {}).keys())
-    parts = [name, description]
+    parts = [name, description, unit, hardware]
     if prop_names:
         parts.append(" ".join(prop_names))
     return "\n".join(p for p in parts if p)

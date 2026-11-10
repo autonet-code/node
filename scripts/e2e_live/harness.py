@@ -574,6 +574,7 @@ async def seed(state: Dict[str, Any], contracts: Dict[str, str]) -> None:
             "agent_id": "e2e-alpha",
             "tool_digest": tool_digest,
             "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
+            "unit": "one upper-cased text",
         })
         if not svc.get("on_chain"):
             raise RuntimeError(f"service not listed on chain: {svc}")

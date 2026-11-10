@@ -1358,9 +1358,11 @@ _TOOLS: list[ToolDefinition] = [
             "(ATN price per work item), spec digest, and whether it's active. "
             "Pass 'query' to filter by a substring against locally-known service "
             "names/descriptions. Each row carries the service's spec (name, "
-            "description, input_schema), fetched from the network when this "
-            "daemon doesn't hold it. To invoke one: request_service with its "
-            "service_id (it pays through a payment channel). Read-only."
+            "description, unit: what one work item is, the thing the ask "
+            "buys; hardware: what a compute service runs on, when declared; "
+            "input_schema), fetched from the network when this daemon doesn't "
+            "hold it. To invoke one: request_service with its service_id (it "
+            "pays through a payment channel, one ask per work item). Read-only."
         ),
         input_schema={
             "type": "object",
@@ -1380,8 +1382,15 @@ _TOOLS: list[ToolDefinition] = [
         name="register_service",
         description=(
             "Author a service YOU offer: a remote paid API other agents can "
-            "invoke, priced per work item in ATN. This builds and persists the "
-            "local service spec AND registers it on-chain in the ServiceRegistry "
+            "invoke, priced per work item in ATN. 'unit' (required) says what "
+            "one work item is, the thing one ask buys: e.g. 'one completion "
+            "up to 4,000 output tokens', 'one minute of RTX 5090 time', 'one "
+            "transcribed audio minute'. For request/reply services one "
+            "request is one work item. 'hardware' (optional) names the "
+            "hardware a compute service runs on, so buyers can check its "
+            "throughput against what that hardware documents. This builds and "
+            "persists the local service spec AND registers it on-chain in the "
+            "ServiceRegistry "
             "under your agent address (you become the provider). Requires you to "
             "be registered on-chain (register_on_chain first) — the contract's "
             "onlyAgent gate rejects unregistered callers. A service needs ONE "
@@ -1403,6 +1412,14 @@ _TOOLS: list[ToolDefinition] = [
                 "ask_amount": {
                     "type": "integer",
                     "description": "Price per work item in ATN base units (uint). This is the on-chain ask and the payment minimum the gate enforces.",
+                },
+                "unit": {
+                    "type": "string",
+                    "description": "What one work item is: the meaning of the price (a short text, e.g. 'one completion up to 4,000 output tokens'). Required. Not a price: the price is ask_amount, on chain only.",
+                },
+                "hardware": {
+                    "type": "string",
+                    "description": "Optional: the hardware a compute service runs on (e.g. 'one RTX 5090, 32 GB'), so buyers can check throughput against what it documents.",
                 },
                 "input_schema": {
                     "type": "object",
@@ -1445,7 +1462,7 @@ _TOOLS: list[ToolDefinition] = [
                                    "default banner.",
                 },
             },
-            "required": ["name", "description", "ask_amount"],
+            "required": ["name", "description", "ask_amount", "unit"],
         },
     ),
     ToolDefinition(
@@ -3479,6 +3496,8 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         "active": r["active"],
         "name": r["name"],
         "description": r["description"],
+        "unit": r["unit"],
+        "hardware": r["hardware"],
         "input_schema": r["input_schema"],
         "output_schema": r["output_schema"],
         "spec_available": r["known_spec"],
@@ -3507,6 +3526,14 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
         return {"error": "ask_amount must be an integer (ATN base units)"}
     if ask_amount < 0:
         return {"error": "ask_amount must be non-negative"}
+    # What one work item is: the meaning of ask_amount (Decision 2026-11-10).
+    unit = input.get("unit")
+    if not isinstance(unit, str) or not unit.strip():
+        return {"error": "Missing required field: 'unit' (what one work item "
+                         "is, e.g. 'one completion up to 4,000 output tokens')"}
+    hardware = input.get("hardware")
+    if hardware is not None and not isinstance(hardware, str):
+        return {"error": "hardware must be a text naming the hardware"}
 
     schema = input.get("input_schema")
     if schema is not None and not isinstance(schema, dict):
@@ -3534,6 +3561,8 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
             description=description,
             input_schema=schema,
             author=str(caller_id),
+            unit=unit,
+            hardware=hardware or "",
             backing_tool=str(input.get("backing_tool") or ""),
             output_schema=output_schema,
             endpoint_hint=str(input.get("endpoint_hint") or ""),

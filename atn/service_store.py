@@ -85,6 +85,16 @@ class ServiceRecord:
         return str(self.spec.get("image_uri") or "")
 
     @property
+    def unit(self) -> str:
+        """What one work item is: the meaning of the on-chain price."""
+        return str(self.spec.get("unit") or "")
+
+    @property
+    def hardware(self) -> str:
+        """The hardware a compute service runs on ("" when not declared)."""
+        return str(self.spec.get("hardware") or "")
+
+    @property
     def inference(self) -> dict[str, Any]:
         """The declared inference backing (``{provider, model,
         max_tokens_cap, max_input_chars}``), or ``{}`` when this service is
@@ -176,6 +186,8 @@ class ServiceStore:
         description: str,
         input_schema: dict[str, Any],
         author: str,
+        unit: str = "",
+        hardware: str = "",
         backing_tool: str = "",
         output_schema: dict[str, Any] | None = None,
         endpoint_hint: str = "",
@@ -185,6 +197,10 @@ class ServiceStore:
     ) -> dict[str, Any]:
         """Build, sign, blob-store, and persist a service spec. Returns
         ``{"digest", "spec"}`` or raises ValueError on bad input.
+
+        ``unit`` is required: what one work item is, the thing the on-chain
+        price buys (Decision 2026-11-10). ``hardware`` optionally names the
+        hardware a compute service runs on.
 
         ``inference`` declares an LLM backing instead of a backing tool
         (decision 2026-07-26): a paid request is served by this daemon's
@@ -214,6 +230,8 @@ class ServiceStore:
             description=description,
             input_schema=input_schema,
             author=author,
+            unit=unit,
+            hardware=hardware,
             output_schema=output_schema,
             author_pubkey=author_pubkey,
             endpoint_hint=endpoint_hint,

@@ -329,7 +329,8 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
     reg = await provider.client.ok({"type": "register_service", "agent_id": provider.agent_id,
                                     "name": "slugify", "description": "Turn a text into a url slug.",
                                     "input_schema": s0.TEXT_SCHEMA, "backing_tool": backing,
-                                    "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"}})
+                                    "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
+                                    "unit": "one slugified text"})
     spec_digest = reg.get("digest")
     ev["register"] = {"digest": spec_digest, "on_chain": reg.get("on_chain"),
                       "service_id": reg.get("service_id"), "reason": reg.get("reason")}
