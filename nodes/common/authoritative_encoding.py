@@ -296,10 +296,15 @@ CARRY_BUNDLE_SCHEMA = 1
 # documentation only: the bundle serializes with sorted keys. Ratings are
 # read from ToolBond; ``tool_ratings`` keeps each tool's plain means as of
 # the close (Decision 2026-11-09), for followers and joiners to show.
+# ``service_reviews`` keeps each payer's latest review of each service and
+# ``service_ratings`` the per-service ratings (Decision 2026-11-10,
+# nodes/common/service_reviews.py).
 CARRY_KEYS: Tuple[str, ...] = (
     "tool_registrations",
     "tool_rounds",
     "tool_ratings",
+    "service_reviews",
+    "service_ratings",
 )
 
 

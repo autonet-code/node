@@ -524,11 +524,20 @@ class AutonetService:
             tool_regs_path = None
             tool_rounds_path = None
             tool_ratings_path = None
+        # Service reviews and ratings (Decision 2026-11-10) ride the same
+        # bundle, next to the tool maps.
+        service_paths = {}
+        if tool_ratings_path is not None:
+            service_paths = {
+                "service_reviews_path": tool_ratings_path.parent / "service_reviews.json",
+                "service_ratings_path": tool_ratings_path.parent / "service_ratings.json",
+            }
         self._federated_close_driver = FederatedCloseDriver(
             gossip=self._event_gossip,
             tool_registrations_path=tool_regs_path,
             tool_rounds_path=tool_rounds_path,
             tool_ratings_path=tool_ratings_path,
+            **service_paths,
         )
         # Refuse (log + skip) any close this daemon can't compute
         # identically to its peers: no chain read access below, or no

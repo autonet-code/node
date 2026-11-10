@@ -39,11 +39,14 @@ _SPEC.loader.exec_module(seedmod)
 ZERO = "00" * 32
 
 
-def _carry(regs=None, ratings=None, manifests=None, busts=None) -> Dict[str, Any]:
+def _carry(regs=None, ratings=None, manifests=None, busts=None,
+           service_reviews=None, service_ratings=None) -> Dict[str, Any]:
     return {
         "tool_registrations": regs or {},
         "tool_rounds": {"manifests": manifests or {}, "busts": busts or {}},
         "tool_ratings": ratings or {},
+        "service_reviews": service_reviews or {},
+        "service_ratings": service_ratings or {},
     }
 
 

@@ -108,13 +108,17 @@ def merge_carry(sources: List[SourceCarry]) -> MergeResult:
     tool_registrations and tool_ratings are keyed by tool digest.
     tool_rounds is ``{"manifests": {digest: ...}, "busts": {agent: n}}``,
     so each of its sub-maps is unioned by key the same way.
+    service_reviews and service_ratings are keyed by service
+    (``<provider>:<digest>``): a service's reviews and rating come from the
+    same first-listed source.
     """
     if not sources:
         raise ValueError("at least one source is required")
     conflicts: List[Dict[str, Any]] = []
     warnings: List[str] = []
     out: Dict[str, Any] = {}
-    for key in ("tool_registrations", "tool_ratings"):
+    for key in ("tool_registrations", "tool_ratings", "service_reviews",
+                "service_ratings"):
         out[key] = _merge_keyed(
             key, [(s.label, s.carry.get(key) or {}) for s in sources], conflicts)
     vet_subs = sorted({sub for s in sources

@@ -501,7 +501,10 @@ class TestUnpaidAuthorSide:
         _, first = self._conclude()
         blob = encode_carry_bundle({"tool_registrations": first["tool_registrations"],
                                     "tool_rounds": first["tool_rounds"],
-                                    "tool_ratings": first["tool_ratings"]}, epoch_id="e1")
+                                    "tool_ratings": first["tool_ratings"],
+                                    "service_reviews": first["service_reviews"],
+                                    "service_ratings": first["service_ratings"]},
+                                   epoch_id="e1")
         carry = decode_carry_bundle(blob)["carry"]
         assert carry["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == {AUTHOR: 6.0}
         assert carry["tool_rounds"]["pruned"] == [DIGEST]

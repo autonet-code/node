@@ -285,6 +285,37 @@ def validate_event(ev: Any, *, jurisdiction: str,
             "payer": reviewer, "record": record}, ""
 
 
+def build_event(private_key: str, receipt: Dict[str, Any], *, jurisdiction: str,
+                correctness: int, simplicity: int, novelty: int, malware: bool,
+                axes: Optional[Dict[str, int]] = None, evidence_hash: str = "",
+                note: str = "", ts: int) -> Dict[str, Any]:
+    """A signed ``service_review`` event (scores in hundredths). The
+    caller checks the inputs; ``validate_event`` is the judge."""
+    from eth_account import Account
+
+    key = private_key if private_key.startswith("0x") else "0x" + private_key
+    review = {
+        "jurisdiction": str(jurisdiction or "").lower(),
+        "correctness": int(correctness),
+        "simplicity": int(simplicity),
+        "novelty": int(novelty),
+        "malware": bool(malware),
+        "axes": {str(k): int(v) for k, v in sorted((axes or {}).items())},
+        "evidence_hash": norm_hex(evidence_hash),
+        "note": str(note or ""),
+        "ts": int(ts),
+    }
+    receipt = {k: receipt[k] for k in sorted(_RECEIPT_KEYS)}
+    return {
+        "kind": KIND,
+        "v": EVENT_VERSION,
+        "receipt": receipt,
+        "review": review,
+        "reviewer": str(Account.from_key(key).address).lower(),
+        "sig": sign_hash(key, review_hash(receipt_hash(receipt), review)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # The close
 # ---------------------------------------------------------------------------

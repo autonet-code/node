@@ -896,6 +896,9 @@ def federated_epoch_close(
     # Carried rounds fade per close; reviewer pay needs this much REP.
     review_decay: float = REVIEW_DECAY_DEFAULT,
     reviewer_min_rep_bps: int = REVIEWER_MIN_REP_BPS_DEFAULT,
+    # Service reviews carried from the previous close (service_reviews.py):
+    # {"<provider>:<digest>": {payer: review}}.
+    service_reviews: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close over a canonical batch sequence.
 
@@ -903,8 +906,10 @@ def federated_epoch_close(
     inputs): daemons that received the same batches return bit-identical
     results, and the ``authoritative_payload`` is what the anchor commits.
     The canonical events matter for their tool registrations
-    (``tool_registered``); everything a mint needs beyond them is carried
-    or read from the chain.
+    (``tool_registered``) and service reviews (``service_review``, which
+    mint nothing: they update ``service_reviews`` and ``service_ratings``,
+    carried in the anchored bundle); everything a mint needs beyond them is
+    carried or read from the chain.
     """
     all_events: List[Dict[str, Any]] = []
     for batch in canonical.ordered_batches:
@@ -1056,6 +1061,25 @@ def federated_epoch_close(
     result["refused"] = tool_result["refused"]
     result["tool_ratings"] = tool_result["ratings_next"]
     result["concluded"] = tool_result["concluded"]
+    # Service reviews (Decision 2026-11-10): each payer's latest review per
+    # service, and the per-service ratings, from the canonical events and
+    # the carried reviews. No mint, no REP.
+    from .service_reviews import KIND as _SERVICE_REVIEW, close_service_reviews
+
+    services = close_service_reviews(
+        [(str(b.rpb_address), float(b.timestamp), ev)
+         for b in canonical.ordered_batches for ev in b.events or []
+         if isinstance(ev, dict) and ev.get("kind") == _SERVICE_REVIEW],
+        carried=service_reviews,
+        agent_owner_map=agent_owner_map,
+        sanctioned_households=sanctioned,
+        axis_ids=list(active_charter().ids),
+    )
+    result["service_reviews"] = services["reviews"]
+    result["service_ratings"] = services["ratings"]
+    if services["accepted"] or services["rejected"]:
+        logger.info("service reviews: %d accepted, rejected %s",
+                    services["accepted"], services["rejected"] or "none")
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)
     result["n_events"] = len(all_events)

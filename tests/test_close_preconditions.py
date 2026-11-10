@@ -27,6 +27,8 @@ CARRY = [
     "tool_registrations",
     "tool_rounds",
     "tool_ratings",
+    "service_reviews",
+    "service_ratings",
 ]
 
 

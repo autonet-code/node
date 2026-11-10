@@ -114,6 +114,8 @@ class FederatedCloseDriver:
         tool_registrations_path: Optional[Any] = None,
         tool_rounds_path: Optional[Any] = None,
         tool_ratings_path: Optional[Any] = None,
+        service_reviews_path: Optional[Any] = None,
+        service_ratings_path: Optional[Any] = None,
     ):
         self.gossip = gossip
         # Set when the latest voice refresh failed: closing on the previous
@@ -197,6 +199,18 @@ class FederatedCloseDriver:
         self._tool_ratings: Dict[str, Dict[str, Any]] = (
             self._load_tool_ratings()
         )
+        # Service reviews carry-over (Decision 2026-11-10): each payer's
+        # latest review per service and the per-service ratings, derived
+        # purely from canonical service_review events. Caches, identical on
+        # every honest daemon.
+        self._service_reviews_path: Optional[Path] = (
+            Path(service_reviews_path) if service_reviews_path else None)
+        self._service_ratings_path: Optional[Path] = (
+            Path(service_ratings_path) if service_ratings_path else None)
+        self._service_reviews: Dict[str, Any] = self._load_map(
+            self._service_reviews_path, "service reviews")
+        self._service_ratings: Dict[str, Any] = self._load_map(
+            self._service_ratings_path, "service ratings")
         # Owner-rooted damper exclusion (spec: Owner-rooted registration):
         # agent id -> owner wallet, sourced from chain owner-binding data
         # (OwnerBound events / getAgentOwner). Every daemon reading
@@ -534,6 +548,8 @@ class FederatedCloseDriver:
             "tool_registrations": self._tool_registrations_path,
             "tool_rounds": self._tool_rounds_path,
             "tool_ratings": self._tool_ratings_path,
+            "service_reviews": self._service_reviews_path,
+            "service_ratings": self._service_ratings_path,
         }
 
     def carry_over_maps(self) -> Dict[str, Any]:
@@ -542,10 +558,12 @@ class FederatedCloseDriver:
             "tool_registrations": self._tool_registrations,
             "tool_rounds": self._tool_rounds,
             "tool_ratings": self._tool_ratings,
+            "service_reviews": self._service_reviews,
+            "service_ratings": self._service_ratings,
         }
 
     def install_carry_over(self, carry: Dict[str, Any]) -> None:
-        """Install a VERIFIED carry-over bundle (all three maps) as this
+        """Install a VERIFIED carry-over bundle (every ``CARRY_KEYS`` map) as this
         daemon's close inputs: persist every file, then reload the
         in-memory maps through the normal loaders so the joiner holds
         exactly what an always-on daemon would after a restart.
@@ -563,9 +581,18 @@ class FederatedCloseDriver:
         self._save_tool_rounds()
         self._tool_ratings = dict(carry["tool_ratings"])
         self._save_tool_ratings()
+        self._service_reviews = dict(carry["service_reviews"])
+        self._service_ratings = dict(carry["service_ratings"])
+        self._save_service_maps()
         self._tool_registrations = self._load_tool_registrations()
         self._tool_rounds = self._load_tool_rounds()
         self._tool_ratings = self._load_tool_ratings()
+        if self._service_reviews_path is not None:
+            self._service_reviews = self._load_map(
+                self._service_reviews_path, "service reviews")
+        if self._service_ratings_path is not None:
+            self._service_ratings = self._load_map(
+                self._service_ratings_path, "service ratings")
         # The anchored state's pruned tools (Decision 2026-11-10).
         try:
             library = getattr(self.gossip, "library", None)
@@ -998,6 +1025,7 @@ class FederatedCloseDriver:
                 mint_gate=self.mint_gate,
                 review_decay=float(self.review_params[0]),
                 reviewer_min_rep_bps=int(self.review_params[1]),
+                service_reviews=dict(self._service_reviews),
             )
         except Exception as e:
             logger.error(
@@ -1025,6 +1053,9 @@ class FederatedCloseDriver:
         self._save_tool_rounds()
         self._tool_ratings = dict(close_result.get("tool_ratings") or {})
         self._save_tool_ratings()
+        self._service_reviews = dict(close_result.get("service_reviews") or {})
+        self._service_ratings = dict(close_result.get("service_ratings") or {})
+        self._save_service_maps()
         # The economy graph shows this close's registrations, ratings
         # (ToolBond's, pinned to the previous anchor) and mint.
         try:
@@ -1237,3 +1268,51 @@ class FederatedCloseDriver:
             os.replace(tmp, path)
         except OSError as e:
             logger.warning("failed to persist tool ratings: %s", e)
+
+    # ---- service reviews and ratings (Decision 2026-11-10) -------------
+
+    @staticmethod
+    def _load_map(path: Optional[Path], what: str) -> Dict[str, Any]:
+        if path is None or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("%s cache unreadable (%s); starting empty", what, e)
+        return {}
+
+    @staticmethod
+    def _save_map(path: Optional[Path], data: Dict[str, Any], what: str) -> None:
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist %s: %s", what, e)
+
+    def _save_service_maps(self) -> None:
+        self._save_map(self._service_reviews_path, self._service_reviews,
+                       "service reviews")
+        self._save_map(self._service_ratings_path, self._service_ratings,
+                       "service ratings")
+
+    def service_rating(self, provider: str, spec_digest: str) -> Optional[Dict[str, Any]]:
+        """A service's rating as of the latest close (or installed anchor),
+        keyed by (provider address, spec digest), or None when no payer's
+        review counts. The same anchored state on every daemon."""
+        from .service_reviews import service_key
+
+        entry = self._service_ratings.get(service_key(provider, spec_digest))
+        return json.loads(json.dumps(entry)) if isinstance(entry, dict) else None
+
+    def service_reviews_of(self, provider: str, spec_digest: str) -> Dict[str, Any]:
+        """Each payer's latest review of one service, as carried."""
+        from .service_reviews import service_key
+
+        entry = self._service_reviews.get(service_key(provider, spec_digest))
+        return json.loads(json.dumps(entry)) if isinstance(entry, dict) else {}
