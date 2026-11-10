@@ -28,9 +28,24 @@ Images: only the ORIGINAL 27 services carry an ``image_uri``; the newer
 entries deliberately have none, so the UI's default colour banner stays
 on screen and both paths get exercised in one catalogue.
 
+Working listings, on a local hardhat jurisdiction: every listing is
+registered on chain in the jurisdiction's ServiceRegistry, priced in ATN
+(converted to base units, 1 ATN = 1e6), and backed by one demo tool this
+script registers, which answers each purchase with the arguments it got
+and says it is a demo. The daemon must have joined a local network with a
+ServiceRegistry (``scripts/manual_local_net.py`` or ``s0_local_run.py``),
+and the address that registers must be live on Substrate: by default the
+owner surface, which registers under the operator address (register the
+operator in the app's Household first); with ``--agent`` an on-chain
+registered agent whose key the daemon holds. ``--host`` seeds only the
+listings of the named provider houses (the labels below), so a catalogue
+with several providers is several daemons, one house set each.
+
 Usage:
-    python scripts/seed_demo_services.py            # add to a running daemon
-    python scripts/seed_demo_services.py --clear    # retire existing first
+    python scripts/seed_demo_services.py              # into the daemon on :7700
+    python scripts/seed_demo_services.py --clear      # retire existing first
+    python scripts/seed_demo_services.py --url ws://127.0.0.1:7710 \\
+        --agent provider-1 --host open-weights --host bulk-inference
 """
 from __future__ import annotations
 
@@ -38,6 +53,7 @@ import argparse
 import asyncio
 import json
 import sys
+from decimal import Decimal
 
 try:
     import websockets
@@ -52,318 +68,323 @@ WS_URL = "ws://127.0.0.1:7700"
 # there; everything else registers with no image_uri at all.
 IMAGE_BASE = "https://raw.githubusercontent.com/autonet-code/assets/main/services"
 
-# (name, description, [param names], ask_atn, provider)
-# Providers repeat across services on purpose: a real market has
-# multi-service providers, and the "by provider" view needs them.
+# ATN has 6 decimals: an ask of 1 ATN is 1_000_000 base units on chain.
+ATN_BASE_UNITS = 10 ** 6
+
+# (name, description, [param names], ask in ATN, provider house)
+# Houses repeat across services on purpose: a real market has
+# multi-service providers, and the "by provider" view needs them. A house
+# is only a label here: the provider of record is the address that
+# registers the listing (see the module docstring, --host).
 SERVICES: list[tuple[str, str, list[str], str, str]] = [
     # ---- Compute: the anchor category -------------------------------
     ("A100 GPU Hours",
      "Dedicated NVIDIA A100 80GB, billed per second. Bring your own "
      "container image. Checkpoints stream to your own storage so a "
      "crashed run never costs you the whole job.",
-     ["image", "seconds", "checkpoint_uri"], "4", "0xA100c0mputeC0113ct1v3000000000000000001"),
+     ["image", "seconds", "checkpoint_uri"], "4", "compute-collective"),
     ("H100 Cluster Time",
      "Eight-way H100 node with NVLink, per-second billing. For training "
      "runs that will not fit on a single card.",
-     ["image", "seconds", "nodes"], "31", "0xA100c0mputeC0113ct1v3000000000000000001"),
+     ["image", "seconds", "nodes"], "31", "compute-collective"),
     ("Consumer GPU Spot",
      "Idle gaming GPUs (4090 / 3090) at spot prices. Cheapest tier, "
      "preemptible, best for batch generation you can retry.",
-     ["image", "seconds"], "1", "0xIdl3RigsC00p0000000000000000000000000002"),
+     ["image", "seconds"], "1", "idle-rigs"),
     ("Bare Metal VM",
      "Root on a dedicated machine, hourly. No hypervisor tax, no noisy "
      "neighbours.",
-     ["image", "hours", "region"], "2", "0xIdl3RigsC00p0000000000000000000000000002"),
+     ["image", "hours", "region"], "2", "idle-rigs"),
     ("Object Storage",
      "S3-compatible buckets billed per GB-month. Random-read audit "
      "endpoint included so you can verify your data is still there.",
-     ["bucket", "gb", "months"], "1", "0xC01dSt0r4g3Ltd00000000000000000000000003"),
+     ["bucket", "gb", "months"], "1", "cold-storage"),
     ("Archival Cold Storage",
      "Cheap long-term storage with slow retrieval. For data you must "
      "keep but rarely read.",
-     ["bucket", "gb", "months"], "1", "0xC01dSt0r4g3Ltd00000000000000000000000003"),
+     ["bucket", "gb", "months"], "1", "cold-storage"),
     ("L40S Inference Nodes",
      "Single-card L40S instances sized for serving rather than training, "
      "billed per second. Cold start under thirty seconds, so a bursty "
      "workload is not paying for idle silicon.",
-     ["image", "seconds", "region"], "2", "0xA100c0mputeC0113ct1v3000000000000000001"),
+     ["image", "seconds", "region"], "2", "compute-collective"),
     ("CPU Batch Compute",
      "Many-core CPU workers for jobs no GPU helps: compilation, "
      "simulation, format conversion. Billed per core-second, one shard "
      "per work item so a failed shard is re-queued not re-billed.",
-     ["image", "core_seconds", "shards"], "1", "0xIdl3RigsC00p0000000000000000000000000002"),
+     ["image", "core_seconds", "shards"], "1", "idle-rigs"),
     ("Preemptible Training Queue",
      "Deep-discount GPU capacity that runs when the cluster is quiet. "
      "You supply a checkpoint interval; we bill only the seconds "
      "actually computed before a preemption.",
-     ["image", "seconds", "checkpoint_minutes"], "1", "0xIdl3RigsC00p0000000000000000000000000002"),
+     ["image", "seconds", "checkpoint_minutes"], "1", "idle-rigs"),
     ("Block Volume Attach",
      "NVMe block devices attached to your compute node, per GB-hour. "
      "Snapshot on detach so a dataset survives the machine it was "
      "staged on.",
-     ["volume", "gb", "hours"], "1", "0xC01dSt0r4g3Ltd00000000000000000000000003"),
+     ["volume", "gb", "hours"], "1", "cold-storage"),
     ("Container Registry Hosting",
      "Private image registry billed per GB-month stored plus pulls. "
      "Layer digests published so you can verify the image your run "
      "actually pulled.",
-     ["repository", "gb", "months"], "1", "0xN0d3F4br1cInfr40000000000000000000000013"),
+     ["repository", "gb", "months"], "1", "node-fabric"),
     ("Sandboxed Code Execution",
      "Run untrusted code in a locked-down microVM, billed per second. No "
      "network by default; a per-run transcript of syscalls returned with "
      "the result.",
-     ["language", "code", "seconds"], "1", "0xN0d3F4br1cInfr40000000000000000000000013"),
+     ["language", "code", "seconds"], "1", "node-fabric"),
 
     # ---- Inference: the largest by value ----------------------------
     ("Open Model Inference",
      "Llama, Qwen and Mistral served per token. Model fingerprint "
      "published so you can verify you got the weights you paid for.",
-     ["model", "messages", "max_tokens"], "1", "0x0p3nW31ghtsH0st000000000000000000000004"),
+     ["model", "messages", "max_tokens"], "1", "open-weights"),
     ("Frontier Model Relay",
      "Access to top-tier hosted models, per token, no account needed. "
      "Pay per call rather than per month.",
-     ["model", "messages", "max_tokens"], "3", "0x0p3nW31ghtsH0st000000000000000000000004"),
+     ["model", "messages", "max_tokens"], "3", "open-weights"),
     ("Fine-Tuned Legal Model",
      "A model tuned on twenty years of contract law. Specialist weights, "
      "not a system prompt.",
-     ["messages", "jurisdiction"], "6", "0xL3g41Sp3c141istM0d3ls00000000000000005"),
+     ["messages", "jurisdiction"], "6", "specialist-models"),
     ("Bulk Embeddings",
      "Text to vectors at volume. Sub-cent per thousand, batched, the "
      "staple food of any retrieval pipeline.",
-     ["texts", "model"], "1", "0x0p3nW31ghtsH0st000000000000000000000004"),
+     ["texts", "model"], "1", "open-weights"),
     ("Reranking Service",
      "Cross-encoder reranking over candidate documents. Cheap enough to "
      "run on every query.",
-     ["query", "documents"], "1", "0xR3trievalW0rks00000000000000000000000006"),
+     ["query", "documents"], "1", "retrieval-works"),
     ("Long Context Inference",
      "Served models with a million-token window, priced per token so a "
      "short prompt is not billed at long-context rates. Prompt-cache "
      "hits are discounted and reported per call.",
-     ["model", "messages", "max_tokens"], "2", "0x0p3nW31ghtsH0st000000000000000000000004"),
+     ["model", "messages", "max_tokens"], "2", "open-weights"),
     ("Speculative Decoding Endpoint",
      "The same open weights served with a draft model in front, per "
      "token. Two to three times the throughput at identical outputs, "
      "verified by the target model on every accepted span.",
-     ["model", "messages", "max_tokens"], "1", "0x0p3nW31ghtsH0st000000000000000000000004"),
+     ["model", "messages", "max_tokens"], "1", "open-weights"),
     ("Batch Completion Queue",
      "Overnight inference for work with no latency requirement, per "
      "token at half the interactive rate. Submit a JSONL of prompts, "
      "collect results by morning.",
-     ["model", "prompts", "deadline_hours"], "1", "0xBu1kInf3r3nc3W0rks00000000000000000014"),
+     ["model", "prompts", "deadline_hours"], "1", "bulk-inference"),
     ("Fine-Tuning Runs",
      "LoRA and full fine-tunes on open weights, priced per million "
      "training tokens. Loss curve streamed live; the adapter is yours to "
      "download and serve anywhere.",
-     ["base_model", "dataset_uri", "tokens"], "9", "0xBu1kInf3r3nc3W0rks00000000000000000014"),
+     ["base_model", "dataset_uri", "tokens"], "9", "bulk-inference"),
     ("Fine-Tuned Medical Coder",
      "Clinical notes to billing codes, from weights trained on coded "
      "discharge summaries. Specialist model, per document, with the code "
      "set version pinned.",
-     ["note", "code_set"], "5", "0xL3g41Sp3c141istM0d3ls00000000000000005"),
+     ["note", "code_set"], "5", "specialist-models"),
     ("Structured Output Enforcement",
      "Constrained decoding against your JSON schema, per call. The model "
      "physically cannot emit an invalid document, so you skip the retry "
      "loop entirely.",
-     ["model", "messages", "schema"], "1", "0xBu1kInf3r3nc3W0rks00000000000000000014"),
+     ["model", "messages", "schema"], "1", "bulk-inference"),
 
     # ---- Data and retrieval -----------------------------------------
     ("Web Scraping",
      "Fetch and clean any public page, returned as structured JSON. "
      "Handles JS rendering and pagination.",
-     ["url", "selector", "render_js"], "1", "0xScr4p3F4rm00000000000000000000000000007"),
+     ["url", "selector", "render_js"], "1", "scrape-farm"),
     ("Residential Proxy Pool",
      "Requests routed through residential IPs, per request. For sites "
      "that block datacentre ranges.",
-     ["url", "country", "session"], "1", "0xScr4p3F4rm00000000000000000000000000007"),
+     ["url", "country", "session"], "1", "scrape-farm"),
     ("Market Data Feed",
      "Real-time and historical prices across equities and crypto, per "
      "query.",
-     ["symbol", "interval", "from", "to"], "2", "0xF33dsAndT1ck3rs0000000000000000000008"),
+     ["symbol", "interval", "from", "to"], "2", "feeds-and-tickers"),
     ("Company Filings Index",
      "Full-text search over regulatory filings, per query. Cleaned and "
      "entity-resolved.",
-     ["query", "form_type", "since"], "3", "0xF33dsAndT1ck3rs0000000000000000000008"),
+     ["query", "form_type", "since"], "3", "feeds-and-tickers"),
     ("Geocoding Lookup",
      "Address to coordinates and back, per lookup. Global coverage.",
-     ["address", "country"], "1", "0xR3trievalW0rks00000000000000000000000006"),
+     ["address", "country"], "1", "retrieval-works"),
     ("Vector Index Hosting",
      "A managed nearest-neighbour index over your embeddings, billed per "
      "thousand queries plus vectors stored. Recall measured against exact "
      "search and reported with every query.",
-     ["index", "vector", "top_k"], "1", "0xR3trievalW0rks00000000000000000000000006"),
+     ["index", "vector", "top_k"], "1", "retrieval-works"),
     ("Search API Passthrough",
      "Web search results as structured JSON, per query. No key to "
      "manage, no monthly floor, and the source URLs come back intact for "
      "citation.",
-     ["query", "count", "region"], "1", "0xScr4p3F4rm00000000000000000000000000007"),
+     ["query", "count", "region"], "1", "scrape-farm"),
     ("Sitemap Crawl",
      "Crawl an entire domain from its sitemap and return cleaned pages, "
      "billed per page fetched. Resumable, so a crawl interrupted at page "
      "nine thousand does not restart.",
-     ["domain", "max_pages", "since"], "1", "0xScr4p3F4rm00000000000000000000000000007"),
+     ["domain", "max_pages", "since"], "1", "scrape-farm"),
     ("Corporate Ownership Graph",
      "Who owns whom: parent, subsidiary and beneficial-ownership edges "
      "across registries, per lookup. Each edge cites the filing it came "
      "from.",
-     ["entity", "jurisdiction", "depth"], "4", "0xF33dsAndT1ck3rs0000000000000000000008"),
+     ["entity", "jurisdiction", "depth"], "4", "feeds-and-tickers"),
     ("Patent Full-Text Search",
      "Search granted patents and applications across offices, per query. "
      "Claims parsed out separately from the description.",
-     ["query", "office", "since"], "2", "0xR3c0rdsAndR3g1str13s000000000000000015"),
+     ["query", "office", "since"], "2", "records-registries"),
     ("Sanctions and PEP Screening",
      "Screen a name against watchlists and politically-exposed-person "
      "records, per check. Every hit returns the list, the entry and the "
      "match score, so a false positive is arguable rather than final.",
-     ["name", "country", "date_of_birth"], "2", "0xR3c0rdsAndR3g1str13s000000000000000015"),
+     ["name", "country", "date_of_birth"], "2", "records-registries"),
 
     # ---- Media transformation ---------------------------------------
     ("Audio Transcription",
      "Speech to text with speaker labels, billed per minute of audio. "
      "Ninety-eight languages.",
-     ["audio_url", "language", "diarize"], "1", "0xM3d14P1p3l1n30000000000000000000000009"),
+     ["audio_url", "language", "diarize"], "1", "media-pipeline"),
     ("Text to Speech",
      "Natural voices from text, per thousand characters. Voice cloning "
      "available with consent proof.",
-     ["text", "voice", "speed"], "1", "0xM3d14P1p3l1n30000000000000000000000009"),
+     ["text", "voice", "speed"], "1", "media-pipeline"),
     ("Image Generation",
      "Text to image, per image. Multiple model families, commercial use "
      "included.",
-     ["prompt", "model", "size"], "1", "0xP1x315Unl1m1t3d000000000000000000000010"),
+     ["prompt", "model", "size"], "1", "pixels-unlimited"),
     ("Video Rendering",
      "Render sequences to video, billed per output second. Queue-based "
      "with progress callbacks.",
-     ["scene", "seconds", "resolution"], "5", "0xP1x315Unl1m1t3d000000000000000000000010"),
+     ["scene", "seconds", "resolution"], "5", "pixels-unlimited"),
     ("Document OCR",
      "Scanned documents to structured text, per page. Tables and forms "
      "preserved.",
-     ["document_url", "language"], "1", "0xM3d14P1p3l1n30000000000000000000000009"),
+     ["document_url", "language"], "1", "media-pipeline"),
     ("Video Transcoding",
      "Re-encode video to any codec and ladder, billed per output minute. "
      "Per-segment checksums returned so a partial delivery is provable "
      "rather than disputed.",
-     ["video_url", "codec", "resolutions"], "1", "0xP1x315Unl1m1t3d000000000000000000000010"),
+     ["video_url", "codec", "resolutions"], "1", "pixels-unlimited"),
     ("Image Upscaling",
      "Restore and enlarge images up to four times, per image. Faces and "
      "text handled by separate passes, so a scanned page stays readable.",
-     ["image_url", "scale", "denoise"], "1", "0xP1x315Unl1m1t3d000000000000000000000010"),
+     ["image_url", "scale", "denoise"], "1", "pixels-unlimited"),
     ("Music and Sound Generation",
      "Generate instrumental beds and sound effects from a text brief, "
      "billed per output second. Stems delivered separately, cleared for "
      "commercial use.",
-     ["prompt", "seconds", "format"], "2", "0xW4v3f0rmStud10s00000000000000000000016"),
+     ["prompt", "seconds", "format"], "2", "waveform-studios"),
     ("Audio Mastering",
      "Loudness normalisation, de-noising and EQ on a finished mix, per "
      "audio minute. Before-and-after measurements returned with the file.",
-     ["audio_url", "target_lufs"], "1", "0xW4v3f0rmStud10s00000000000000000000016"),
+     ["audio_url", "target_lufs"], "1", "waveform-studios"),
     ("Subtitle Translation",
      "Translate and re-time a subtitle track, per audio minute. Timings "
      "adjusted to the target language's reading speed, not just "
      "copied across.",
-     ["subtitle_url", "target_language"], "1", "0xW4v3f0rmStud10s00000000000000000000016"),
+     ["subtitle_url", "target_language"], "1", "waveform-studios"),
     ("Handwriting Recognition",
      "Handwritten pages and forms to text, per page. Confidence per field "
      "so a low-scoring line can be routed to a human instead of trusted.",
-     ["document_url", "language", "form_template"], "2", "0xM3d14P1p3l1n30000000000000000000000009"),
+     ["document_url", "language", "form_template"], "2", "media-pipeline"),
 
     # ---- Human in the loop ------------------------------------------
     ("Human Verification",
      "A real person completes a step your agent cannot: a phone call, a "
      "physical signature, a photo taken. Priced per task.",
-     ["instructions", "deadline_hours"], "12", "0xHum4nInTh3L00p00000000000000000000011"),
+     ["instructions", "deadline_hours"], "12", "human-in-the-loop"),
     ("Data Labelling",
      "Human annotation with three-way redundancy and majority vote, per "
      "item.",
-     ["items", "schema", "redundancy"], "2", "0xHum4nInTh3L00p00000000000000000000011"),
+     ["items", "schema", "redundancy"], "2", "human-in-the-loop"),
     ("Content Moderation",
      "Human review of flagged content against your policy, per item, "
      "with written rationale.",
-     ["content", "policy"], "2", "0xHum4nInTh3L00p00000000000000000000011"),
+     ["content", "policy"], "2", "human-in-the-loop"),
     ("Expert Answer Review",
      "A credentialed professional in your field reads a draft and marks "
      "what is wrong, per document. Reviewer credentials disclosed before "
      "you commit the payment.",
-     ["document", "field", "deadline_hours"], "18", "0xHum4nInTh3L00p00000000000000000000011"),
+     ["document", "field", "deadline_hours"], "18", "human-in-the-loop"),
     ("Phone Call Errand",
      "A person calls a business on your behalf, follows your script and "
      "returns what was said, per call. Recording attached where the "
      "jurisdiction permits it.",
-     ["script", "phone_number", "deadline_hours"], "9", "0xC0nc13rg3T4skF0rc300000000000000000017"),
+     ["script", "phone_number", "deadline_hours"], "9", "concierge-taskforce"),
     ("Local Errand Runner",
      "Someone physically goes somewhere and does one thing: collects a "
      "document, photographs a noticeboard, queues at a counter. Priced "
      "per errand with a photo proof of completion.",
-     ["instructions", "city", "deadline_hours"], "22", "0xC0nc13rg3T4skF0rc300000000000000000017"),
+     ["instructions", "city", "deadline_hours"], "22", "concierge-taskforce"),
     ("Notarised Signature",
      "A notary witnesses and stamps a document, per signature. Scanned "
      "return same day, physical original couriered on request.",
-     ["document", "country", "courier"], "35", "0xC0nc13rg3T4skF0rc300000000000000000017"),
+     ["document", "country", "courier"], "35", "concierge-taskforce"),
     ("Translation Post-Editing",
      "A native-speaking translator corrects machine output, per hundred "
      "words. Tracked changes returned so you can see what the model got "
      "wrong and why.",
-     ["text", "source_language", "target_language"], "3", "0xL1ngu4W0rkr00m000000000000000000000018"),
+     ["text", "source_language", "target_language"], "3", "lingua-workroom"),
     ("Survey Panel Responses",
      "Recruit screened respondents and collect answers to your "
      "questionnaire, per completed response. Attention checks included "
      "and failed responses are not billed.",
-     ["questions", "screening", "responses"], "4", "0xL1ngu4W0rkr00m000000000000000000000018"),
+     ["questions", "screening", "responses"], "4", "lingua-workroom"),
     ("Dataset Audit",
      "A human samples your training data and reports label error rate, "
      "leakage and bias, per hundred rows sampled. Findings itemised, not "
      "scored.",
-     ["dataset_uri", "sample_size", "schema"], "6", "0xHum4nInTh3L00p00000000000000000000011"),
+     ["dataset_uri", "sample_size", "schema"], "6", "human-in-the-loop"),
 
     # ---- Agent operations -------------------------------------------
     ("Persistent Agent Hosting",
      "Keep an agent running while you sleep. Billed per uptime hour, "
      "with a public endpoint and restart-on-crash.",
-     ["agent_image", "hours"], "2", "0xAlw4ys0nH0st1ng000000000000000000000012"),
+     ["agent_image", "hours"], "2", "always-on-hosting"),
     ("Scheduled Triggers",
      "Cron for agents: fire a webhook on a schedule you set, per "
      "trigger.",
-     ["schedule", "webhook", "payload"], "1", "0xAlw4ys0nH0st1ng000000000000000000000012"),
+     ["schedule", "webhook", "payload"], "1", "always-on-hosting"),
     ("Uptime Monitoring",
      "Poll an endpoint and alert on failure, per check. Verifiable "
      "because you can poll it yourself.",
-     ["url", "interval_seconds"], "1", "0xAlw4ys0nH0st1ng000000000000000000000012"),
+     ["url", "interval_seconds"], "1", "always-on-hosting"),
     ("Managed Agent Memory",
      "Durable conversation and task memory for an agent that outlives its "
      "process, billed per thousand reads and writes. Full export on "
      "demand, so leaving costs nothing but a download.",
-     ["agent_id", "operation", "payload"], "1", "0xAlw4ys0nH0st1ng000000000000000000000012"),
+     ["agent_id", "operation", "payload"], "1", "always-on-hosting"),
     ("Webhook Relay",
      "A stable public URL that forwards inbound events to an agent behind "
      "a home connection, per delivered event. Retries with backoff and "
      "replay of the last day of traffic.",
-     ["target", "secret", "retries"], "1", "0xR3l4yAndR0ut30000000000000000000000019"),
+     ["target", "secret", "retries"], "1", "relay-and-route"),
     ("Headless Browser Sessions",
      "A real browser an agent can drive, billed per session minute. "
      "Logged-in state persists between sessions and screenshots come back "
      "with every step.",
-     ["start_url", "minutes", "profile"], "2", "0xR3l4yAndR0ut30000000000000000000000019"),
+     ["start_url", "minutes", "profile"], "2", "relay-and-route"),
     ("Outbound Email Delivery",
      "Send mail from your own domain with authentication configured, per "
      "message. Bounce and complaint events posted back so an agent knows "
      "what actually landed.",
-     ["to", "subject", "body"], "1", "0xR3l4yAndR0ut30000000000000000000000019"),
+     ["to", "subject", "body"], "1", "relay-and-route"),
     ("SMS and Voice Numbers",
      "Rent a phone number an agent can send from and receive on, billed "
      "per message and per call minute. Inbound arrives as a webhook.",
-     ["number", "message", "country"], "1", "0xR3l4yAndR0ut30000000000000000000000019"),
+     ["number", "message", "country"], "1", "relay-and-route"),
     ("Log Retention and Search",
      "Ship an agent's run logs somewhere durable and query them, billed "
      "per GB ingested. Thirty-day retention, full-text search over the "
      "whole window.",
-     ["stream", "gb", "query"], "1", "0x0bs3rv3P14tf0rm00000000000000000000020"),
+     ["stream", "gb", "query"], "1", "observe-platform"),
     ("Agent Trace Evaluation",
      "Score an agent's completed runs against a rubric you supply, per "
      "trace. Per-step verdicts with the failing step named, not a single "
      "opaque number.",
-     ["trace", "rubric", "model"], "2", "0x0bs3rv3P14tf0rm00000000000000000000020"),
+     ["trace", "rubric", "model"], "2", "observe-platform"),
     ("Secret Vault Access",
      "Hold an agent's credentials outside its own process and lease them "
      "per request. Every access is logged by name, and a lease expires "
      "whether the agent releases it or not.",
-     ["secret_name", "ttl_seconds", "reason"], "1", "0x0bs3rv3P14tf0rm00000000000000000000020"),
+     ["secret_name", "ttl_seconds", "reason"], "1", "observe-platform"),
 ]
 
 # The 27 services that shipped in the first cut of this catalogue: exactly
@@ -396,23 +417,43 @@ def _image_uri(name: str) -> str:
     return f"{IMAGE_BASE}/{_slug(name)}.jpg" if name in IMAGED else ""
 
 
+def ask_base_units(ask_atn: str) -> int:
+    """An ask written in ATN, as the integer base units the chain holds."""
+    units = Decimal(ask_atn) * ATN_BASE_UNITS
+    if units != units.to_integral_value() or units < 0:
+        raise ValueError(f"ask {ask_atn} ATN is not a whole number of base units")
+    return int(units)
+
+
+# The one backing every demo listing dispatches to: a purchase returns what
+# was sent and says plainly it came from a demo listing.
+DEMO_TOOL_NAME = "demo_service_echo"
+DEMO_TOOL_CODE = (
+    "import sys, json\n"
+    "args = json.load(sys.stdin)\n"
+    "print(json.dumps({'demo': True, 'received': args,\n"
+    "                  'note': 'demo listing from scripts/seed_demo_services.py: '\n"
+    "                          'no real work is done'}))\n"
+)
+
+
 def _spec(name: str, description: str, params: list[str], ask: str,
-          author: str) -> dict:
+          backing_tool: str, agent: str = "") -> dict:
     msg = {
         "type": "register_service",
         "name": name,
         "description": description,
-        "agent_id": author,
-        "backing_tool": "",
+        "backing_tool": backing_tool,
         "input_schema": {
             "type": "object",
             "properties": {p: {"type": "string"} for p in params},
             "required": params[:1],
         },
-        # ATN-denominated by construction (ratified 2026-07-10) — no
-        # token field.
-        "ask": {"amount": ask, "unit": "per_item"},
+        # The chain's ask is in ATN base units (the spec carries no price).
+        "ask": {"amount": str(ask_base_units(ask)), "unit": "per_item"},
     }
+    if agent:
+        msg["agent_id"] = agent
     # Omitted rather than sent empty for the imageless entries: the field
     # is optional on the wire, and an absent key is the honest signal.
     image_uri = _image_uri(name)
@@ -422,20 +463,56 @@ def _spec(name: str, description: str, params: list[str], ask: str,
 
 
 async def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Seed demo service listings into a daemon that joined a "
+                    "local hardhat jurisdiction.")
     parser.add_argument("--clear", action="store_true",
                         help="retire every existing service first")
-    parser.add_argument("--url", default=WS_URL)
+    parser.add_argument("--url", default=WS_URL,
+                        help="the daemon's local WebSocket (default %(default)s)")
+    parser.add_argument("--agent", default="",
+                        help="register as this on-chain agent instead of the "
+                             "owner surface (the operator address)")
+    parser.add_argument("--host", action="append", default=[],
+                        help="seed only this provider house (repeatable)")
     args = parser.parse_args()
 
+    houses = {s[4] for s in SERVICES}
+    unknown = [h for h in args.host if h not in houses]
+    if unknown:
+        print(f"unknown house(s) {unknown}; known: {sorted(houses)}",
+              file=sys.stderr)
+        return 2
+    chosen = [s for s in SERVICES if not args.host or s[4] in args.host]
+
     async with websockets.connect(args.url, max_size=None) as ws:
+        seq = 0
+
         async def call(payload: dict) -> dict:
-            mid = f"seed-{id(payload)}"
+            nonlocal seq
+            seq += 1
+            mid = f"seed-{seq}"
             await ws.send(json.dumps({**payload, "msg_id": mid}))
             while True:
-                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=180))
                 if resp.get("msg_id") == mid:
                     return resp
+
+        if not args.agent:
+            # The owner surface registers under the operator: it must be
+            # live on Substrate, or every listing stays local-only.
+            status = await call({"type": "operator_status"})
+            st = status.get("result") or {}
+            if not status.get("ok") or st.get("error"):
+                print(f"this daemon is on no chain with a Substrate: "
+                      f"{status.get('error') or st.get('error')}",
+                      file=sys.stderr)
+                return 1
+            if not st.get("live"):
+                print(f"the operator {st.get('operator')} is not registered "
+                      "and live on Substrate: register it (the app's "
+                      "Household) or pass --agent", file=sys.stderr)
+                return 1
 
         if args.clear:
             existing = await call({"type": "list_services"})
@@ -444,18 +521,40 @@ async def main() -> int:
                             "digest": svc.get("digest", "")})
             print(f"retired {len((existing.get('result') or {}).get('services', []))}")
 
-        ok = 0
-        for name, desc, params, ask, author in SERVICES:
-            resp = await call(_spec(name, desc, params, ask, author))
-            if resp.get("ok"):
-                ok += 1
-            else:
+        # Registered by the owner whoever sells: a service's backing runs
+        # with the owner's sanction (the sale is the owner's choice), and
+        # agents hold register_tool only by grant.
+        tool = await call({"type": "register_tool", "name": DEMO_TOOL_NAME,
+                           "description": "Echoes a demo service purchase.",
+                           "input_schema": {"type": "object"},
+                           "code": DEMO_TOOL_CODE})
+        backing = (tool.get("result") or {}).get("digest", "")
+        if not tool.get("ok") or not backing:
+            print(f"could not register the demo backing tool: "
+                  f"{tool.get('error') or tool}", file=sys.stderr)
+            return 1
+
+        on_chain = local_only = failed = 0
+        for name, desc, params, ask, _house in chosen:
+            resp = await call(_spec(name, desc, params, ask, backing,
+                                    args.agent))
+            result = resp.get("result") or {}
+            if not resp.get("ok"):
+                failed += 1
                 print(f"  FAILED {name}: {resp.get('error')}", file=sys.stderr)
-        imaged = sum(1 for s in SERVICES if _image_uri(s[0]))
-        print(f"registered {ok}/{len(SERVICES)} services "
-              f"across {len({s[4] for s in SERVICES})} providers "
-              f"({imaged} with a banner image, {len(SERVICES) - imaged} without)")
-    return 0
+            elif result.get("on_chain"):
+                on_chain += 1
+            else:
+                local_only += 1
+                print(f"  LOCAL ONLY {name}: {result.get('reason')}",
+                      file=sys.stderr)
+        imaged = sum(1 for s in chosen if _image_uri(s[0]))
+        print(f"listed {on_chain}/{len(chosen)} services on chain "
+              f"({local_only} local only, {failed} failed) from "
+              f"{len({s[4] for s in chosen})} houses, backed by "
+              f"{DEMO_TOOL_NAME} {backing[:16]} "
+              f"({imaged} with a banner image, {len(chosen) - imaged} without)")
+    return 0 if on_chain == len(chosen) else 1
 
 
 if __name__ == "__main__":
