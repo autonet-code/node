@@ -1,10 +1,10 @@
 # Services market: decentralized monetizable APIs
 
-Status: BUILT, beta on testnet, with two pieces still only specified.
-BUILT: the on-chain registry (register / update ask / retire), direct
-`payForService` settlement, the provider-side payment gate, and the
-`service` consumer provider type. SPECIFIED, NOT BUILT: receipt-gated
-reviews (§4). The voucher-per-call client flow is BUILT for agents'
+Status: BUILT, beta on testnet. BUILT: the on-chain registry (register /
+update ask / retire), direct `payForService` settlement, the provider-side
+payment gate, the `service` consumer provider type, and receipt-gated
+reviews rated in the epoch-close (§4, Decision 2026-11-10 "service reviews
+in the epoch-close"). The voucher-per-call client flow is BUILT for agents'
 `request_service` (2026-10-28, #45: `atn/service_channels.py`, one channel
 per payer and provider; a voucher counts once the provider's signed reply
 says it kept the payment, or when the outcome is unknown; refunds swept
@@ -47,6 +47,100 @@ mint, NO decay math. The trust basis is purely behavioral:
 Master-disable / fingerprinting is fleet hygiene for honest daemons,
 not a defense against dishonest ones. The defense is that lying has a
 wallet attached and receipts are forever.
+
+## Decision (2026-11-10): service reviews in the epoch-close
+
+A buyer rates a service it paid for, and other buyers read the rating
+before they buy. Decided by the owner; built in
+`nodes/common/service_reviews.py` (consensus side) and
+`atn/service_receipts.py` (the buyer's daemon).
+
+- **Fields.** A service review has the fields of a tool review:
+  correctness (-1..1, delivered as described), simplicity (0..1, read as
+  the buyer's convenience: time, preparation, documents asked for),
+  novelty (0..1, the reviewer's own judgment of how much of its frame the
+  service makes it revise), malware (yes or no, the tools' NIST SP 800-53
+  "malicious code" definition, which fits services: for example an
+  inference model primed to make the buyer's agent leak data or run
+  harmful commands), and the optional charter axes, scored as tools score
+  them (an unscored axis counts as half the top score). Physical harm falls
+  under correctness or the charter. A malware yes needs evidence: the
+  reviewer's text plus the receipt and the provider's signed reply, kept
+  as a content-addressed blob in the reviewer's tool-store blobs, which
+  peers read with `fetch_evidence` like a tool flag's evidence.
+- **Authority from payment, not REP.** Only the address that paid for a
+  request may review it, every counted review weighs the same, and the
+  provider cannot review itself. Reviews enforce nothing: no mint, no REP,
+  no slashing, nothing on chain beyond what the anchor commits.
+- **Receipts.** The provider's reply signature (`receipt_sig`) is a
+  receipt: keccak of the ABI encoding of (`autonet:service_receipt:v1`,
+  request id, spec digest, provider address, the payer the gate verified,
+  `ok`, `charged`, the amount charged, sha256 of the canonical
+  `{"error", "result"}` JSON), signed EIP-191. The reply carries `payer`
+  and `amount` next to `charged`. The result itself is not covered, so a
+  review proves the receipt without revealing what the provider returned.
+  The buyer's verification (`reply_from_provider`) checks the same hash,
+  and `request_service` hands every authentic reply's receipt to the
+  runtime's `ReceiptStore`, which keeps the receipt and the whole signed
+  reply in a blob store no peer is served from.
+- **The event.** `review_service` (agent tool; the app calls it as the
+  owner) takes a request id (or a receipt), the four fields, optional
+  charter scores, a note (up to 500 characters, public) and the malware
+  evidence. It signs the review with the payer's key (an external agent's
+  and the owner surface's is the operator's) and hands one
+  `service_review` event to the library service, so it rides the open
+  epoch's batch:
+
+  ```
+  {"kind": "service_review", "v": 1,
+   "receipt": {request_id, spec_digest, provider, payer, ok, charged,
+               amount, result_hash, sig},
+   "review": {jurisdiction, correctness, simplicity, novelty, malware,
+              axes, evidence_hash, note, ts},
+   "reviewer": "0x...", "sig": "0x..."}
+  ```
+
+  Scores are in hundredths as on ToolBond's wire. The reviewer signs
+  keccak(`autonet:service_review:v1`, the receipt hash, sha256 of the
+  review's canonical JSON).
+- **Proof in the close, with no chain reads.** An event counts when its
+  receipt is well formed, says `charged: true` and is signed by the
+  provider it names; the reviewer is the receipt's payer, signed the
+  review, and is not the provider; the review names this jurisdiction (the
+  batch's rpb address), has every field in range, evidence with a malware
+  yes, and is dated at most an hour after its batch.
+- **Counting.** One review per (provider, spec digest, payer): a later
+  review (larger signed `ts`, then larger review hash) replaces the
+  earlier, so a replayed old review changes nothing. A service's rating is
+  the mean of each field over its payers' latest reviews, the share of
+  payers flagging malware, each charter axis's mean and their mean
+  together (`value`), the number of payers and the total their receipts
+  charged. Payers of the provider's own household and sanctioned
+  households (both from the pinned inputs) are kept but not counted.
+  Ratings are keyed by (provider address, spec digest), so a copy
+  registered under another address never shares a rating. Integer sums and
+  sorted iteration make every daemon compute the same bytes. The carried
+  state is bounded: the 1000 most recent payers per service and the 256
+  most recently reviewed services per provider.
+- **Anchored state.** Two carry maps, `service_reviews`
+  (`<provider>:<digest>` -> payer -> latest review) and `service_ratings`
+  (`<provider>:<digest>` -> rating), ride the carry bundle next to the tool
+  maps, so a follower or a joiner gets them from the anchor's `carry_cid`.
+- **Search.** `ServiceCatalog.search` rows (`market_services`,
+  `find_services`) carry `rating` for genuine entries, read from the close
+  driver's `service_rating(provider, digest)` through the catalog's
+  `rating_provider`. `service_receipts` (WS) lists the household's
+  receipts and the reviews sent from them.
+- **What a receipt cannot prove.** The close reads no chain, so the amount
+  is the provider's word, and a provider can sign receipts for addresses
+  it controls and review itself through them. That only lifts its own
+  service's rating, which buyers weigh with the number of payers and the
+  amounts; nobody can forge a receipt for another provider's service.
+- Proven by `tests/test_service_reviews.py`,
+  `tests/atn/test_service_receipts.py` and
+  `scripts/local_e2e_service_provider.py` stage 12 (the child reviews a
+  paid request, a real close's carry bundle rates the service, the
+  buyer's search shows it).
 
 ## Decision (2026-11-10): a stream between buyer and seller
 
@@ -208,9 +302,11 @@ paths broke the principles above in ways each piece hid. Fixed:
   `payForService` payment is on chain already, so it is charged whatever
   the dispatch did.
 - **Replies are signed.** The provider signs every reply about its
-  services (request id, spec digest, and the reply's `ok`, `result`,
-  `error` and `charged`) with the key that registered the service, the
-  address the buyer paid (`service_client.sign_reply`, `receipt_sig`).
+  services with the key that registered the service, the address the
+  buyer paid (`service_client.sign_reply`, `receipt_sig`). The signed
+  message is a receipt over the request, the payer, `ok`, `charged`, the
+  amount and the result's hash (Decision "service reviews in the
+  epoch-close" above).
   The buyer takes nothing else as served: an unsigned or wrongly signed
   reply is not ok, its `charged` is not believed, and a relayed one moves
   on to the next relay. Only relays (connected seeds and peers advertising
@@ -263,8 +359,9 @@ for them (the indexer's `services` mirror is unused).
   daemon announces each registered spec on
   `/autonet/services/<jurisdiction>` (`nodes/common/event_gossip.py`
   `topic_for_services`) as soon as the chain numbers it, and again every
-  30 minutes. The topic is not consensus (services earn no mint, so
-  nothing enters the epoch-close). Relays subscribe to it, so specs cross
+  30 minutes. The topic is not consensus (services earn no mint, so no
+  spec enters the epoch-close; reviews do, on the epoch batches, see the
+  Decision on service reviews). Relays subscribe to it, so specs cross
   daemons that reach each other only through a relay.
 - **The chain admits.** Each daemon's catalog (`atn/service_catalog.py`)
   follows the `ServiceRegistry`: one enumeration on the first sync, then
@@ -668,15 +765,28 @@ requires it to be the event's payer, so a copied id is worthless and the
 args are bound to the payment. Unsigned paid requests are refused. A
 failed signature check does not consume the id.
 
-### 4. Reviews (SPECIFIED, NOT BUILT)
+### 4. Reviews (BUILT 2026-11-10)
 
-Nothing below this paragraph is implemented. There is no review event,
-no review store and no review surface in the app: the strings
-`review` in `atn/service_store.py` are forward-looking comments on the
-request log a review rail would later ride.
+A review is the payer's signed rating of one paid request, proven by the
+provider's signed receipt, carried as a `service_review` event in the
+epoch batches and counted by the epoch-close into per-service ratings in
+the anchored carry bundle (Decision "service reviews in the epoch-close"
+at the top: fields, receipt and event formats, counting, bounds). Only
+addresses that paid can review (receipt-gated, so the fake-review problem
+of open review sites does not arise between strangers), each payer counts
+once, and ratings are displayed, never enforced: buyers see the history
+and price accordingly.
 
-What ships instead as the trust surface, and is what the Services page
-actually renders:
+- Buyer side: `atn/service_receipts.py` (`ReceiptStore`: receipts,
+  private reply blobs, reviews, malware evidence) and the
+  `review_service` agent tool; `service_receipts` (WS) lists them.
+- Consensus side: `nodes/common/service_reviews.py` (hashes, validation,
+  `close_service_reviews`), called from `federated_epoch_close`; the
+  driver carries `service_reviews` and `service_ratings` and answers
+  `service_rating(provider, digest)`.
+- Search: catalog rows carry `rating`.
+
+The trust surface beside the ratings:
 
 - the on-chain provider record (`serviceEarnings`, `agentMintTotal`,
   registration tenure), read by the `provider_record` WS handler. It is
@@ -686,21 +796,13 @@ actually renders:
   `ServiceStore.summary()`, returned alongside `list_services`: requests
   that passed the payment gate, attributed only to the payer it verified.
 
-The specified design, for when it is built: a review = the payer's
-signed verdict on a request_id (ok/score/note), publishable as a gossip
-event and mirrored by the indexer. Only addresses that actually paid for
-the item can review it (receipt-gated: web2's fake-review problem solved
-by construction). Aggregates (success rate, dispute rate, volume) are
-displayed, never enforced: pricing self-regulates because buyers see
-history; no on-chain math beyond settlement.
-
 ### 5. Marketplace surface
 
 - Web app: new Services screen, offering browse (the daemon's catalog,
   `market_services`),
-  spec inspection, purchase flow (wallet), and (once §4 is built) review
-  history; today the trust strip shows the provider record plus the
-  provider-local success rate. The
+  spec inspection, purchase flow (wallet), and the rating from paid
+  reviews (each `market_services` row's `rating`, §4); the trust strip
+  shows the provider record plus the provider-local success rate. The
   framework is both marketplace and consumer; the human benefactor of
   each daemon is the true end-consumer on both sides.
 - Agent-side: the inference probe returns tools + services merged,
@@ -764,5 +866,6 @@ rules are moot: the channel's griefing analysis lives inline in
    initial value and the DAO timelock (the Substrate's governor) changes
    it with `setChallengeWindow`. Each channel records the window it
    opened with, so a change never moves an open channel's deadline.
-2. Whether reviews live as chain events (costly, permanent) or gossip
-   + indexer (cheap, replayable): lean gossip.
+2. Where reviews live: settled 2026-11-10, as events in the epoch
+   batches, rated by the close and carried in the anchored bundle; no
+   chain events and no indexer mirror.

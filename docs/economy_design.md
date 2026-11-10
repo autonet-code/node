@@ -90,6 +90,16 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   unit consumed, so neither side risks more than one unit, and no request
   needs its own transaction. Each service's spec says what one unit is
   (`unit`); its price per unit is on chain only.
+- **Service reviews** (Decision 2026-11-10, `services_market.md`): a
+  buyer rates a request it paid for with a tool review's fields
+  (correctness, simplicity read as the buyer's convenience, novelty,
+  malware with evidence, the charter axes). Authority comes from payment,
+  not REP: only the payer named in the provider's signed receipt (which
+  says the request was charged) may review it, and every payer counts
+  once. The reviews ride the epoch batches; the close keeps each payer's
+  latest per service and commits the ratings (means, the share flagging
+  malware, payers, amount charged) in the anchored state. They inform
+  other buyers and enforce nothing: no mint, no REP, no slashing.
 - **OPEN:** a legal opinion (EU, MiCA) on the vault sale and on any
   redemption from treasury reserves, which would turn the ceiling into a
   peg; the launch parity; and a monetary model of ATN earned against ATN
