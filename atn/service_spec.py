@@ -39,6 +39,26 @@ _REQUIRED_FIELDS = ("kind", "name", "description", "input_schema", "author")
 # spend per paid call (the on-chain price is set against the cap).
 DEFAULT_MAX_TOKENS_CAP = 4096
 
+# Default input bound of an inference-backed service: the characters of a
+# request's messages (as compact JSON) plus its system prompt, about 16k
+# tokens of text. A daemon cannot count every upstream model's tokens
+# itself, so the bound is in characters. Written into the spec when the
+# author names none, so a buyer reads the bound it is held to.
+DEFAULT_MAX_INPUT_CHARS = 64_000
+
+# Upstream providers an inference service cannot be served on: they are not
+# this daemon's own provider stack (``service`` resells a purchase, ``rpb``
+# a sponsor's grant) or generate no text (``jev``).
+NOT_UPSTREAM_PROVIDERS = frozenset({"service", "rpb", "jev", "external"})
+
+
+def inference_input_chars(messages: Any, system: str = "") -> int:
+    """The size an inference request is bounded by: its messages as compact
+    JSON plus its system prompt, in characters."""
+    body = json.dumps(messages, separators=(",", ":"), ensure_ascii=False,
+                      default=str)
+    return len(body) + len(system or "")
+
 
 def build_service_spec(
     *,
@@ -68,12 +88,13 @@ def build_service_spec(
     so it cannot be swapped after signing, and deliberately NOT part of
     ``service_embedding_text`` — presentation is not semantics.
 
-    ``inference`` (``{model, max_tokens_cap}``, decision 2026-07-26)
-    declares that the service is backed by the provider daemon's OWN
-    provider stack rather than a backing tool: a paid request is a chat
-    completion. It sits INSIDE the signed payload (the served model and
-    the token ceiling are commitments to the buyer, so they must not be
-    swappable post-signature) but, like ``image_uri``, is NOT part of
+    ``inference`` (``{provider, model, max_tokens_cap, max_input_chars}``,
+    decision 2026-07-26) declares that the service is backed by the
+    provider daemon's OWN provider stack rather than a backing tool: a paid
+    request is a chat completion served by exactly that upstream provider
+    and model. It sits INSIDE the signed payload (the served model and the
+    bounds are commitments to the buyer, so they must not be swappable
+    post-signature) but, like ``image_uri``, is NOT part of
     ``service_embedding_text`` — the name/description carry the
     semantics, a model id is plumbing.
     """
@@ -140,41 +161,74 @@ def validate_service_spec(payload: Dict[str, Any]) -> List[str]:
     return errors
 
 
-def validate_inference(inference: Any) -> List[str]:
-    """Shape-check an ``inference`` block: ``{model, max_tokens_cap}``.
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
-    ``model`` must be a non-empty string (the served model is a
-    commitment to the buyer, not a daemon-local default), and
-    ``max_tokens_cap`` a positive int (the ceiling the provider clamps
-    every request to)."""
+
+def validate_inference(inference: Any) -> List[str]:
+    """Shape-check an ``inference`` block:
+    ``{provider, model, max_tokens_cap, max_input_chars}``.
+
+    ``provider`` and ``model`` must be non-empty strings: the upstream that
+    serves the buyer is a commitment chosen by the seller, never inferred
+    from a model's name or defaulted (no default provider, decision
+    2026-10-06). ``provider`` is a provider id of the seller's daemon, and
+    not one in ``NOT_UPSTREAM_PROVIDERS``. ``max_tokens_cap`` (output
+    tokens every request is clamped to) and ``max_input_chars`` (the input
+    bound, see ``inference_input_chars``) are positive ints, defaulted when
+    absent."""
     errors: List[str] = []
     if not isinstance(inference, dict):
-        return ["inference must be a dict of {model, max_tokens_cap}"]
+        return ["inference must be a dict of {provider, model, "
+                "max_tokens_cap, max_input_chars}"]
+    provider = inference.get("provider")
+    if not provider or not isinstance(provider, str) or not provider.strip():
+        errors.append("inference.provider must name the upstream provider the "
+                      "service is served on (a provider id of this daemon, "
+                      "e.g. 'ollama' or 'anthropic')")
+    elif provider.strip() in NOT_UPSTREAM_PROVIDERS:
+        errors.append(f"inference.provider {provider.strip()!r} cannot serve "
+                      "an inference service: it is not this daemon's own "
+                      "provider stack, or it generates no text")
     model = inference.get("model")
-    if not model or not isinstance(model, str):
+    if not model or not isinstance(model, str) or not model.strip():
         errors.append("inference.model must be a non-empty model-id string")
     cap = inference.get("max_tokens_cap", DEFAULT_MAX_TOKENS_CAP)
-    if isinstance(cap, bool) or not isinstance(cap, int):
+    if cap in (None, ""):
+        cap = DEFAULT_MAX_TOKENS_CAP
+    if not _positive_int(cap):
         errors.append("inference.max_tokens_cap must be a positive int")
-    elif cap <= 0:
-        errors.append("inference.max_tokens_cap must be a positive int")
+    limit = inference.get("max_input_chars", DEFAULT_MAX_INPUT_CHARS)
+    if limit in (None, ""):
+        limit = DEFAULT_MAX_INPUT_CHARS
+    if not _positive_int(limit):
+        errors.append("inference.max_input_chars must be a positive int")
     return errors
 
 
 def normalize_inference(inference: Dict[str, Any]) -> Dict[str, Any]:
-    """Canonicalize an inference block: exactly two keys, cap defaulted.
+    """Canonicalize an inference block: exactly four keys, the bounds
+    defaulted.
 
     Keeping the shape closed means the signed bytes (and so the digest)
     don't drift on incidental extra keys a caller happened to pass."""
+    provider = inference.get("provider")
     model = inference.get("model")
     cap = inference.get("max_tokens_cap", DEFAULT_MAX_TOKENS_CAP)
     if cap in (None, ""):
         cap = DEFAULT_MAX_TOKENS_CAP
-    out: Dict[str, Any] = {"model": model, "max_tokens_cap": cap}
+    limit = inference.get("max_input_chars", DEFAULT_MAX_INPUT_CHARS)
+    if limit in (None, ""):
+        limit = DEFAULT_MAX_INPUT_CHARS
+    out: Dict[str, Any] = {"provider": provider, "model": model,
+                           "max_tokens_cap": cap, "max_input_chars": limit}
+    if isinstance(provider, str):
+        out["provider"] = provider.strip()
     if isinstance(model, str):
         out["model"] = model.strip()
-    if isinstance(cap, int) and not isinstance(cap, bool):
-        out["max_tokens_cap"] = int(cap)
+    for key in ("max_tokens_cap", "max_input_chars"):
+        if isinstance(out[key], int) and not isinstance(out[key], bool):
+            out[key] = int(out[key])
     return out
 
 

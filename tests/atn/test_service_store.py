@@ -190,52 +190,86 @@ class TestServiceSpec:
             author="a", created_ts=1)
         assert "inference" not in bare
 
+        from atn.service_spec import DEFAULT_MAX_INPUT_CHARS
+
         inf = build_service_spec(
             name="s", description="d", input_schema=SCHEMA,
             author="a", created_ts=1,
-            inference={"model": "llama-3.1-8b", "max_tokens_cap": 512})
-        assert inf["inference"] == {"model": "llama-3.1-8b",
-                                    "max_tokens_cap": 512}
+            inference={"provider": "ollama", "model": "llama-3.1-8b",
+                       "max_tokens_cap": 512})
+        assert inf["inference"] == {"provider": "ollama",
+                                    "model": "llama-3.1-8b",
+                                    "max_tokens_cap": 512,
+                                    "max_input_chars": DEFAULT_MAX_INPUT_CHARS}
         assert validate_service_spec(inf) == []
         assert b"llama-3.1-8b" in canonical_service_bytes(inf)
         assert canonical_service_bytes(inf) != canonical_service_bytes(bare)
         assert service_embedding_text(inf) == service_embedding_text(bare)
         assert "llama" not in service_embedding_text(inf)
 
-    def test_inference_cap_defaults_and_normalizes(self):
-        from atn.service_spec import DEFAULT_MAX_TOKENS_CAP
+    def test_inference_bounds_default_and_normalize(self):
+        """The bounds are written into the spec when the author names none,
+        so a buyer reads the limits it is held to."""
+        from atn.service_spec import (
+            DEFAULT_MAX_INPUT_CHARS, DEFAULT_MAX_TOKENS_CAP)
 
         spec = build_service_spec(
             name="s", description="d", input_schema=SCHEMA, author="a",
-            created_ts=1, inference={"model": "  gpt-4o-mini  "})
-        assert spec["inference"] == {"model": "gpt-4o-mini",
-                                     "max_tokens_cap": DEFAULT_MAX_TOKENS_CAP}
+            created_ts=1,
+            inference={"provider": " openai ", "model": "  gpt-4o-mini  "})
+        assert spec["inference"] == {"provider": "openai",
+                                     "model": "gpt-4o-mini",
+                                     "max_tokens_cap": DEFAULT_MAX_TOKENS_CAP,
+                                     "max_input_chars": DEFAULT_MAX_INPUT_CHARS}
 
         # Extra keys are dropped: the shape is closed so the digest can't
         # drift on whatever a caller happened to pass.
         spec2 = build_service_spec(
             name="s", description="d", input_schema=SCHEMA, author="a",
             created_ts=1,
-            inference={"model": "m", "max_tokens_cap": 8, "junk": True})
-        assert spec2["inference"] == {"model": "m", "max_tokens_cap": 8}
+            inference={"provider": "ollama", "model": "m",
+                       "max_tokens_cap": 8, "max_input_chars": 900,
+                       "junk": True})
+        assert spec2["inference"] == {"provider": "ollama", "model": "m",
+                                      "max_tokens_cap": 8,
+                                      "max_input_chars": 900}
 
     def test_bad_inference_rejected(self):
         from atn.service_spec import validate_inference
 
-        assert any("model" in e for e in validate_inference({}))
-        assert any("model" in e for e in validate_inference({"model": 7}))
+        ok = {"provider": "ollama", "model": "m"}
+        assert validate_inference(ok) == []
+        assert any("model" in e for e in validate_inference({"provider": "ollama"}))
+        assert any("model" in e
+                   for e in validate_inference({**ok, "model": 7}))
         assert any("max_tokens_cap" in e
-                   for e in validate_inference({"model": "m",
-                                                "max_tokens_cap": 0}))
+                   for e in validate_inference({**ok, "max_tokens_cap": 0}))
         assert any("max_tokens_cap" in e
-                   for e in validate_inference({"model": "m",
-                                                "max_tokens_cap": "lots"}))
+                   for e in validate_inference({**ok, "max_tokens_cap": "lots"}))
+        assert any("max_input_chars" in e
+                   for e in validate_inference({**ok, "max_input_chars": -5}))
         assert validate_inference("nope") == [
-            "inference must be a dict of {model, max_tokens_cap}"]
+            "inference must be a dict of {provider, model, max_tokens_cap, "
+            "max_input_chars}"]
         with pytest.raises(ValueError):
             build_service_spec(
                 name="s", description="d", input_schema=SCHEMA, author="a",
-                inference={"max_tokens_cap": 10})
+                inference={"provider": "ollama", "max_tokens_cap": 10})
+
+    def test_inference_names_its_upstream_provider(self):
+        """No default provider: the upstream is named, never inferred from
+        the model's name, and never one that is not this daemon's own
+        stack."""
+        from atn.service_spec import validate_inference
+
+        missing = validate_inference({"model": "claude-sonnet-5"})
+        assert any("inference.provider" in e for e in missing)
+        assert any("inference.provider" in e
+                   for e in validate_inference({"provider": "  ",
+                                                "model": "llama3"}))
+        for resold in ("service", "rpb", "jev"):
+            errs = validate_inference({"provider": resold, "model": "m"})
+            assert any("cannot serve" in e for e in errs), resold
 
     def test_canonical_bytes_excludes_sig(self):
         spec = build_service_spec(
@@ -351,11 +385,16 @@ class TestServiceStore:
         rt = _make_runtime(tmp_path)
         res = rt.service_store.register(
             name="cognition", description="Chat completions, per call.",
-            input_schema=SCHEMA, author="user",             inference={"model": "qwen2.5:14b", "max_tokens_cap": 1024})
+            input_schema=SCHEMA, author="user",
+            inference={"provider": "ollama", "model": "qwen2.5:14b",
+                       "max_tokens_cap": 1024, "max_input_chars": 5000})
 
         rec = rt.service_store.get(res["digest"])
-        assert rec.inference == {"model": "qwen2.5:14b", "max_tokens_cap": 1024}
+        assert rec.inference == {"provider": "ollama", "model": "qwen2.5:14b",
+                                 "max_tokens_cap": 1024,
+                                 "max_input_chars": 5000}
         assert rec.max_tokens_cap == 1024
+        assert rec.max_input_chars == 5000
         assert rec.backing_tool == ""
 
         reloaded = ServiceStore(rt, rt._config.data_dir / "services")
@@ -365,12 +404,15 @@ class TestServiceStore:
     async def test_register_inference_cap_default(self, tmp_path):
         from atn.service_spec import DEFAULT_MAX_TOKENS_CAP
 
+        from atn.service_spec import DEFAULT_MAX_INPUT_CHARS
+
         rt = _make_runtime(tmp_path)
         res = rt.service_store.register(
             name="cognition", description="d", input_schema=SCHEMA,
-            author="user", inference={"model": "m"})
-        assert (rt.service_store.get(res["digest"]).max_tokens_cap
-                == DEFAULT_MAX_TOKENS_CAP)
+            author="user", inference={"provider": "ollama", "model": "m"})
+        rec = rt.service_store.get(res["digest"])
+        assert rec.max_tokens_cap == DEFAULT_MAX_TOKENS_CAP
+        assert rec.max_input_chars == DEFAULT_MAX_INPUT_CHARS
 
     @pytest.mark.asyncio
     async def test_inference_and_backing_tool_conflict(self, tmp_path):
@@ -381,7 +423,8 @@ class TestServiceStore:
             rt.service_store.register(
                 name="both", description="d", input_schema=SCHEMA,
                 author="user", backing_tool="deadbeef",
-                inference={"model": "m", "max_tokens_cap": 8})
+                inference={"provider": "ollama", "model": "m",
+                           "max_tokens_cap": 8})
         assert rt.service_store.list() == []
 
     @pytest.mark.asyncio
@@ -390,11 +433,25 @@ class TestServiceStore:
         with pytest.raises(ValueError, match="model"):
             rt.service_store.register(
                 name="nomodel", description="d", input_schema=SCHEMA,
-                author="user", inference={"max_tokens_cap": 8})
+                author="user",
+                inference={"provider": "ollama", "max_tokens_cap": 8})
         with pytest.raises(ValueError, match="max_tokens_cap"):
             rt.service_store.register(
                 name="badcap", description="d", input_schema=SCHEMA,
-                author="user",                 inference={"model": "m", "max_tokens_cap": -1})
+                author="user",
+                inference={"provider": "ollama", "model": "m",
+                           "max_tokens_cap": -1})
+        with pytest.raises(ValueError, match="inference.provider"):
+            rt.service_store.register(
+                name="noprovider", description="d", input_schema=SCHEMA,
+                author="user", inference={"model": "claude-sonnet-5"})
+        # A provider id this daemon does not know cannot serve anything.
+        with pytest.raises(ValueError, match="unknown provider"):
+            rt.service_store.register(
+                name="nowhere", description="d", input_schema=SCHEMA,
+                author="user",
+                inference={"provider": "acme-llm", "model": "m"})
+        assert rt.service_store.list() == []
 
     @pytest.mark.asyncio
     async def test_retire(self, tmp_path):
@@ -502,7 +559,7 @@ class TestRegisterServiceWSDefaultSchema:
         rt = _make_runtime(tmp_path)
         res = await self._register(rt, {
             "name": "cog", "description": "d", "ask": ASK,
-            "inference": {"model": "echo-1"}})
+            "inference": {"provider": "ollama", "model": "echo-1"}})
         assert res["ok"] is True, res
         schema = res["result"]["spec"]["input_schema"]
         assert schema["required"] == ["messages"]
@@ -541,13 +598,15 @@ class TestServiceRequestDispatch:
         assert out["result"]["request_id"] == "req-1"
         assert out["result"]["result"] == {"echo": "hi"}
 
-        # Provider request log recorded the served item.
+        # Provider request log recorded the served item. Nothing was paid
+        # (the no-chain dev degrade), so nobody is named as its client.
         summary = rt.service_store.summary()
         entry = summary[svc["digest"]]
         assert entry["count"] == 1
         assert entry["ok_count"] == 1
         assert entry["success_rate"] == 1.0
-        assert entry["unique_clients"] == 1
+        assert entry["unique_clients"] == 0
+        assert entry["refused"] == 0
 
     @pytest.mark.asyncio
     async def test_unknown_and_retired_and_no_backing(self, tmp_path):
@@ -557,7 +616,7 @@ class TestServiceRequestDispatch:
         miss = await _svc_request(rt, "f" * 64, "r", {"x": "1"})
         assert miss["ok"] is False and "Unknown" in miss["error"]
 
-        # No backing tool -> failure recorded.
+        # No backing tool -> refused before the payment gate.
         svc = rt.service_store.register(
             name="ghost", description="d", input_schema=SCHEMA,
             author="child")
@@ -569,9 +628,9 @@ class TestServiceRequestDispatch:
         out = await _svc_request(rt, svc["digest"], "r2", {"x": "1"})
         assert out["ok"] is False and "retired" in out["error"].lower()
 
-        # The no-backing attempt is on the provider log as a failure.
+        # Neither was served: counted as refused, no request row.
         entry = rt.service_store.summary()[svc["digest"]]
-        assert entry["count"] == 1 and entry["ok_count"] == 0
+        assert entry["count"] == 0 and entry["refused"] == 2
 
     @pytest.mark.asyncio
     async def test_request_log_survives_reload(self, tmp_path):
@@ -588,7 +647,128 @@ class TestServiceRequestDispatch:
         assert reloaded._request_seq == 2
         entry = reloaded.summary()[svc["digest"]]
         assert entry["count"] == 2
-        assert entry["unique_clients"] == 2
+        # "0xOther" is only what the request claimed: never attributed.
+        assert entry["unique_clients"] == 0
+
+    @pytest.mark.asyncio
+    async def test_only_the_verified_payer_is_attributed(self, tmp_path,
+                                                         monkeypatch):
+        """A paid request names its client by the payer_signature the gate
+        verified, under the service's provider address; the request's own
+        ``client`` field is ignored. Attempts the gate refuses are counted,
+        never written as rows."""
+        from eth_account import Account
+
+        from atn import service_client
+        from atn.ws_server import WebSocketBridge
+
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        svc = rt.service_store.register(
+            name="echo_svc", description="d", input_schema=SCHEMA,
+            author="child", backing_tool=tool["digest"])
+        server = _server(rt)
+        provider = server._service_provider_address("child")
+        assert provider
+        payer_key = "0x" + "71" * 32
+        payer = Account.from_key(payer_key).address
+
+        verdicts = iter([{"ok": True, "ask_amount": 5},
+                         {"ok": False, "reason": "unpaid"}])
+
+        async def _gate(self, request, record, *, local=False):
+            return next(verdicts)
+        monkeypatch.setattr(WebSocketBridge, "_validate_service_payment", _gate)
+
+        rid = "0x" + "a1" * 32
+        args = {"x": "hi"}
+        paid = await server._handle_service_request(
+            {"spec_digest": svc["digest"], "request_id": rid, "args": args,
+             "client": "0xSomeoneElse",
+             "payer_signature": service_client.sign_request(
+                 payer_key, rid, svc["digest"], args, provider)},
+            msg_id="m1")
+        assert paid["ok"] is True
+        refused = await server._handle_service_request(
+            {"spec_digest": svc["digest"], "request_id": "0x" + "a2" * 32,
+             "args": args, "client": "0xStranger"}, msg_id="m2")
+        assert refused["ok"] is False
+
+        entry = rt.service_store.summary()[svc["digest"]]
+        assert entry["count"] == 1 and entry["unique_clients"] == 1
+        assert entry["refused"] == 1
+        rows = [json.loads(line) for line in
+                (rt._config.data_dir / "services" / "requests.jsonl")
+                .read_text().splitlines()]
+        assert [r["payer"] for r in rows] == [payer.lower()]
+        assert "0xStranger" not in json.dumps(rows)
+        assert "0xSomeoneElse" not in json.dumps(rows)
+
+    @pytest.mark.asyncio
+    async def test_summary_is_kept_not_reread(self, tmp_path):
+        """summary() reads no log: the totals are kept as requests are
+        logged and persisted beside the rows, and the row file rotates."""
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        svc = rt.service_store.register(
+            name="echo_svc", description="d", input_schema=SCHEMA,
+            author="child", backing_tool=tool["digest"])
+        store = rt.service_store
+        store.REQUEST_LOG_MAX_BYTES = 300
+        for i in range(4):
+            store.record_request(svc["digest"], f"r{i}", f"0x{i:040x}",
+                                 ok=i != 3, amount="5")
+        services = rt._config.data_dir / "services"
+        assert (services / "requests.1.jsonl").exists()
+        assert (services / "requests.jsonl").stat().st_size < 600
+        (services / "requests.jsonl").unlink()
+        (services / "requests.1.jsonl").unlink()
+        entry = store.summary()[svc["digest"]]
+        assert (entry["count"], entry["ok_count"], entry["unique_clients"]) \
+            == (4, 3, 4)
+        reloaded = ServiceStore(rt, services)
+        assert reloaded.summary()[svc["digest"]] == entry
+        assert reloaded._request_seq == 4
+
+    @pytest.mark.asyncio
+    async def test_replies_are_signed_by_the_paid_address(self, tmp_path):
+        """Every reply about this daemon's service carries receipt_sig by
+        the key that registered it; a reply altered on the way does not
+        verify."""
+        from atn import service_client
+
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        svc = rt.service_store.register(
+            name="echo_svc", description="d", input_schema=SCHEMA,
+            author="child", backing_tool=tool["digest"])
+        provider = _server(rt)._service_provider_address("child")
+        rid = "0x" + "b3" * 32
+
+        out = await _svc_request(rt, svc["digest"], rid, {"x": "hi"})
+        assert out["ok"] is True and out["receipt_sig"]
+        assert service_client.reply_from_provider(
+            json.loads(json.dumps(out)), rid, svc["digest"], provider)
+        # Any spelling of the same request id verifies.
+        assert service_client.reply_from_provider(
+            out, rid[2:].upper(), svc["digest"], provider)
+        forged = {**out, "result": {**out["result"], "result": {"echo": "no"}}}
+        assert not service_client.reply_from_provider(
+            forged, rid, svc["digest"], provider)
+        assert not service_client.reply_from_provider(
+            out, "0x" + "b4" * 32, svc["digest"], provider)
+        assert not service_client.reply_from_provider(
+            out, rid, svc["digest"], "0x" + "00" * 20)
+
+        # Refusals are signed too, so a buyer can tell the provider's "no"
+        # from a relay's.
+        rt.service_store.retire(svc["digest"])
+        no = await _svc_request(rt, svc["digest"], rid, {"x": "hi"})
+        assert no["ok"] is False and service_client.reply_from_provider(
+            no, rid, svc["digest"], provider)
 
     async def test_replay_guard_is_prefix_and_case_insensitive(self, tmp_path):
         """One payment must never buy two work items.
@@ -656,25 +836,43 @@ class _FakeProvider:
 def _stub_provider_stack(rt, provider):
     """Point the daemon's fulfillment path at a fake provider.
 
-    Patches the SAME seam the sponsor rail resolves through
-    (AutonetBridge._resolve_sponsor_provider), so the test exercises the
-    real dispatch code rather than a parallel one."""
+    Patches the provider manager's resolve, the seam every agent resolves
+    through, so the test exercises the real dispatch code. Records the
+    (provider, model) each service asked for."""
     calls: list[tuple] = []
 
-    def _resolve(cfg, model):
-        calls.append((cfg, model))
+    def _resolve(defn):
+        calls.append((defn.provider, defn.cognitive_model))
         return provider
 
-    rt.autonet._resolve_sponsor_provider = _resolve
+    rt.providers.resolve_provider_with_fallback = _resolve
     return calls
 
 
-def _inference_svc(rt, *, model="qwen2.5:14b", cap=100, name="cognition"):
+def _spy_gate(monkeypatch):
+    """Record each call to the payment gate (which still runs)."""
+    from atn.ws_server import WebSocketBridge
+
+    calls: list[str] = []
+    real = WebSocketBridge._validate_service_payment
+
+    async def _gate(self, request, record, *, local=False):
+        calls.append(str(request.get("request_id")))
+        return await real(self, request, record, local=local)
+    monkeypatch.setattr(WebSocketBridge, "_validate_service_payment", _gate)
+    return calls
+
+
+def _inference_svc(rt, *, model="qwen2.5:14b", cap=100, name="cognition",
+                   provider="ollama", max_input_chars=None):
+    block = {"provider": provider, "model": model, "max_tokens_cap": cap}
+    if max_input_chars is not None:
+        block["max_input_chars"] = max_input_chars
     return rt.service_store.register(
         name=name, description="Chat completions, per call.",
         input_schema={"type": "object",
                       "properties": {"messages": {"type": "array"}}},
-        author="user",         inference={"model": model, "max_tokens_cap": cap})
+        author="user", inference=block)
 
 
 class TestInferenceServiceDispatch:
@@ -695,8 +893,8 @@ class TestInferenceServiceDispatch:
         assert out["result"]["model"] == "served-model"
         assert out["result"]["usage"] == {"input_tokens": 11,
                                           "output_tokens": 22}
-        # The spec's declared model is what we asked the stack for.
-        assert resolved[0][1] == "qwen2.5:14b"
+        # The spec's declared provider and model are what we asked for.
+        assert resolved[0] == ("ollama", "qwen2.5:14b")
         assert provider.calls[0]["model"] == "qwen2.5:14b"
         # No max_tokens named -> the cap is the default.
         assert provider.calls[0]["max_tokens"] == 100
@@ -747,22 +945,78 @@ class TestInferenceServiceDispatch:
         assert "backing" not in str(out.get("error", ""))
 
     @pytest.mark.asyncio
-    async def test_missing_messages_rejected_and_logged(self, tmp_path):
+    async def test_missing_messages_refused_before_the_gate(self, tmp_path,
+                                                            monkeypatch):
+        """A malformed work item is refused before the payment gate, so its
+        payment stays unspent."""
         rt = _make_runtime(tmp_path)
         svc = _inference_svc(rt)
         _stub_provider_stack(rt, _FakeProvider())
+        gate = _spy_gate(monkeypatch)
 
         out = await _svc_request(rt, svc["digest"], "r-empty", {})
         assert out["ok"] is False
-        assert "messages" in out["result"]["error"]
+        assert "messages" in out["error"]
+        assert "payment was not taken" in out["error"]
 
         out2 = await _svc_request(rt, svc["digest"], "r-blank",
                                   {"messages": []})
         assert out2["ok"] is False
+        assert gate == []
 
-        # Failures land on the provider log like any other unserved item.
         entry = rt.service_store.summary()[svc["digest"]]
-        assert entry["count"] == 2 and entry["ok_count"] == 0
+        assert entry["count"] == 0 and entry["refused"] == 2
+
+    @pytest.mark.asyncio
+    async def test_oversized_request_refused_before_the_gate(self, tmp_path,
+                                                             monkeypatch):
+        rt = _make_runtime(tmp_path)
+        svc = _inference_svc(rt, max_input_chars=200)
+        provider = _FakeProvider()
+        _stub_provider_stack(rt, provider)
+        gate = _spy_gate(monkeypatch)
+
+        big = [{"role": "user", "content": "x" * 300}]
+        out = await _svc_request(rt, svc["digest"], "r-big", {"messages": big})
+        assert out["ok"] is False and "too large" in out["error"]
+        assert "200" in out["error"]
+        # The system prompt counts toward the bound too.
+        small = [{"role": "user", "content": "hi"}]
+        out = await _svc_request(rt, svc["digest"], "r-sys",
+                                 {"messages": small, "system": "s" * 250})
+        assert out["ok"] is False and "too large" in out["error"]
+        assert gate == [] and provider.calls == []
+
+        ok = await _svc_request(rt, svc["digest"], "r-ok", {"messages": small})
+        assert ok["ok"] is True and len(gate) == 1
+
+    @pytest.mark.asyncio
+    async def test_upstream_is_the_provider_the_spec_names(self, tmp_path):
+        """The upstream is never guessed from the model's name: a model
+        called like another vendor's still goes to the named provider."""
+        rt = _make_runtime(tmp_path)
+        svc = _inference_svc(rt, provider="ollama", model="claude-lookalike")
+        resolved = _stub_provider_stack(rt, _FakeProvider())
+        out = await _svc_request(rt, svc["digest"], "r",
+                                 {"messages": [{"role": "user", "content": "x"}]})
+        assert out["ok"] is True
+        assert resolved == [("ollama", "claude-lookalike")]
+
+    @pytest.mark.asyncio
+    async def test_upstream_not_buildable_refused_before_the_gate(
+            self, tmp_path, monkeypatch):
+        rt = _make_runtime(tmp_path)
+        svc = _inference_svc(rt, provider="anthropic", model="m")
+        gate = _spy_gate(monkeypatch)
+
+        def _no_key(defn):
+            raise RuntimeError("No Anthropic API key configured")
+        rt.providers.resolve_provider_with_fallback = _no_key
+        out = await _svc_request(rt, svc["digest"], "r",
+                                 {"messages": [{"role": "user", "content": "x"}]})
+        assert out["ok"] is False
+        assert "'anthropic' is not available" in out["error"]
+        assert gate == []
 
     @pytest.mark.asyncio
     async def test_no_provider_configured_fails_closed(self, tmp_path):
@@ -772,7 +1026,7 @@ class TestInferenceServiceDispatch:
         out = await _svc_request(rt, svc["digest"], "r",
                                  {"messages": [{"role": "user", "content": "x"}]})
         assert out["ok"] is False
-        assert "no provider" in out["result"]["error"]
+        assert "not available" in out["error"]
 
     @pytest.mark.asyncio
     async def test_provider_exception_becomes_failed_request(self, tmp_path):
@@ -815,11 +1069,20 @@ class TestRegisterInferenceServiceWS:
 
         res = await self._register(rt, {
             "name": "cognition",
-            "inference": {"model": "qwen2.5:14b", "max_tokens_cap": 256},
+            "inference": {"provider": "ollama", "model": "qwen2.5:14b",
+                          "max_tokens_cap": 256, "max_input_chars": 8000},
             **base})
         assert res["ok"] is True
         assert res["result"]["spec"]["inference"] == {
-            "model": "qwen2.5:14b", "max_tokens_cap": 256}
+            "provider": "ollama", "model": "qwen2.5:14b",
+            "max_tokens_cap": 256, "max_input_chars": 8000}
+
+        # Without a named upstream provider there is nothing to sell.
+        unnamed = await self._register(rt, {
+            "name": "guess", "inference": {"model": "claude-sonnet-5"},
+            **base})
+        assert unnamed["ok"] is False
+        assert "inference.provider" in unnamed["error"]
 
         tool_backed = await self._register(
             rt, {"name": "tooly", "tool_digest": "deadbeef", **base})
@@ -839,7 +1102,8 @@ class TestRegisterInferenceServiceWS:
         res = await self._register(rt, {
             "name": "both", "description": "d", "input_schema": SCHEMA,
             "ask": ASK, "tool_digest": "deadbeef",
-            "inference": {"model": "m", "max_tokens_cap": 8}})
+            "inference": {"provider": "ollama", "model": "m",
+                          "max_tokens_cap": 8}})
         assert res["ok"] is False
         assert "mutually exclusive" in res["error"]
 

@@ -22,8 +22,9 @@ This script proves the whole rail on a real local deployment:
       -> provider-side gate verifies the payment on chain
       -> the canned completion round-trips back into a ProviderResponse
 
-The LLM seam is the ONE thing mocked: ``_resolve_sponsor_provider`` on the
-selling daemon returns a canned-response fake, so this needs no real model.
+The LLM seam is the ONE thing mocked: the selling daemon's provider manager
+builds a canned-response fake for the upstream provider its service names,
+so this needs no real model.
 Everything below it — chain, payment, gate, replay guard, websocket transport,
 provider resolution, key selection — is the production path.
 
@@ -398,9 +399,10 @@ async def register_local_agent(rt, agent_id: str,
 class CannedProvider:
     """The mocked LLM seam — the ONLY fake in this script.
 
-    Stands in for whatever provider the SELLING daemon would resolve out of
-    its own stack (`AutonetBridge._resolve_sponsor_provider`). Everything on
-    the buying side is real, so the child cannot tell this from a GPU.
+    Stands in for the upstream provider the SELLING daemon builds for its
+    service (`WebSocketBridge._inference_upstream`, through the provider
+    manager). Everything on the buying side is real, so the child cannot
+    tell this from a GPU.
     """
 
     def __init__(self) -> None:
@@ -569,8 +571,10 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         # Mock ONLY the LLM seam on the selling daemon. Everything the buyer
         # touches stays production code.
         canned = CannedProvider()
-        rt_seller.autonet._resolve_sponsor_provider = (
-            lambda cfg, model: canned)
+        real_resolve = rt_seller.providers.resolve_provider_with_fallback
+        rt_seller.providers.resolve_provider_with_fallback = (
+            lambda defn: canned if str(defn.id).startswith("service-")
+            else real_resolve(defn))
 
         ws_server = WebSocketBridge(rt_seller, host="127.0.0.1",
                                     port=SELLER_WS_PORT)
@@ -587,7 +591,8 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                                  "properties": {"messages": {"type": "array"}}},
                 "agent_id": "seller-1",
                 "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
-                "inference": {"model": "canned-model-1",
+                "inference": {"provider": "ollama",
+                              "model": "canned-model-1",
                               "max_tokens_cap": 512},
             },
             owner_session())

@@ -20,10 +20,10 @@ the provider's daemon — "a Service is a tool the OWNER chose to sell"
 dispatch goes through ``runtime.tool_store``.
 
 The second backing kind (decision 2026-07-26) is INFERENCE: the spec
-carries ``{"inference": {"model", "max_tokens_cap"}}`` and requests are
-served by the provider daemon's OWN provider stack (their GPU, their
-key). The two are mutually exclusive — a service has exactly one
-backing.
+carries ``{"inference": {"provider", "model", "max_tokens_cap",
+"max_input_chars"}}`` and requests are served by exactly that upstream
+provider of the provider daemon's OWN stack (their GPU, their key). The two
+are mutually exclusive — a service has exactly one backing.
 
 The substrate package (``nodes.*``) is imported lazily; on a standalone
 atn install registration fails loudly instead of degrading silently —
@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .service_spec import (
+    DEFAULT_MAX_INPUT_CHARS,
     DEFAULT_MAX_TOKENS_CAP,
     build_service_spec,
     canonical_service_bytes,
@@ -85,24 +86,35 @@ class ServiceRecord:
 
     @property
     def inference(self) -> dict[str, Any]:
-        """The declared inference backing (``{model, max_tokens_cap}``),
-        or ``{}`` when this service is tool-backed. Lives in the signed
-        spec, so it survives a store reload for free."""
+        """The declared inference backing (``{provider, model,
+        max_tokens_cap, max_input_chars}``), or ``{}`` when this service is
+        tool-backed. Lives in the signed spec, so it survives a store reload
+        for free."""
         block = self.spec.get("inference")
         return block if isinstance(block, dict) else {}
+
+    def _bound(self, key: str, default: int) -> int:
+        block = self.inference
+        if not block:
+            return 0
+        try:
+            value = int(block.get(key) or 0)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
 
     @property
     def max_tokens_cap(self) -> int:
         """Output-token ceiling for an inference-backed service (0 when
         not inference-backed)."""
-        block = self.inference
-        if not block:
-            return 0
-        try:
-            cap = int(block.get("max_tokens_cap") or 0)
-        except (TypeError, ValueError):
-            return DEFAULT_MAX_TOKENS_CAP
-        return cap if cap > 0 else DEFAULT_MAX_TOKENS_CAP
+        return self._bound("max_tokens_cap", DEFAULT_MAX_TOKENS_CAP)
+
+    @property
+    def max_input_chars(self) -> int:
+        """Input bound of an inference-backed service, in characters
+        (``service_spec.inference_input_chars``); 0 when not
+        inference-backed."""
+        return self._bound("max_input_chars", DEFAULT_MAX_INPUT_CHARS)
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -122,6 +134,7 @@ class ServiceStore:
         self._dir = Path(services_dir)
         self._registry_path = self._dir / "registry.jsonl"
         self._requests_path = self._dir / "requests.jsonl"
+        self._summary_path = self._dir / "requests_summary.json"
         # Payment-gate sidecars (Stage B). The seen-request-id set is the
         # direct-payment replay guard; the voucher ledger tracks the latest
         # accepted cumulative per channel (so the increment must exceed the
@@ -141,7 +154,7 @@ class ServiceStore:
         self.blob_fetcher: Any = None
         self._load()
         self._load_payment_state()
-        self._request_seq = self._count_requests()
+        self._load_summary()
 
     # ------------------------------------------------------------------
     # Registration
@@ -180,6 +193,10 @@ class ServiceStore:
                     "'inference' and 'backing_tool' are mutually exclusive"
                 )
             problems = validate_inference(inference)
+            if not problems:
+                problem = self._unknown_upstream(inference)
+                if problem:
+                    problems = [problem]
             if problems:
                 raise ValueError("invalid service spec: " + "; ".join(problems))
 
@@ -266,23 +283,38 @@ class ServiceStore:
     # ------------------------------------------------------------------
     # Request log (provider-side history; reviews ride on it later)
     # ------------------------------------------------------------------
+    #
+    # Only requests that passed the payment gate get a row, and a row names
+    # a client only as the payer the gate verified: the request's own
+    # `client` field is whatever the sender wrote. Attempts the gate refused
+    # (unpaid, a copied id, a bad voucher) are counted per service, never
+    # attributed, and never written row by row, so a stranger cannot grow
+    # the log or tank the success rate for free. The summary is kept as the
+    # rows go in (`requests_summary.json`); the row file rotates at
+    # REQUEST_LOG_MAX_BYTES, keeping one previous file.
+
+    REQUEST_LOG_MAX_BYTES = 4 * 1024 * 1024
+    # Refused attempts change only a counter: persisted at most this often.
+    REFUSED_PERSIST_INTERVAL = 10.0
 
     def record_request(
         self,
         spec_digest: str,
         request_id: str,
-        client: str,
+        payer: str,
         ok: bool,
         amount: str = "",
         token: str = "ATN",
     ) -> None:
-        """Append a provider-side request-log row. Local ledger first —
-        never lost to a substrate outage.
+        """Log one request the payment gate let through. Local ledger
+        first — never lost to a substrate outage.
 
-        ``token`` is a fixed "ATN" label kept on the row for shape
-        compatibility with historical logs — settlement is ATN-only
-        (ratified 2026-07-10), so the ask no longer names a token."""
+        ``payer`` is the address the gate verified as having paid, or ""
+        when nothing was paid (a free service, the no-chain dev degrade);
+        never the client the request names. ``token`` is a fixed "ATN"
+        label (settlement is ATN-only, ratified 2026-07-10)."""
         record = self._records.get(spec_digest)
+        payer = str(payer or "").strip().lower()
         self._request_seq += 1
         row = {
             "seq": self._request_seq,
@@ -291,40 +323,43 @@ class ServiceStore:
             "service_name": record.name if record else "",
             "service_author": record.author if record else "",
             "request_id": request_id,
-            "client": client,
-            "ok": ok,
+            "payer": payer,
+            "ok": bool(ok),
             "amount": amount,
             "token": token,
         }
+        entry = self._summary_entry(spec_digest)
+        entry["service_name"] = row["service_name"] or entry["service_name"]
+        entry["service_author"] = (row["service_author"]
+                                   or entry["service_author"])
+        entry["count"] += 1
+        if ok:
+            entry["ok_count"] += 1
+        if payer:
+            entry["clients"].add(payer)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._rotate_request_log()
         with self._requests_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
+        self._persist_summary()
+
+    def count_refused(self, spec_digest: str) -> None:
+        """Count a request refused before it was served (payment not
+        verified, or refused before the gate): no row, no client."""
+        if spec_digest not in self._records:
+            return
+        self._summary_entry(spec_digest)["refused"] += 1
+        if time.monotonic() - self._summary_saved >= self.REFUSED_PERSIST_INTERVAL:
+            self._persist_summary()
 
     def summary(self) -> dict[str, Any]:
-        """Per-service volume/success aggregated from the request log.
+        """Per-service volume/success of requests that passed the payment
+        gate, plus how many were refused, kept as requests are logged.
 
         This is the provider-side track record the spec's §4 reviews
         later ride on (success rate + volume, displayed not enforced)."""
-        services: dict[str, dict[str, Any]] = {}
-        for row in self._iter_requests():
-            digest = row.get("spec_digest", "")
-            entry = services.setdefault(digest, {
-                "service_name": row.get("service_name", ""),
-                "service_author": row.get("service_author", ""),
-                "count": 0, "ok_count": 0,
-                "clients": set(),
-            })
-            entry["service_name"] = row.get("service_name") or entry["service_name"]
-            entry["service_author"] = (row.get("service_author")
-                                       or entry["service_author"])
-            entry["count"] += 1
-            if row.get("ok"):
-                entry["ok_count"] += 1
-            client = row.get("client")
-            if client:
-                entry["clients"].add(client)
         out: dict[str, Any] = {}
-        for digest, entry in sorted(services.items()):
+        for digest, entry in sorted(self._summary.items()):
             count = entry["count"]
             ok_count = entry["ok_count"]
             out[digest] = {
@@ -334,28 +369,82 @@ class ServiceStore:
                 "ok_count": ok_count,
                 "success_rate": round(ok_count / count, 6) if count else 0.0,
                 "unique_clients": len(entry["clients"]),
+                "refused": entry["refused"],
             }
         return out
 
-    def _iter_requests(self):
-        if not self._requests_path.exists():
+    def _summary_entry(self, digest: str) -> dict[str, Any]:
+        entry = self._summary.get(digest)
+        if entry is None:
+            record = self._records.get(digest)
+            entry = self._summary[digest] = {
+                "service_name": record.name if record else "",
+                "service_author": record.author if record else "",
+                "count": 0, "ok_count": 0, "refused": 0, "clients": set(),
+            }
+        return entry
+
+    def _load_summary(self) -> None:
+        self._summary = {}
+        self._summary_saved = time.monotonic()
+        if not self._summary_path.exists():
             return
         try:
-            lines = self._requests_path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
-            log.warning("ServiceStore could not read requests: %s", exc)
+            data = json.loads(self._summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("ServiceStore could not read the request summary: %s",
+                        exc)
             return
-        for line in lines:
-            line = line.strip()
-            if not line:
+        if not isinstance(data, dict):
+            return
+        try:
+            self._request_seq = int(data.get("seq") or 0)
+        except (TypeError, ValueError):
+            self._request_seq = 0
+        for digest, raw in (data.get("services") or {}).items():
+            if not isinstance(raw, dict):
                 continue
             try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                log.warning("ServiceStore skipping corrupt request row")
+                self._summary[str(digest)] = {
+                    "service_name": str(raw.get("service_name") or ""),
+                    "service_author": str(raw.get("service_author") or ""),
+                    "count": int(raw.get("count") or 0),
+                    "ok_count": int(raw.get("ok_count") or 0),
+                    "refused": int(raw.get("refused") or 0),
+                    "clients": {str(c) for c in raw.get("clients") or []},
+                }
+            except (TypeError, ValueError):
+                log.warning("ServiceStore skipping a corrupt summary entry")
 
-    def _count_requests(self) -> int:
-        return sum(1 for _ in self._iter_requests())
+    def _persist_summary(self) -> None:
+        data = {
+            "seq": self._request_seq,
+            "services": {
+                digest: {**{k: v for k, v in entry.items() if k != "clients"},
+                         "clients": sorted(entry["clients"])}
+                for digest, entry in self._summary.items()
+            },
+        }
+        self._dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._summary_path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, self._summary_path)
+        self._summary_saved = time.monotonic()
+
+    def _rotate_request_log(self) -> None:
+        """Move the row file aside once it reaches REQUEST_LOG_MAX_BYTES
+        (one previous file is kept; the summary carries the totals)."""
+        try:
+            if self._requests_path.stat().st_size < self.REQUEST_LOG_MAX_BYTES:
+                return
+        except OSError:
+            return
+        try:
+            os.replace(self._requests_path,
+                       self._requests_path.with_name("requests.1.jsonl"))
+        except OSError as exc:
+            log.warning("ServiceStore could not rotate the request log: %s", exc)
 
     # ------------------------------------------------------------------
     # Payment gate state (Stage B) — replay guard + voucher ledger
@@ -476,6 +565,20 @@ class ServiceStore:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _unknown_upstream(self, inference: dict[str, Any]) -> str:
+        """Why this daemon cannot serve ``inference`` (its provider id is
+        not one the provider manager knows), or ""."""
+        manager = getattr(self._runtime, "providers", None)
+        check = getattr(manager, "routing_error", None)
+        if check is None:
+            return ""
+        try:
+            err = check(str(inference.get("provider") or "").strip(),
+                        str(inference.get("model") or "").strip())
+        except Exception:  # noqa: BLE001 - the serving path refuses instead
+            return ""
+        return f"inference: {err}" if err else ""
 
     def _signing_key(self, author: str) -> str:
         """The key that signs ``author``'s specs and registers them: the

@@ -1387,8 +1387,9 @@ _TOOLS: list[ToolDefinition] = [
             "onlyAgent gate rejects unregistered callers. A service needs ONE "
             "backing to actually fulfil requests: either 'backing_tool' (the "
             "digest of a registered tool you own) so incoming service_requests "
-            "dispatch to it, or 'inference' ({model, max_tokens_cap}) to sell "
-            "cognition off this daemon's own provider stack. "
+            "dispatch to it, or 'inference' ({provider, model, max_tokens_cap?, "
+            "max_input_chars?}) to sell cognition off one provider of this "
+            "daemon's own stack, named on purpose. "
             "The price lives on chain only, in the ServiceRegistry entry: "
             "change it with updateServiceAsk(service_id, ask_amount) or "
             "retire the service with retireService(service_id) through "
@@ -1416,13 +1417,17 @@ _TOOLS: list[ToolDefinition] = [
                     "type": "object",
                     "description": "The OTHER backing kind: sell cognition off "
                                    "this daemon's own provider stack instead of "
-                                   "a tool. {model, max_tokens_cap}. Mutually "
-                                   "exclusive with 'backing_tool' — a service "
-                                   "has exactly one backing.",
+                                   "a tool. {provider, model, max_tokens_cap?, "
+                                   "max_input_chars?}. Mutually exclusive with "
+                                   "'backing_tool': a service has exactly one "
+                                   "backing.",
                     "properties": {
-                        "model": {"type": "string", "description": "Model id served to buyers."},
-                        "max_tokens_cap": {"type": "integer", "description": "Ceiling clamped onto every request."},
+                        "provider": {"type": "string", "description": "The upstream provider id of this daemon that serves every request (e.g. 'ollama', 'anthropic'). Required, never inferred from the model."},
+                        "model": {"type": "string", "description": "Model id served to buyers. Required."},
+                        "max_tokens_cap": {"type": "integer", "description": "Output-token ceiling clamped onto every request (default 4096)."},
+                        "max_input_chars": {"type": "integer", "description": "Largest request accepted: characters of its messages (compact JSON) plus its system prompt (default 64000). A larger request is refused before its payment is taken."},
                     },
+                    "required": ["provider", "model"],
                     "additionalProperties": False,
                 },
                 "output_schema": {

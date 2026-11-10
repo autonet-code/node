@@ -1977,8 +1977,11 @@ class WebSocketBridge:
             backing_tool = (msg.get("backing_tool")
                             or msg.get("tool_digest") or "")
             # The other backing kind (decision 2026-07-26): sell cognition
-            # off this daemon's own provider stack. {model, max_tokens_cap};
-            # the store refuses it alongside a backing_tool.
+            # off this daemon's own provider stack. {provider, model,
+            # max_tokens_cap?, max_input_chars?}: the upstream provider and
+            # model are named, never inferred. The store refuses a block
+            # without them, one naming a provider this daemon does not
+            # know, and one alongside a backing_tool.
             inference = msg.get("inference")
             if not isinstance(inference, dict):
                 inference = None
@@ -2047,8 +2050,9 @@ class WebSocketBridge:
                     "endpoint_hint": s.get("endpoint_hint", ""),
                     "image_uri": s.get("image_uri", ""),
                     "backing_tool": record.backing_tool,
-                    # {} for a tool-backed service; {model, max_tokens_cap}
-                    # when the daemon sells its own inference.
+                    # {} for a tool-backed service; {provider, model,
+                    # max_tokens_cap, max_input_chars} when the daemon sells
+                    # its own inference.
                     "inference": record.inference,
                     "retired": record.retired,
                     "version_of": s.get("version_of"),
@@ -2238,7 +2242,8 @@ class WebSocketBridge:
         # unknowable), so the honest thing to show a buyer is what the
         # chain already proves about the counterparty: what they have been
         # PAID, what they have authored, and how long they have existed.
-        # None of it is self-reported.
+        # Costly to inflate, not impossible: a provider can pay itself
+        # through payForService, losing the fee on every payment.
         if msg_type == "provider_record":
             addresses = msg.get("addresses")
             if isinstance(addresses, str):
@@ -4309,70 +4314,156 @@ class WebSocketBridge:
         instead by this daemon's OWN provider stack (decision 2026-07-26)
         — no backing tool required or consulted. See
         ``_serve_inference_request``.
+
+        Every reply about one of this daemon's services is signed
+        (``receipt_sig``, ``service_client.sign_reply``) with the key that
+        registered the service, the address the buyer paid: the buyer takes
+        nothing a relay or a wss impostor says as served.
         """
+        reply = await self._service_request_reply(msg, msg_id, local=local)
+        return self._sign_service_reply(msg, reply)
+
+    def _sign_service_reply(self, msg: dict[str, Any],
+                            reply: dict[str, Any]) -> dict[str, Any]:
+        """``reply`` signed by the service's provider address, or unchanged
+        when the digest is not ours or no key is held for its author (the
+        buyer then treats it as not served)."""
+        from . import service_client
+
+        digest = str(msg.get("spec_digest") or "")
+        request_id = str(msg.get("request_id") or "")
+        record = self.runtime.service_store.get(digest) if digest else None
+        if record is None or not request_id:
+            return reply
+        key = self._service_signing_key(record.author)
+        if not key:
+            return reply
+        try:
+            return service_client.sign_reply(key, request_id, digest, reply)
+        except Exception as exc:                            # noqa: BLE001
+            log.warning("could not sign the reply for %s: %s",
+                        request_id[:18], exc)
+            return reply
+
+    def _verified_payer(self, msg: dict[str, Any], record: Any,
+                        gate: dict[str, Any]) -> str:
+        """The address that paid for this request, as the payment gate
+        verified it, or "" when nothing was paid (a free service, the
+        no-chain dev degrade). The request's own ``client`` field is never
+        used: anyone can write any address there."""
+        if gate.get("payer"):
+            return str(gate["payer"])
+        try:
+            if int(gate.get("ask_amount") or 0) <= 0:
+                return ""
+        except (TypeError, ValueError):
+            return ""
+        # The gate passed a paid request only if its payer_signature
+        # recovers to the payer (the payment's sender, or the channel's
+        # client) under the service's provider address, the one
+        # `_chain_service` holds the registry entry to.
+        provider = self._service_provider_address(record.author)
+        sig = str(msg.get("payer_signature") or "").strip()
+        if not provider or not sig:
+            return ""
+        from .service_client import recover_request_signer
+        args = msg.get("args") if isinstance(msg.get("args"), dict) else {}
+        try:
+            return str(recover_request_signer(
+                sig, str(msg.get("request_id") or ""),
+                str(msg.get("spec_digest") or record.digest), args, provider))
+        except Exception:                                   # noqa: BLE001
+            return ""
+
+    async def _service_request_reply(
+        self, msg: dict[str, Any], msg_id: Any, *, local: bool = False
+    ) -> dict[str, Any]:
+        """The unsigned reply to a ``service_request`` (see
+        ``_handle_service_request``).
+
+        Everything a request can be refused for without its payment is
+        checked BEFORE the payment gate (unknown or retired service, no
+        backing, malformed or oversized inference input, an upstream model
+        provider this daemon cannot build), so a refused request leaves its
+        payment unspent: the buyer can send it again, fixed, under the same
+        request id. Attempts the gate refuses are counted on the provider's
+        log but not attributed to anyone."""
         spec_digest = msg.get("spec_digest", "")
         request_id = msg.get("request_id", "")
-        args = msg.get("args") or {}
-        client = msg.get("client", "") or msg.get("client_address", "")
+        args = msg.get("args")
+        if args is None:
+            args = {}
         if not spec_digest or not request_id:
             return {"msg_id": msg_id, "ok": False,
                     "error": "Missing 'spec_digest' or 'request_id' field"}
 
-        record = self.runtime.service_store.get(spec_digest)
+        store = self.runtime.service_store
+        record = store.get(spec_digest)
         if record is None:
             return {"msg_id": msg_id, "ok": False,
                     "error": f"Unknown service digest: {spec_digest[:16]}"}
         if record.retired:
+            store.count_refused(spec_digest)
             return {"msg_id": msg_id, "ok": False, "error": "Service retired"}
+        if not isinstance(args, dict):
+            store.count_refused(spec_digest)
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "'args' must be an object"}
+
+        upstream: Any = None
+        tool_record: Any = None
+        if record.inference:
+            problem = self._inference_request_problem(record, args)
+            if problem is None:
+                upstream = self._inference_upstream(record)
+                if isinstance(upstream, str):
+                    problem = upstream
+            if problem is not None:
+                store.count_refused(spec_digest)
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"{problem}; the payment was not taken"}
+        else:
+            backing = record.backing_tool
+            if not backing:
+                store.count_refused(spec_digest)
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Service has no backing implementation"}
+            tool_record = self.runtime.tool_store.get(backing)
+            if tool_record is None:
+                tool_record = self.runtime.tool_store.resolve(backing)
+            if tool_record is None:
+                store.count_refused(spec_digest)
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Backing tool {backing[:16]} not found"}
 
         # Payment/voucher validation gate (Stage B — real on-chain verify).
         gate = await self._validate_service_payment(msg, record, local=local)
         amount = str(gate.get("ask_amount", ""))
         if not gate.get("ok"):
-            self.runtime.service_store.record_request(
-                spec_digest, request_id, client, ok=False,
-                amount=amount)
+            store.count_refused(spec_digest)
             return {"msg_id": msg_id, "ok": False,
                     "error": f"Payment validation failed: "
                              f"{gate.get('reason', 'unknown')}"}
+        payer = self._verified_payer(msg, record, gate)
 
         # Inference-backed: the work item is a chat completion served off
         # this daemon's provider stack. Payment already cleared above —
         # the gate is backing-agnostic on purpose.
         if record.inference:
-            result = await self._serve_inference_request(record, args)
+            result = await self._serve_inference_request(
+                record, args, upstream)
             ok = "error" not in result
-            self.runtime.service_store.record_request(
-                spec_digest, request_id, client, ok=ok,
-                amount=amount)
+            store.record_request(spec_digest, request_id, payer, ok=ok,
+                                 amount=amount)
             return {"msg_id": msg_id, "ok": ok,
                     "result": {"request_id": request_id, **result}}
-
-        backing = record.backing_tool
-        if not backing:
-            self.runtime.service_store.record_request(
-                spec_digest, request_id, client, ok=False,
-                amount=amount)
-            return {"msg_id": msg_id, "ok": False,
-                    "error": "Service has no backing implementation"}
-
-        tool_record = self.runtime.tool_store.get(backing)
-        if tool_record is None:
-            tool_record = self.runtime.tool_store.resolve(backing)
-        if tool_record is None:
-            self.runtime.service_store.record_request(
-                spec_digest, request_id, client, ok=False,
-                amount=amount)
-            return {"msg_id": msg_id, "ok": False,
-                    "error": f"Backing tool {backing[:16]} not found"}
 
         # Owner-sanctioned dispatch: selling a tool IS the owner's choice.
         result = await self.runtime.tool_store.call(
             tool_record, args, caller_id=None)
         ok = "error" not in result
-        self.runtime.service_store.record_request(
-            spec_digest, request_id, client, ok=ok,
-            amount=amount)
+        store.record_request(spec_digest, request_id, payer, ok=ok,
+                             amount=amount)
         if not ok:
             return {"msg_id": msg_id, "ok": False,
                     "result": {"request_id": request_id, **result}}
@@ -4972,31 +5063,82 @@ class WebSocketBridge:
             "output": output,
         }}
 
+    @staticmethod
+    def _inference_request_problem(record: Any,
+                                   args: dict[str, Any]) -> str | None:
+        """Why an inference work item cannot be served as sent, or None.
+        Checked before the payment gate."""
+        from .service_spec import inference_input_chars
+
+        messages = args.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return ("inference service requires a non-empty 'messages' list "
+                    "in args")
+        system = args.get("system")
+        if system is not None and not isinstance(system, str):
+            return "'system' must be a string"
+        size = inference_input_chars(messages, system or "")
+        limit = record.max_input_chars
+        if size > limit:
+            return (f"request too large: its messages and system come to "
+                    f"{size} characters, and this service takes at most "
+                    f"{limit} (inference.max_input_chars)")
+        return None
+
+    def _inference_upstream(self, record: Any) -> Any:
+        """The model provider this service is served on: exactly the one
+        its spec names (``inference.provider``, with ``inference.model``),
+        built by the daemon's provider manager. Nothing is inferred from the
+        model's name and nothing falls back (no default provider, decision
+        2026-10-06). Returns the provider, or a string saying why it cannot
+        be built."""
+        block = record.inference
+        name = str(block.get("provider") or "").strip()
+        model = str(block.get("model") or "").strip()
+        if not name or not model:
+            return ("this service's spec names no upstream provider and model "
+                    "(inference.provider, inference.model)")
+        manager = getattr(self.runtime, "providers", None)
+        if manager is None:
+            return "this daemon has no provider stack wired"
+        from .models import AgentDefinition, AgentMode
+        defn = AgentDefinition(
+            id=f"service-{record.digest[:12]}", name="service",
+            mode=AgentMode.COGNITIVE, provider=name, cognitive_model=model,
+            tools=[])
+        try:
+            provider = manager.resolve_provider_with_fallback(defn)
+        except Exception as exc:                            # noqa: BLE001
+            log.warning("inference service %s: provider %r unavailable: %s",
+                        record.digest[:16], name, exc)
+            return f"upstream provider {name!r} is not available here: {exc}"
+        if provider is None:
+            return f"upstream provider {name!r} is not available here"
+        return provider
+
     async def _serve_inference_request(
-        self, record: Any, args: dict[str, Any]
+        self, record: Any, args: dict[str, Any], provider: Any = None,
     ) -> dict[str, Any]:
         """Serve a paid work item off this daemon's own provider stack.
 
         Decision 2026-07-26 (docs/services_market.md): a service may
         declare an inference backing instead of a backing tool. The work
-        item is ``{messages, max_tokens?}``; the reply is
-        ``{content, model, usage}``.
+        item is ``{messages, max_tokens?, system?, temperature?}``; the
+        reply is ``{content, model, usage}``.
 
-        This is the SAME fulfillment machinery the sponsor rail uses to
-        serve a dependent's inference over p2p — ``AutonetBridge.
-        _resolve_sponsor_provider`` picks the provider (runtime provider
-        manager first, direct-from-credentials fallback) and we call
-        ``provider.send`` with the same frame ``providers/rpb.py`` puts
-        on the wire. The difference is only the authorization basis:
-        the sponsor rail asks "is this a bound dependent with grant
-        left?", this rail asks "did they pay?" — and the payment gate
-        already answered that before we got here. No budget metering:
-        the ask is the price and the token cap is the ceiling.
+        The upstream is the provider the spec names, with the model it
+        names (``_inference_upstream``); ``provider`` is that one, already
+        built before the payment gate ran. No budget metering: the ask is
+        the price, the token cap and the input bound are the ceiling.
         """
+        problem = self._inference_request_problem(record, args)
+        if problem is not None:
+            return {"error": problem}
+        if provider is None:
+            provider = self._inference_upstream(record)
+            if isinstance(provider, str):
+                return {"error": provider}
         messages = args.get("messages")
-        if not isinstance(messages, list) or not messages:
-            return {"error": "inference service requires a non-empty "
-                             "'messages' list in args"}
 
         cap = record.max_tokens_cap
         requested = args.get("max_tokens")
@@ -5008,26 +5150,18 @@ class WebSocketBridge:
         # asking for more than they paid for doesn't get it.
         max_tokens = max(1, min(max_tokens, cap))
 
-        model = str(record.inference.get("model") or "")
-        autonet = getattr(self.runtime, "autonet", None)
-        if autonet is None:
-            return {"error": "daemon has no provider stack wired"}
+        model = str(record.inference.get("model") or "").strip()
         try:
-            provider = autonet._resolve_sponsor_provider(autonet.config, model)
-        except Exception as exc:                            # noqa: BLE001
-            log.warning("inference service provider resolution failed: %s", exc)
-            return {"error": f"provider resolution failed: {exc}"}
-        if provider is None:
-            return {"error": f"no provider configured for model {model or 'default'}"}
-
+            temperature = float(args.get("temperature") or 0.0)
+        except (TypeError, ValueError):
+            temperature = 0.0
         try:
             resp = await provider.send(
                 messages=messages,
                 system=str(args.get("system") or ""),
-                # Empty model => the provider's own default resolution.
                 model=model,
                 max_tokens=max_tokens,
-                temperature=float(args.get("temperature") or 0.0),
+                temperature=temperature,
             )
         except Exception as exc:                            # noqa: BLE001
             log.warning("inference service dispatch failed: %s", exc)

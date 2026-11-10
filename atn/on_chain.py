@@ -1332,9 +1332,10 @@ class OnChainService:
                                 serving for a year is a different
                                 counterparty from one minted this morning.
 
-        None of these can be self-reported: they are consequences of other
-        people's payments. That is the whole point — this is a track
-        record, not a rating.
+        They are consequences of payments, which makes them costly to
+        inflate rather than impossible: a provider can pay itself through
+        ``payForService`` and lose the service fee on every payment. This
+        is a track record, not a rating.
         """
         try:
             w3 = self._get_web3()
