@@ -344,3 +344,53 @@ def test_service_market_client_resolves_addresses():
         registry_address="0xLEGACY", rpc_url="https://rpc.test")
     smc_legacy = oc.ServiceMarketClient(conf_legacy)
     assert smc_legacy._service_registry_address() == "0xLEGACY"
+
+
+# ---------------------------------------------------------------------------
+# 4. A write whose estimate reverts is never sent
+# ---------------------------------------------------------------------------
+
+def test_write_whose_estimate_reverts_is_not_sent(monkeypatch):
+    """closeChannel on a channel past its window reverts: the estimate
+    says so, and the client returns the revert reason instead of sending a
+    transaction that burns gas, without taking a nonce."""
+    from web3.exceptions import ContractCustomError
+
+    selector = "0x" + keccak(text="ChannelNotOpen()")[:4].hex()
+    sent, nonces = [], []
+
+    class _Func:
+        def estimate_gas(self, tx):
+            raise ContractCustomError(selector, data=selector)
+
+        def build_transaction(self, tx):
+            raise AssertionError("built a transaction that would revert")
+
+    class _Fns:
+        def closeChannel(self, *a):
+            return _Func()
+
+    class _Eth:
+        chain_id = _CHAIN_ID
+
+        def send_raw_transaction(self, raw):
+            sent.append(raw)
+
+    w3 = type("W3", (), {"eth": _Eth()})()
+    smc = oc.ServiceMarketClient(cfg.RPBConfig(
+        rpc_url="http://x", payment_channel_address=_CHANNEL_ADDR,
+        chain_id=_CHAIN_ID))
+    monkeypatch.setattr(smc, "_get_web3", lambda: w3)
+    monkeypatch.setattr(smc, "_channel_contract",
+                        lambda w3=None: type("C", (), {"functions": _Fns()})())
+    monkeypatch.setattr(oc, "next_nonce", lambda w3, addr: nonces.append(addr) or 0)
+    out = asyncio.run(smc.close_channel("0x" + "11" * 32, 1, 10, "0x" + "22" * 65))
+    assert out["success"] is False and out["reverted"] is True
+    assert "ChannelNotOpen" in out["error"]
+    assert sent == [] and nonces == []
+
+
+def test_revert_reason_falls_back_to_the_node_message():
+    from web3.exceptions import ContractLogicError
+    exc = ContractLogicError("execution reverted: substrate=0")
+    assert oc.revert_reason(exc) == "execution reverted: substrate=0"

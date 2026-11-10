@@ -1714,6 +1714,43 @@ class OnChainService:
 # ServiceMarket client (ServiceRegistry + PaymentChannel)
 # ---------------------------------------------------------------------------
 
+# The custom errors ServiceMarket.sol reverts with (its ABI here carries none,
+# so web3 reports only the 4-byte selector). Named for the revert reason.
+_SERVICE_MARKET_ERRORS = (
+    "NotRegisteredAgent()", "SpecDigestRequired()", "NoSuchService()",
+    "NotServiceProvider()", "ServiceNotActive()", "ProviderRequired()",
+    "ZeroDeposit()", "ChannelNotOpen()", "ChannelNotClosing()",
+    "NotProvider()", "NotClient()", "BadVoucherSignature()",
+    "WindowNotElapsed()", "DepositTransferFailed()", "NotGovernor()",
+    "ZeroWindow()",
+)
+_error_names: dict[str, str] = {}
+
+
+class WouldRevert(Exception):
+    """Gas estimation says the transaction fails: it was not sent."""
+
+
+def revert_reason(exc: BaseException) -> str:
+    """A readable reason for a failed estimate or call: the custom error's
+    name when its selector is a known ServiceMarket error, else the node's
+    message."""
+    if not _error_names:
+        try:
+            from eth_utils import keccak
+            for sig in _SERVICE_MARKET_ERRORS:
+                _error_names["0x" + keccak(text=sig)[:4].hex()] = sig[:-2]
+        except Exception:  # noqa: BLE001 (no eth_utils: raw messages only)
+            pass
+    candidates = [getattr(exc, "data", None), *getattr(exc, "args", ())]
+    for item in candidates:
+        text = str(item or "")
+        for selector, name in _error_names.items():
+            if selector in text.lower():
+                return name
+    message = getattr(exc, "message", None) or str(exc)
+    return str(message) or exc.__class__.__name__
+
 
 @_off_the_loop
 class ServiceMarketClient:
@@ -1813,14 +1850,17 @@ class ServiceMarketClient:
         """Estimate gas (×1.2, floored), build/sign/send, wait for receipt.
 
         Shared write path — mirrors OnChainService's per-method inline
-        pattern. Returns (receipt, tx_hash_hex).
+        pattern. Returns (receipt, tx_hash_hex). A transaction whose
+        estimate fails is never sent (it would only burn gas on a revert):
+        raises ``WouldRevert`` with the reason. The nonce is taken after
+        the estimate, so a write that is not sent leaves no gap.
         """
-        nonce = next_nonce(w3, account.address)
         try:
             estimated = func.estimate_gas({"from": account.address})
-            gas_limit = max(int(estimated * 12 // 10), gas_floor)
-        except Exception:
-            gas_limit = gas_floor * 2
+        except Exception as exc:  # noqa: BLE001 (a revert or a failed read)
+            raise WouldRevert(revert_reason(exc)) from exc
+        gas_limit = max(int(estimated * 12 // 10), gas_floor)
+        nonce = next_nonce(w3, account.address)
         tx = func.build_transaction({
             "from": account.address,
             "nonce": nonce,
@@ -1879,6 +1919,9 @@ class ServiceMarketClient:
             except Exception:
                 log.debug("register_service: event decode failed", exc_info=True)
             return {"success": True, "tx_hash": tx_hex, "service_id": service_id}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
@@ -1907,6 +1950,9 @@ class ServiceMarketClient:
                 return {"success": True, "tx_hash": tx_hex}
             return {"success": False, "error": "Transaction reverted",
                     "tx_hash": tx_hex}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
@@ -1933,6 +1979,9 @@ class ServiceMarketClient:
                 return {"success": True, "tx_hash": tx_hex}
             return {"success": False, "error": "Transaction reverted",
                     "tx_hash": tx_hex}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
@@ -2029,6 +2078,9 @@ class ServiceMarketClient:
                 return {"success": True, "tx_hash": tx_hex}
             return {"success": False, "error": "Transaction reverted",
                     "tx_hash": tx_hex}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
@@ -2101,6 +2153,9 @@ class ServiceMarketClient:
             return {"success": True, "tx_hash": tx_hex,
                     "channel_id": channel_id,
                     "approve_tx_hash": approve_tx_hash}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
@@ -2248,6 +2303,9 @@ class ServiceMarketClient:
                 return {"success": True, "tx_hash": tx_hex}
             return {"success": False, "error": "Transaction reverted",
                     "tx_hash": tx_hex}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
@@ -2276,6 +2334,9 @@ class ServiceMarketClient:
                 return {"success": True, "tx_hash": tx_hex}
             return {"success": False, "error": "Transaction reverted",
                     "tx_hash": tx_hex}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
@@ -2307,6 +2368,9 @@ class ServiceMarketClient:
                 return {"success": True, "tx_hash": tx_hex}
             return {"success": False, "error": "Transaction reverted",
                     "tx_hash": tx_hex}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
