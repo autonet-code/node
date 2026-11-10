@@ -60,6 +60,14 @@ registered in the packaged jurisdiction keeps it. It:
   from Hugging Face or from peers that hold it, into `<data_dir>/models`;
   search is keyword-only until it loads. WS: `search_model_status`, event
   `search.model_status`;
+- keeps the jurisdiction's service catalog (`atn/service_catalog.py`,
+  Decision 2026-11-10 in `services_market.md`): every registered
+  service, followed from the ServiceRegistry (price, active flag and
+  payee come only from there) with its spec, which providers gossip whole
+  on `/autonet/services/<jurisdiction>` and which is kept only when the
+  chain names its digest under the spec's signer. Services are searched
+  like tools, locally, for the app and the agents; Firestore is not read
+  for them;
 - keeps working when the chain is silent; only settlement waits.
 - prunes the tools the close lists (Decision 2026-11-10: an uncleared
   malware verdict, a tool built on one, a registration the close refused
@@ -151,7 +159,7 @@ also approves the one kind of adoption an agent can't do alone: a tool that repl
 remotely. Agents don't need it.
 
 **Relay (`atn relay`).** A networking-only node: seed, gossip and blob
-relay, a short log of event batches for catch-up, the state blobs each
+relay (world events and service specs), a short log of event batches for catch-up, the state blobs each
 anchor commits (daemons offer them after every close), reach checks. No close, chain or agents. Seeds are listed in the
 DAO Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 

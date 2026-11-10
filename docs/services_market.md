@@ -45,6 +45,42 @@ Master-disable / fingerprinting is fleet hygiene for honest daemons,
 not a defense against dishonest ones. The defense is that lying has a
 wallet attached and receipts are forever.
 
+## Decision (2026-11-10): services are published and found the way tools are
+
+Every daemon knows the jurisdiction's services the way it knows its tools,
+and serves them to the app and its agents itself; nothing reads Firestore
+for them (the indexer's `services` mirror is unused).
+
+- **Gossip.** A spec has no code, so it travels whole: the provider's
+  daemon announces each registered spec on
+  `/autonet/services/<jurisdiction>` (`nodes/common/event_gossip.py`
+  `topic_for_services`) as soon as the chain numbers it, and again every
+  30 minutes. The topic is not consensus (services earn no mint, so
+  nothing enters the epoch-close). Relays subscribe to it, so specs cross
+  daemons that reach each other only through a relay.
+- **The chain admits.** Each daemon's catalog (`atn/service_catalog.py`)
+  follows the `ServiceRegistry`: one enumeration on the first sync, then
+  every minute the entries numbered past the last known and the
+  `ServiceAskUpdated` / `ServiceRetired` logs in 1000-block chunks (every
+  known entry is read again when an RPC refuses logs). A gossiped spec is
+  kept only when an entry names its digest, so spam costs gas and a
+  registered address; accepting one costs no chain read.
+- **Genuine entries.** Anyone can register a copy of a public spec under
+  another address and price. An entry counts only when its provider is
+  the spec's signer: specs are signed with, and name as `author_pubkey`,
+  the key that registers them (the operator's for the owner surface and
+  external agents).
+- **Missed specs.** An active entry whose spec no announcement brought is
+  fetched by digest from any daemon holding it, retried with a doubling
+  backoff (60 s up to an hour). The tool manifests' fetch got the same
+  retry, plus a re-queue from the anchored registrations.
+- **Search.** `find_services` (agents) and `market_services` (app) rank
+  the catalog with the tools' search (BM25 over name, description and
+  input-schema property names, fused with the local model), instead of
+  reading every registry entry and fetching every spec per search.
+  `lookup_service_ask` and the owner's purchase find the entry through the
+  catalog and read it fresh from the chain.
+
 ## Decision (2026-11-10): the chain is the only reference for price, status and payee
 
 A service's price, whether it is active and the address paid are read
@@ -265,9 +301,9 @@ factory + N deployments + growing audit surface. Instead:
 - `ServiceRegistry` (or folded into Substrate.sol as the Service
   primitive reborn): `registerService(specDigest, askAmount)`,
   `updateServiceAsk`, `retireService`. Asks are ATN-denominated (no
-  token field). Events → indexer → Firestore `services` collection
-  (chain = truth, blob = storage, Firestore = web2 cache; exact same
-  doctrine as agents/tools).
+  token field). Every daemon follows these entries in its own catalog
+  and gets the specs over gossip (Decision 2026-11-10, above); the
+  indexer's Firestore `services` mirror is not read.
 - Settlement: **the prepaid payment channel, ONLY** (ratified
   2026-07-04, late: the postpaid escrow was DELETED, not deferred),
   and **ATN-only** (ratified 2026-07-10, see below).
@@ -433,7 +469,8 @@ history; no on-chain math beyond settlement.
 
 ### 5. Marketplace surface
 
-- Web app: new Services screen, offering browse (Firestore-backed storefront),
+- Web app: new Services screen, offering browse (the daemon's catalog,
+  `market_services`),
   spec inspection, purchase flow (wallet), and (once §4 is built) review
   history; today the trust strip shows the provider record plus the
   provider-local success rate. The
