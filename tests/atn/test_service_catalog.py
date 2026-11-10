@@ -418,3 +418,26 @@ def test_hardware_and_unit_match_by_keyword():
     for sid, sp in ((1, gpu), (2, plain)):
         cat.accept_announcement(announcement(sp, sid))
     assert [r["service_id"] for r in cat.search("rtx 5090")] == [1]
+
+    def test_rows_carry_the_rating_of_their_provider_and_digest(self):
+        """Service reviews (Decision 2026-11-10): the latest close's rating,
+        looked up by (provider, digest), so a copy never shares one."""
+        cat = _catalog()
+        spec = _spec("transcribe_audio", "speech to text")
+        cat._entries[1] = _entry(1, spec, ADDR_A)
+        cat.accept_announcement(announcement(spec, 1))
+        assert cat.search("")[0]["rating"] is None
+        asked = []
+
+        def lookup(provider, digest):
+            asked.append((provider, digest))
+            return {"payers": 2, "correctness": 0.5} if provider == ADDR_A else None
+        cat.rating_provider = lookup
+        row = cat.search("transcribe")[0]
+        assert row["rating"] == {"payers": 2, "correctness": 0.5}
+        assert asked[-1] == (ADDR_A, spec_digest(spec))
+
+        def broken(provider, digest):
+            raise RuntimeError("no driver")
+        cat.rating_provider = broken
+        assert cat.search("")[0]["rating"] is None

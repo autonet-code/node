@@ -30,7 +30,9 @@ spec is not here yet is not listed until the spec arrives.
 Search is the tools' ranking (``atn/tool_search.py``): BM25 over the name,
 description and input-schema property names, fused with semantic
 similarity from the local search model; keyword only until the model is
-loaded. Order is relevance only; price and provider come back as metadata.
+loaded. Order is relevance only; price and provider come back as metadata,
+and so does ``rating``: the service's paid reviews as of the latest close
+(``rating_provider``, the close driver's lookup by provider and digest).
 
 All of it is daemon-local state (``<data_dir>/services/catalog.json`` and
 ``<data_dir>/search/service_vectors.jsonl``): never anchored, never read by
@@ -124,6 +126,10 @@ class ServiceCatalog:
         self._last_block: Optional[int] = None
         self._fetch_lease: dict[str, tuple[int, float]] = {}
         self._index = index
+        # (provider, digest) -> the service's rating as of the latest close,
+        # or None (service reviews, Decision 2026-11-10). Set by the daemon
+        # to the close driver's lookup; search rows carry it as ``rating``.
+        self.rating_provider: Optional[Any] = None
         self._load()
         if self._index is None:
             from .tool_search import ToolSearchIndex
@@ -395,7 +401,7 @@ class ServiceCatalog:
         if not q:
             ordered = sorted(entries, key=lambda e: -int(e["service_id"]))
             return self._with_context(
-                [self._row(e, specs, own) for e in ordered[:limit]])
+                [self._rated(self._row(e, specs, own)) for e in ordered[:limit]])
         by_digest: dict[str, list[dict[str, Any]]] = {}
         for e in entries:
             by_digest.setdefault(_norm(e.get("spec_digest")), []).append(e)
@@ -405,7 +411,7 @@ class ServiceCatalog:
         for hit in ranked:
             for e in sorted(by_digest.get(hit["digest"], []),
                             key=lambda e: -int(e["service_id"])):
-                row = self._row(e, specs, own)
+                row = self._rated(self._row(e, specs, own))
                 row["score"] = hit["score"]
                 rows.append(row)
                 if len(rows) >= limit:
@@ -425,6 +431,20 @@ class ServiceCatalog:
             row["provider_household"] = seen[p].get("household", "")
             row["sanction"] = seen[p].get("sanction")
         return rows
+
+    def _rated(self, row: dict[str, Any]) -> dict[str, Any]:
+        """``row`` with ``rating``: its buyers' reviews as of the latest
+        close, keyed by (provider, digest) so a copy under another address
+        never shows this one's; None when no payer's review counts."""
+        rating = None
+        lookup = self.rating_provider
+        if lookup is not None:
+            try:
+                rating = lookup(str(row.get("provider") or ""), str(row.get("digest") or ""))
+            except Exception:  # noqa: BLE001 (a rating never fails a search)
+                log.debug("service rating lookup failed", exc_info=True)
+        row["rating"] = rating if isinstance(rating, dict) else None
+        return row
 
     @staticmethod
     def _row(entry: dict[str, Any], specs: dict[str, dict[str, Any]],

@@ -1394,6 +1394,13 @@ class AutonetBridge:
                 drv = getattr(_svc, "_federated_close_driver", None)
                 return drv.tool_rating(digest) if drv is not None else None
             tool_store.rating_provider = _rating
+            # Service reviews (Decision 2026-11-10): a payer's signed review
+            # rides the open epoch's batch, for this jurisdiction.
+            receipts = getattr(self._runtime, "service_receipts", None)
+            if receipts is not None:
+                receipts.attach(
+                    str(library.rpb_address),
+                    lambda event, _lib=library: _lib.submit_events([event]))
             # Sanctioned authors (docs/accountability.md): agents may not
             # propose adopting their tools.
             tool_store.sanction_check = lambda addr: self.sanctions.check(addr)
@@ -1439,6 +1446,13 @@ class AutonetBridge:
             return
         catalog = sc.catalog_for(runtime)
         service_client.set_catalog(catalog)
+
+        # Search shows each service's rating as of the latest close
+        # (service reviews, Decision 2026-11-10).
+        def _service_rating(provider: str, digest: str, _svc=self._service):
+            drv = getattr(_svc, "_federated_close_driver", None)
+            return drv.service_rating(provider, digest) if drv is not None else None
+        catalog.rating_provider = _service_rating
         topic = sc.topic_for(jurisdiction_key)
         host = self._p2p_host
         if host is not None:
