@@ -4499,6 +4499,10 @@ class WebSocketBridge:
                              amount=amount if charged else "0")
         # A direct payment is on chain already, whatever the dispatch did.
         reply["charged"] = charged
+        # The receipt names the payer the gate verified and what it was
+        # charged (signed with the rest, _sign_service_reply).
+        reply["payer"] = payer
+        reply["amount"] = amount if charged and amount.isdigit() else "0"
         return reply
 
     async def _dispatch_service(

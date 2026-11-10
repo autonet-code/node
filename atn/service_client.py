@@ -90,69 +90,81 @@ def recover_request_signer(signature: str, request_id: str, spec_digest: str,
 # address the buyer paid, the service's on-chain provider. A relay, or
 # whoever answers a wss URL, can drop a request but cannot make up its
 # answer: a reply the buyer cannot verify is not treated as served.
-REPLY_AUTH_DOMAIN = "autonet:service_reply:v1"
+#
+# The signature is a receipt (nodes/common/service_reviews.py): it covers
+# the request id, the spec digest, the provider, the payer the gate
+# verified, ``ok``, ``charged``, the amount charged and the sha256 of the
+# canonical result and error, never the result itself. So a buyer can prove
+# what it paid for in a review without revealing what it got.
 
 
-def _reply_body(reply: dict[str, Any]) -> bytes:
-    # ``charged`` (whether the provider kept the payment) is signed too, so
-    # no relay can change what the buyer's channel book records.
-    charged = reply.get("charged")
-    body = {"ok": bool(reply.get("ok")), "result": reply.get("result"),
-            "error": reply.get("error"),
-            "charged": charged if isinstance(charged, bool) else None}
-    return json.dumps(body, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=True).encode("utf-8")
+def _reply_receipt(reply: dict[str, Any], request_id: str, spec_digest: str,
+                   provider: str) -> dict[str, Any]:
+    """The receipt fields a reply's signature covers (no signature)."""
+    from nodes.common import service_reviews as sr
+
+    try:
+        amount = max(0, int(str(reply.get("amount") or "0")))
+    except (TypeError, ValueError):
+        amount = 0
+    return {
+        "request_id": sr.norm_hex(request_id),
+        "spec_digest": normalize_digest(spec_digest),
+        "provider": sr.norm_address(provider),
+        "payer": sr.norm_address(reply.get("payer")),
+        "ok": bool(reply.get("ok")),
+        "charged": reply.get("charged") is True,
+        "amount": str(amount),
+        "result_hash": sr.result_hash(reply.get("result"), reply.get("error")),
+    }
 
 
-def reply_auth_hash(request_id: str, spec_digest: str,
+def reply_auth_hash(request_id: str, spec_digest: str, provider: str,
                     reply: dict[str, Any]) -> bytes:
-    """keccak over (domain, request id, spec digest, sha256 of the reply's
-    ``ok``, ``result``, ``error`` and ``charged`` as canonical JSON): what the provider
-    signs. Ids and digests are compared lowercase without ``0x``."""
-    import hashlib
+    """The receipt hash of ``reply`` (``service_reviews.receipt_hash``):
+    what the provider signs. Ids and digests are compared lowercase without
+    ``0x``."""
+    from nodes.common import service_reviews as sr
 
-    from eth_abi import encode
-    from eth_utils import keccak
-
-    rid = str(request_id or "").strip().lower().removeprefix("0x")
-    return keccak(encode(
-        ["string", "string", "string", "bytes32"],
-        [REPLY_AUTH_DOMAIN, rid, normalize_digest(spec_digest),
-         hashlib.sha256(_reply_body(reply)).digest()]))
+    return sr.receipt_hash(_reply_receipt(reply, request_id, spec_digest, provider))
 
 
 def sign_reply(private_key: str, request_id: str, spec_digest: str,
                reply: dict[str, Any]) -> dict[str, Any]:
     """``reply`` with ``result`` and ``error`` in their JSON form (what the
-    buyer will parse) and ``receipt_sig`` over them."""
+    buyer will parse), ``payer`` (the address the gate verified, "" when
+    nothing was paid), ``amount`` (base units charged, as a string),
+    ``charged`` as a bool, and ``receipt_sig`` over them."""
     from eth_account import Account
-    from eth_account.messages import encode_defunct
+
+    from nodes.common import service_reviews as sr
 
     out = dict(reply)
     for key in ("result", "error"):
         if key in out:
             out[key] = json.loads(json.dumps(out[key], default=str))
-    msg = encode_defunct(primitive=reply_auth_hash(request_id, spec_digest, out))
     key = private_key if private_key.startswith("0x") else "0x" + private_key
-    out["receipt_sig"] = "0x" + bytes(
-        Account.sign_message(msg, key).signature).hex()
+    provider = Account.from_key(key).address
+    fields = _reply_receipt(out, request_id, spec_digest, provider)
+    out["payer"] = fields["payer"]
+    out["amount"] = fields["amount"]
+    out["charged"] = fields["charged"]
+    out["receipt_sig"] = sr.sign_hash(key, sr.receipt_hash(fields))
     return out
 
 
-def reply_signer(reply: Any, request_id: str, spec_digest: str) -> str:
-    """The address that signed ``reply``, or "" when unsigned or invalid."""
+def reply_signer(reply: Any, request_id: str, spec_digest: str,
+                 provider: str) -> str:
+    """The address that signed ``reply`` as a receipt naming ``provider``,
+    or "" when unsigned or invalid."""
     if not isinstance(reply, dict):
         return ""
     sig = str(reply.get("receipt_sig") or "").strip()
-    if not sig:
+    if not sig or not provider:
         return ""
+    from nodes.common import service_reviews as sr
     try:
-        from eth_account import Account
-        from eth_account.messages import encode_defunct
-        return str(Account.recover_message(
-            encode_defunct(primitive=reply_auth_hash(
-                request_id, spec_digest, reply)),
-            signature=sig))
+        return sr.recover(reply_auth_hash(request_id, spec_digest, provider, reply), sig)
     except Exception:  # noqa: BLE001 (a bad signature is just unsigned)
         return ""
 
@@ -160,9 +172,53 @@ def reply_signer(reply: Any, request_id: str, spec_digest: str) -> str:
 def reply_from_provider(reply: Any, request_id: str, spec_digest: str,
                         provider: str) -> bool:
     """Whether ``reply`` is signed by ``provider``, the address paid."""
-    signer = reply_signer(reply, request_id, spec_digest)
+    signer = reply_signer(reply, request_id, spec_digest, provider)
     return bool(signer) and signer.lower() == str(provider or "").strip().lower()
 
+
+def receipt_of(reply: Any, request_id: str, spec_digest: str,
+               provider: str) -> dict[str, Any] | None:
+    """The signed receipt of an authentic reply (the fields its signature
+    covers plus ``sig``), or None when ``provider`` did not sign it."""
+    if not reply_from_provider(reply, request_id, spec_digest, provider):
+        return None
+    receipt = _reply_receipt(reply, request_id, spec_digest, provider)
+    receipt["sig"] = str(reply["receipt_sig"]).strip().lower()
+    return receipt
+
+
+# The buyer's receipt store per runtime (atn/service_receipts.py), keyed by
+# the runtime's AutonetConfig: every authentic reply ``request_service``
+# reads is kept there, so the payer can review the request later.
+_receipt_sinks: dict[int, tuple[Any, Any]] = {}
+
+
+def set_receipt_sink(config: Any, sink: Any) -> None:
+    """``sink(receipt, reply)`` for every authentic reply to a request made
+    with ``config``."""
+    import weakref
+    try:
+        ref = weakref.ref(config)
+    except TypeError:
+        return
+    _receipt_sinks[id(config)] = (ref, sink)
+
+
+def clear_receipt_sink(config: Any) -> None:
+    _receipt_sinks.pop(id(config), None)
+
+
+def _note_receipt(config: Any, receipt: dict[str, Any],
+                  reply: dict[str, Any]) -> None:
+    entry = _receipt_sinks.get(id(config))
+    if entry is None or entry[0]() is not config:
+        return
+    try:
+        entry[1](receipt, reply)
+    except Exception:  # noqa: BLE001 (keeping a receipt never fails a request)
+        logging.getLogger(__name__).warning(
+            "could not keep the receipt for %s",
+            str(receipt.get("request_id"))[:16], exc_info=True)
 
 log = logging.getLogger(__name__)
 
@@ -514,9 +570,16 @@ async def request_service(
                           "served" + (f" (unverified reply: {claimed})"
                                       if claimed else "")),
             })
-        elif isinstance(reply.get("charged"), bool):
-            # The provider's own word on whether it kept the payment.
-            out["charged"] = reply["charged"]
+        else:
+            # The provider's own word on whether it kept the payment, and
+            # the signed receipt the payer can review the request with.
+            receipt = receipt_of(reply, request_id, spec_digest,
+                                 provider_address)
+            if receipt is not None:
+                out["charged"] = receipt["charged"]
+                out["request_id"] = request_id
+                out["receipt"] = receipt
+                _note_receipt(config, receipt, reply)
         return out
 
     # --- 1. libp2p ---------------------------------------------------------
