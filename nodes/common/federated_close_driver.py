@@ -250,6 +250,14 @@ class FederatedCloseDriver:
         self.review_snapshot: Optional[Dict[str, Any]] = None
         # REP total supply at the same pin.
         self.rep_supply: int = 0
+        # Service reviews (Decision 2026-11-10): the registered services,
+        # direct payments, closed channels and unscored axis default pinned
+        # with the voice state. None (no chain source) = every valid review
+        # counts.
+        self.service_snapshot: Optional[Dict[str, Any]] = None
+        # Zero-arg callbacks run after this daemon's carried state changes
+        # (a close, or an installed anchor); errors are logged.
+        self.state_listeners: List[Callable[[], None]] = []
         # The jurisdiction's charter text pinned to the snapshot anchor
         # (docs/multi_jurisdiction.md decision 5), read by the same
         # voice_source refresh. None = no pinned read (no DAO Registry
@@ -610,6 +618,14 @@ class FederatedCloseDriver:
                 note(self._tool_registrations)
         except Exception as e:  # noqa: BLE001 - discovery never blocks the install
             logger.warning("noting the anchored registrations failed: %s", e)
+        self._notify_state()
+
+    def _notify_state(self) -> None:
+        for listener in list(self.state_listeners):
+            try:
+                listener()
+            except Exception as e:  # noqa: BLE001 - a listener never blocks a close
+                logger.warning("carried-state listener failed: %s", e)
 
     def pruned_tools(self) -> List[str]:
         """The tools the latest close (or installed anchor) pruned."""
@@ -653,9 +669,14 @@ class FederatedCloseDriver:
             sort_keys=True), encoding="utf-8")
         os.replace(tmp, path)
 
+    # Carry maps a daemon may lack and start empty (nothing has launched):
+    # the service reviews and ratings (Decision 2026-11-10).
+    OPTIONAL_CARRY = ("service_reviews", "service_ratings")
+
     def _carry_files_missing(self) -> bool:
         paths = self.carry_over_paths()
-        return any(v is not None and not v.exists() for v in paths.values())
+        return any(v is not None and not v.exists() for k, v in paths.items()
+                   if k not in self.OPTIONAL_CARRY)
 
     def _maybe_join_from_chain(self, prev_root: Optional[str]) -> Optional[str]:
         """Joiner bootstrap: while carry-over files are missing and the
@@ -680,7 +701,7 @@ class FederatedCloseDriver:
         if self.carry_source is None or self._chain_at_genesis is not False:
             return None
         paths = self.carry_over_paths()
-        if any(v is None for v in paths.values()):
+        if any(v is None for k, v in paths.items() if k not in self.OPTIONAL_CARRY):
             return None
         files_missing = self._carry_files_missing()
         # A seed can only be the latest anchor while anchorCount == 1
@@ -786,7 +807,8 @@ class FederatedCloseDriver:
         if self.voice_source is None:
             blockers.append(
                 "chain RPC not configured (substrate_address + rpc_url)")
-        paths = self.carry_over_paths()
+        paths = {k: v for k, v in self.carry_over_paths().items()
+                 if k not in self.OPTIONAL_CARRY}
         unset = sorted(k for k, v in paths.items() if v is None)
         if unset:
             blockers.append(
@@ -843,6 +865,9 @@ class FederatedCloseDriver:
             reviews = state.get("review_snapshot")
             if isinstance(reviews, dict):
                 updates["review_snapshot"] = reviews
+            if "service_snapshot" in state:
+                svc = state.get("service_snapshot")
+                updates["service_snapshot"] = dict(svc) if isinstance(svc, dict) else None
             if state.get("rep_supply") is not None:
                 updates["rep_supply"] = int(state["rep_supply"])
             if "charter_text" in state:
@@ -1026,6 +1051,7 @@ class FederatedCloseDriver:
                 review_decay=float(self.review_params[0]),
                 reviewer_min_rep_bps=int(self.review_params[1]),
                 service_reviews=dict(self._service_reviews),
+                service_snapshot=self.service_snapshot,
             )
         except Exception as e:
             logger.error(
@@ -1065,6 +1091,7 @@ class FederatedCloseDriver:
                 noter(close_result, epoch_id=epoch_id)
         except Exception as e:
             logger.warning("noting the federated close for the economy graph failed: %s", e)
+        self._notify_state()
 
         # The agreed epoch id (Decision 2026-10-26): every daemon closing
         # this window names it the same, so they build the same proposal.

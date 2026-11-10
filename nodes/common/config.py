@@ -74,6 +74,12 @@ class BlockchainConfig:
     # AutonetRepClaim (jurisdiction.<id>.rep_claim): the operator claims
     # the household's REP after its ATN. Empty => no REP claims.
     rep_claim_address: str = ""
+    # ServiceMarket's ServiceRegistry and PaymentChannel: the close counts a
+    # service review only for a registered service whose payment is on
+    # chain, read from their logs pinned to the snapshot (service reviews,
+    # Decision 2026-11-10). Empty => no service review counts.
+    service_registry_address: str = ""
+    payment_channel_address: str = ""
 
 
 @dataclass
@@ -315,6 +321,8 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_DEPLOY_BLOCK": ("blockchain.deploy_block", int),
         "AUTONET_ANCHOR_ELECTION_ADDRESS": ("blockchain.anchor_election_address", str),
         "AUTONET_REP_CLAIM_ADDRESS": ("blockchain.rep_claim_address", str),
+        "AUTONET_SERVICE_REGISTRY_ADDRESS": ("blockchain.service_registry_address", str),
+        "AUTONET_PAYMENT_CHANNEL_ADDRESS": ("blockchain.payment_channel_address", str),
         "AUTONET_BLOB_DIR": ("blob_store.data_dir", str),
         "AUTONET_DATA_DIR": ("data_dir", str),
         "AUTONET_LOG_LEVEL": ("log_level", str),
@@ -479,6 +487,12 @@ def _seed_from_registry(cfg: AutonetConfig, config_path: Optional[str]) -> None:
     if not cfg.blockchain.anchor_election_address:
         cfg.blockchain.anchor_election_address = _registry_substrate_address(
             config_path, key="anchor_election")
+    if not cfg.blockchain.service_registry_address:
+        cfg.blockchain.service_registry_address = _registry_substrate_address(
+            config_path, key="service_registry")
+    if not cfg.blockchain.payment_channel_address:
+        cfg.blockchain.payment_channel_address = _registry_substrate_address(
+            config_path, key="payment_channel")
     if not cfg.blockchain.deploy_block:
         try:
             cfg.blockchain.deploy_block = int(

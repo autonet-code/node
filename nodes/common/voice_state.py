@@ -621,6 +621,70 @@ def read_tool_review_snapshot(
         excluded_reviewers=excluded_reviewers)
 
 
+# ---------------------------------------------------------------------------
+# Service snapshot (service reviews, Decision 2026-11-10): what a service
+# review needs from the chain to count, rebuilt from logs up to the SAME
+# snapshot block: the registered (provider, digest) pairs, the direct
+# payments, the closed payment channels, and the unscored axis default.
+# ---------------------------------------------------------------------------
+
+_SERVICE_EVENTS_ABI = {
+    "registry": [_ev("ServiceRegistered", [
+        ("serviceId", "uint256", True), ("provider", "address", True),
+        ("specDigest", "bytes32", True), ("askAmount", "uint256", False)])],
+    "substrate": [_ev("ServicePayment", [
+        ("payer", "address", True), ("recipient", "address", True),
+        ("amount", "uint256", False), ("requestId", "bytes32", True)])],
+    "channel": [
+        _ev("ChannelOpened", [("channelId", "uint256", True), ("client", "address", True),
+                              ("provider", "address", True), ("deposit", "uint256", False)]),
+        _ev("ChannelClosed", [("channelId", "uint256", True),
+                              ("paidToProvider", "uint256", False),
+                              ("remainderToClient", "uint256", False),
+                              ("closesAt", "uint256", False)])],
+}
+UNSCORED_AXIS_KEY = "jurisdiction.{jurisdiction}.unscored_axis_bps"
+
+
+def _empty_service_snapshot() -> Dict[str, Any]:
+    from .service_reviews import normalize_snapshot
+    return normalize_snapshot({})
+
+
+def read_service_snapshot(
+    w3: Any, *, block: int, substrate_address: str,
+    service_registry_address: str = "", payment_channel_address: str = "",
+    registry_writes: Optional[Dict[str, str]] = None,
+    jurisdiction_id: str = "autonet", start_block: Optional[int] = None,
+) -> Dict[str, Any]:
+    """The service snapshot as of ``block`` (``service_reviews.
+    snapshot_from_logs``). A contract left unset contributes nothing, so its
+    reviews never count. Raises on RPC failure, like the rest of the voice
+    read."""
+    from web3 import Web3
+
+    from .service_reviews import snapshot_from_logs
+
+    def logs(address: str, group: str, name: str) -> List[Dict[str, Any]]:
+        if not address:
+            return []
+        contract = w3.eth.contract(address=Web3.to_checksum_address(address),
+                                   abi=_SERVICE_EVENTS_ABI[group])
+        event = getattr(contract.events, name)
+        return [dict(log["args"]) for log in
+                _get_logs(event, w3, contract.address, block, start_block)]
+
+    writes = registry_writes or {}
+    return snapshot_from_logs(
+        registered=logs(service_registry_address, "registry", "ServiceRegistered"),
+        payments=(logs(substrate_address, "substrate", "ServicePayment")
+                  if service_registry_address else []),
+        opened=logs(payment_channel_address, "channel", "ChannelOpened"),
+        closed=logs(payment_channel_address, "channel", "ChannelClosed"),
+        unscored_bps=writes.get(UNSCORED_AXIS_KEY.format(jurisdiction=jurisdiction_id)),
+        channel_address=payment_channel_address)
+
+
 def tool_round_reviews_from_logs(
     records: List[Dict[str, Any]], digest: str, *,
     epochs: Dict[int, Dict[str, Any]], axis_ids: List[str],
@@ -1350,10 +1414,17 @@ def read_voice_state(
     deploy_block: Optional[int] = None,
     governor_address: str = "",
     pin: Optional[Dict[str, Any]] = None,
+    service_registry_address: str = "",
+    payment_channel_address: str = "",
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, rep_shares, rep_supply, supply,
     snapshot_block, emission_pool, recycled, weight_source,
-    review_snapshot} as of the previous epoch's anchor.
+    review_snapshot, service_snapshot} as of the previous epoch's anchor.
+
+    ``service_snapshot`` (service reviews, Decision 2026-11-10): the
+    registered services, direct payments, closed channels and the unscored
+    axis default as of the SAME snapshot block (``read_service_snapshot``);
+    empty at genesis, so no service review counts before the first anchor.
 
     ``review_snapshot`` (docs/multi_jurisdiction.md decision 10): ToolBond
     ratings and the reviewer-share rounds, rebuilt from ToolBond logs up to
@@ -1438,6 +1509,7 @@ def read_voice_state(
             "review_snapshot": {
                 "reviewer_share_bps": REVIEWER_SHARE_BPS_DEFAULT,
                 "tools": {}, "rounds": {}, "supply": 0},
+            "service_snapshot": _empty_service_snapshot(),
             "charter_text": None,
             "sanctions": {},
             "sanctioned_households": [],
@@ -1619,6 +1691,12 @@ def read_voice_state(
             w3, tool_bond_address, block, since_block=since_block,
             excluded_reviewers=excluded_reviewers, start_block=start)
     review_snapshot["supply"] = int(supply)
+    service_snapshot = read_service_snapshot(
+        w3, block=block, substrate_address=substrate_address,
+        service_registry_address=service_registry_address,
+        payment_channel_address=payment_channel_address,
+        registry_writes=_last_writes(reg_records, block) if reg_records else {},
+        jurisdiction_id=jurisdiction_id, start_block=start)
 
     return {
         "epoch_window": (
@@ -1645,6 +1723,7 @@ def read_voice_state(
         "snapshot_anchor_count": int(anchor_count),
         "weight_source": "reputation",
         "review_snapshot": review_snapshot,
+        "service_snapshot": service_snapshot,
         "charter_text": charter_text,
         # Sanctions in force at the snapshot (docs/accountability.md): the
         # raw entries, and the households they name. The close withholds

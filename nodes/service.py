@@ -579,12 +579,17 @@ class AutonetService:
             # The DAO Governor: its proposal lifecycle bounds the epoch
             # length (Decision 2026-10-26, item 4).
             governor_addr = getattr(bc, "governor_address", "") or ""
+            # ServiceMarket: service reviews count only for registered
+            # services paid on chain (Decision 2026-11-10).
+            service_registry_addr = getattr(bc, "service_registry_address", "") or ""
+            payment_channel_addr = getattr(bc, "payment_channel_address", "") or ""
         except Exception:
             substrate_addr, rpc_url, rep_token_addr = "", "", ""
             tool_bond_addr = ""
             dao_registry_addr = ""
             deploy_block = None
             governor_addr = ""
+            service_registry_addr = payment_channel_addr = ""
         if substrate_addr and rpc_url:
             def _voice_source(pin=None):
                 from .common.voice_state import read_voice_state
@@ -595,6 +600,8 @@ class AutonetService:
                     deploy_block=deploy_block,
                     governor_address=governor_addr,
                     pin=pin,
+                    service_registry_address=service_registry_addr,
+                    payment_channel_address=payment_channel_addr,
                 )
 
             self._federated_close_driver.voice_source = _voice_source

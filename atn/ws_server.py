@@ -4520,6 +4520,15 @@ class WebSocketBridge:
         # charged (signed with the rest, _sign_service_reply).
         reply["payer"] = payer
         reply["amount"] = amount if charged and amount.isdigit() else "0"
+        # A voucher's channel: the close counts a review of this request
+        # once that channel's settlement on chain covers it.
+        channel = "0"
+        if proof == "voucher":
+            try:
+                channel = str(int(msg.get("channel_id") or 0))
+            except (TypeError, ValueError):
+                channel = "0"
+        reply["channel_id"] = channel
         return reply
 
     async def _dispatch_service(

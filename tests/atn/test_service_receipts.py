@@ -5,13 +5,14 @@ and the hash of the result, never the result itself."""
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
 from eth_account import Account
 
 from atn import service_client as sc
-from atn.service_receipts import ReceiptStore
+from atn.service_receipts import RESEND_WINDOW_S, ReceiptStore
 from nodes.common import service_reviews as sr
 
 PROVIDER_KEY = "0x" + "c3" * 32
@@ -201,6 +202,23 @@ class TestTheBuyersReceipts:
         assert body["replies"][0]["receipt_sig"] == reply["receipt_sig"]
         assert sent[0]["review"]["evidence_hash"] == out["evidence_hash"]
 
+    def test_a_review_the_close_lacks_is_sent_again(self, tmp_path):
+        sent = []
+        store = _store(tmp_path, sent)
+        _kept(store)
+        out = store.review(PAYER_KEY, request_id=RID, fields=FIELDS, now=1_700_000_000)
+        assert len(sent) == 1
+        carried = {}
+        assert store.resend_missing(lambda p, d: carried) == 1 and sent[-1] == sent[0]
+        carried = {PAYER_ADDR: {"ts": out["ts"], "hash": out["hash"]}}
+        assert store.resend_missing(lambda p, d: carried) == 0
+        # After a restart too, and never past the window.
+        again = ReceiptStore(tmp_path / "receipts")
+        again.attach(JUR, sent.append)
+        assert again.resend_missing(lambda p, d: {}) == 1
+        late = time.time() + RESEND_WINDOW_S + 60
+        assert again.resend_missing(lambda p, d: {}, now=late) == 0
+
     def test_a_daemon_off_the_network_sends_nothing(self, tmp_path):
         store = _store(tmp_path)
         _kept(store)
@@ -271,9 +289,24 @@ class TestTheProviderSignsTheVerifiedPayer:
              "client": "0xSomeoneElse"}, msg_id="m1")
         assert out["ok"] and out["charged"] is True
         assert out["payer"] == PAYER_ADDR and out["amount"] == "5"
+        assert out["channel_id"] == "0"
         receipt = sc.receipt_of(json.loads(json.dumps(out)), rid, svc["digest"],
                                 provider)
         assert receipt is not None and sr.normalize_receipt(receipt)[0] is not None
+
+        # A voucher payment names its channel in the signed receipt.
+        async def _voucher(self, request, record, *, local=False):
+            return {"ok": True, "ask_amount": 5, "proof": "voucher",
+                    "payer": PAYER_ADDR}
+        monkeypatch.setattr(WebSocketBridge, "_validate_service_payment", _voucher)
+        rid2 = "0x" + "a2" * 32
+        out2 = await server._handle_service_request(
+            {"spec_digest": svc["digest"], "request_id": rid2, "args": {"x": "hi"},
+             "channel_id": 7, "cumulative_amount": 5, "signature": "0x"}, msg_id="m2")
+        assert out2["ok"] and out2["channel_id"] == "7"
+        assert sc.receipt_of(out2, rid2, svc["digest"], provider)["channel_id"] == "7"
+        assert not sc.reply_from_provider({**out2, "channel_id": "8"}, rid2,
+                                          svc["digest"], provider)
         # The runtime keeps a receipt store, wired to request_service.
         assert isinstance(rt.service_receipts, ReceiptStore)
         assert id(rt._config.rpb) in sc._receipt_sinks

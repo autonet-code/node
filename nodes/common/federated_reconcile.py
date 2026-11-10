@@ -899,6 +899,9 @@ def federated_epoch_close(
     # Service reviews carried from the previous close (service_reviews.py):
     # {"<provider>:<digest>": {payer: review}}.
     service_reviews: Optional[Dict[str, Any]] = None,
+    # The chain's services, payments and channels pinned to the snapshot
+    # block (voice_state.read_service_snapshot); None without a chain.
+    service_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close over a canonical batch sequence.
 
@@ -1074,6 +1077,7 @@ def federated_epoch_close(
         agent_owner_map=agent_owner_map,
         sanctioned_households=sanctioned,
         axis_ids=list(active_charter().ids),
+        snapshot=service_snapshot,
     )
     result["service_reviews"] = services["reviews"]
     result["service_ratings"] = services["ratings"]

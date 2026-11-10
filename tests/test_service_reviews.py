@@ -31,11 +31,12 @@ def addr(key: str) -> str:
 
 
 def receipt(provider_key=PROVIDER_KEY, payer_key=PAYER_KEYS[0], rid="01" * 32,
-            digest=DIGEST, charged=True, amount=1000, ok=True):
+            digest=DIGEST, charged=True, amount=1000, ok=True, channel_id=0):
     fields = {"request_id": rid, "spec_digest": digest,
               "provider": addr(provider_key),
               "payer": addr(payer_key) if payer_key else "",
               "ok": ok, "charged": charged, "amount": str(amount),
+              "channel_id": str(channel_id),
               "result_hash": sr.result_hash({"text": "answer"}, None)}
     fields["sig"] = sr.sign_hash(provider_key, sr.receipt_hash(fields))
     return fields
@@ -162,7 +163,7 @@ class TestCounting:
         assert out["ratings"][KEY]["correctness"] == 0.5
         assert len(out["reviews"][KEY]) == 3      # kept, only not counted
 
-    def test_charter_axes_count_unscored_at_half(self):
+    def test_charter_axes_count_unscored_at_the_default(self):
         out = close([event(PAYER_KEYS[0], axes={"care": 100}),
                      event(PAYER_KEYS[1])], axis_ids=["care", "truth"])
         r = out["ratings"][KEY]
@@ -191,6 +192,108 @@ class TestCounting:
             got = json.dumps(b, sort_keys=True)
             assert json.loads(got)["ratings"] == json.loads(want)["ratings"]
             assert json.loads(got)["reviews"] == json.loads(want)["reviews"]
+
+
+def snap(*, registered=(KEY,), payments=None, channels=None, unscored_bps=None):
+    return sr.normalize_snapshot({"registered": list(registered),
+                                  "payments": payments or {},
+                                  "channels": channels or {},
+                                  "unscored_bps": unscored_bps})
+
+
+def paid_direct(payer_key, rid="01" * 32, amount=1000, provider_key=PROVIDER_KEY):
+    return {rid: {f"{addr(payer_key)}:{addr(provider_key)}": amount}}
+
+
+class TestPaymentOnChain:
+    """With the chain snapshot, authority really comes from payment."""
+
+    def test_a_review_of_an_unregistered_service_is_dropped(self):
+        out = close([event()], snapshot=snap(registered=()))
+        assert out["reviews"] == {} and out["ratings"] == {}
+        assert out["rejected"] == {"unregistered service": 1}
+        # Carried reviews of a pair the chain never registered go too.
+        lenient = close([event()])
+        assert close([], carried=lenient["reviews"],
+                     snapshot=snap(registered=()))["reviews"] == {}
+
+    def test_a_self_signed_receipt_counts_only_once_its_payment_is_on_chain(self):
+        # The provider signs charged receipts for an address it controls.
+        sybil = PAYER_KEYS[3]
+        free = close([event(sybil, correctness=100)], snapshot=snap())
+        assert free["ratings"] == {}
+        assert free["reviews"][KEY][addr(sybil)]["paid"] is False
+        # Too small a payment does not cover the receipt's amount.
+        short = close([], carried=free["reviews"],
+                      snapshot=snap(payments=paid_direct(sybil, amount=999)))
+        assert short["ratings"] == {}
+        # Another payer's payment does not either.
+        other = close([], carried=free["reviews"],
+                      snapshot=snap(payments=paid_direct(PAYER_KEYS[0])))
+        assert other["ratings"] == {}
+        paid = close([], carried=free["reviews"],
+                     snapshot=snap(payments=paid_direct(sybil)))
+        r = paid["ratings"][KEY]
+        assert r["payers"] == 1 and r["correctness"] == 1.0 and r["charged"] == 1000
+
+    def test_a_channel_paid_review_counts_after_the_close_covers_it(self):
+        payer = PAYER_KEYS[0]
+        other_digest = "cd" * 32
+        evs = [event(payer, channel_id=7, ts=TS, rid="01" * 32),
+               event(payer, channel_id=7, ts=TS + 1, rid="02" * 32, digest=other_digest)]
+        two = (KEY, sr.service_key(addr(PROVIDER_KEY), other_digest))
+        open_ = close(evs, snapshot=snap(registered=two))
+        assert open_["ratings"] == {}
+        ch = {"client": addr(payer), "provider": addr(PROVIDER_KEY)}
+        one = close([], carried=open_["reviews"],
+                    snapshot=snap(registered=two, channels={"7": {**ch, "paid": 1500}}))
+        assert set(one["ratings"]) == {KEY}            # the earlier review only
+        both = close([], carried=one["reviews"],
+                     snapshot=snap(registered=two, channels={"7": {**ch, "paid": 2000}}))
+        assert set(both["ratings"]) == set(two)
+        stranger = {"7": {**ch, "client": addr(PAYER_KEYS[1]), "paid": 2000}}
+        assert close([], carried=open_["reviews"],
+                     snapshot=snap(registered=two, channels=stranger))["ratings"] == {}
+
+    def test_waiting_reviews_cannot_push_out_paid_ones(self, monkeypatch):
+        monkeypatch.setattr(sr, "MAX_PAYERS_PER_SERVICE", 3)
+        monkeypatch.setattr(sr, "MAX_PENDING_PER_SERVICE", 1)
+        paid_payer = PAYER_KEYS[0]
+        evs = [event(paid_payer, ts=TS)] + [event(k, ts=TS + 10 + i)
+                                            for i, k in enumerate(PAYER_KEYS[1:])]
+        out = close(evs, snapshot=snap(payments=paid_direct(paid_payer)))
+        kept = out["reviews"][KEY]
+        assert addr(paid_payer) in kept and kept[addr(paid_payer)]["paid"]
+        assert len(kept) == 2 and addr(PAYER_KEYS[3]) in kept     # the newest waiting one
+        assert out["ratings"][KEY]["payers"] == 1 and out["ratings"][KEY]["pending"] == 1
+
+    def test_unscored_axes_count_at_the_pinned_registry_value(self):
+        out = close([event(axes={"care": 100})], axis_ids=["care", "truth"],
+                    snapshot=snap(payments=paid_direct(PAYER_KEYS[0]), unscored_bps=2000))
+        assert out["ratings"][KEY]["axes"] == {"care": 1.0, "truth": 0.2}
+
+    def test_the_snapshot_from_logs(self):
+        channel = "0x" + "99" * 20
+        provider, payer = addr(PROVIDER_KEY), addr(PAYER_KEYS[0])
+        got = sr.snapshot_from_logs(
+            registered=[{"provider": provider, "specDigest": bytes.fromhex(DIGEST)}],
+            payments=[{"payer": payer, "recipient": provider, "amount": 600,
+                       "requestId": bytes.fromhex("01" * 32)},
+                      {"payer": payer, "recipient": provider, "amount": 400,
+                       "requestId": bytes.fromhex("01" * 32)},
+                      {"payer": channel, "recipient": provider, "amount": 5,
+                       "requestId": (7).to_bytes(32, "big")},
+                      {"payer": payer, "recipient": "0x" + "77" * 20, "amount": 9,
+                       "requestId": bytes.fromhex("02" * 32)}],
+            opened=[{"channelId": 7, "client": payer, "provider": provider},
+                    {"channelId": 8, "client": payer, "provider": provider}],
+            closed=[{"channelId": 7, "paidToProvider": 5}],
+            unscored_bps="3000", channel_address=channel)
+        assert got == {"registered": [KEY],
+                       "payments": {"01" * 32: {f"{payer}:{provider}": 1000}},
+                       "channels": {"7": {"client": payer, "provider": provider,
+                                          "paid": 5}},
+                       "unscored_bps": 3000}
 
 
 def _batches(events, *, kp=None, ts=TS):
@@ -256,3 +359,40 @@ class TestTheClose:
         # A restart reads the same state back.
         again = driver("a", [])
         assert again.carry_over_maps() == always_on.carry_over_maps()
+
+    def test_the_driver_closes_on_the_pinned_snapshot(self, tmp_path):
+        kp, batches = _batches([event(PAYER_KEYS[0]), event(PAYER_KEYS[1])])
+        gossip = MagicMock(spec=EventGossip)
+        gossip.known_senders.return_value = [kp.public_key]
+        gossip.sender_pubkey = kp.public_key
+        gossip.drain_epoch_batches.return_value = list(batches)
+        d = FederatedCloseDriver(gossip=gossip)
+        d.voice_source = lambda: {"snapshot_block": 10, "owner_map": {},
+                                  "service_snapshot": snap(
+                                      payments=paid_direct(PAYER_KEYS[1]))}
+        d._refresh_voice()
+        fed = d._close(list(batches), "e1", {})
+        r = fed.close_result["service_ratings"][KEY]
+        assert r["payers"] == 1 and r["pending"] == 1
+
+    def test_missing_service_maps_start_empty(self, tmp_path):
+        names = ("tool_registrations", "tool_rounds", "tool_ratings")
+        for n in names:
+            (tmp_path / f"{n}.json").write_text("{}", encoding="utf-8")
+        d = FederatedCloseDriver(
+            gossip=MagicMock(spec=EventGossip),
+            **{f"{n}_path": tmp_path / f"{n}.json" for n in names},
+            service_reviews_path=tmp_path / "service_reviews.json",
+            service_ratings_path=tmp_path / "service_ratings.json")
+        d.voice_source = lambda: {"snapshot_block": 10, "owner_map": {}}
+        d._refresh_voice()
+        assert d._chain_at_genesis is False
+        assert d.participation_blockers() == []
+        assert d.carry_over_maps()["service_reviews"] == {}
+        # No state dir for them at all is fine too.
+        bare = FederatedCloseDriver(
+            gossip=MagicMock(spec=EventGossip),
+            **{f"{n}_path": tmp_path / f"{n}.json" for n in names})
+        bare.voice_source = d.voice_source
+        bare._refresh_voice()
+        assert bare.participation_blockers() == []

@@ -103,11 +103,17 @@ def _reply_receipt(reply: dict[str, Any], request_id: str, spec_digest: str,
     """The receipt fields a reply's signature covers (no signature)."""
     from nodes.common import service_reviews as sr
 
-    try:
-        amount = max(0, int(str(reply.get("amount") or "0")))
-    except (TypeError, ValueError):
-        amount = 0
+    def _uint(value: Any) -> int:
+        try:
+            return max(0, int(str(value or "0")))
+        except (TypeError, ValueError):
+            return 0
+    amount = _uint(reply.get("amount"))
     return {
+        # The payment channel a voucher paid this request through, 0 for a
+        # direct payment: what the close checks on chain before it counts a
+        # review of the request.
+        "channel_id": str(_uint(reply.get("channel_id"))),
         "request_id": sr.norm_hex(request_id),
         "spec_digest": normalize_digest(spec_digest),
         "provider": sr.norm_address(provider),
@@ -134,6 +140,7 @@ def sign_reply(private_key: str, request_id: str, spec_digest: str,
     """``reply`` with ``result`` and ``error`` in their JSON form (what the
     buyer will parse), ``payer`` (the address the gate verified, "" when
     nothing was paid), ``amount`` (base units charged, as a string),
+    ``channel_id`` (the voucher's channel, "0" for a direct payment),
     ``charged`` as a bool, and ``receipt_sig`` over them."""
     from eth_account import Account
 
@@ -148,6 +155,7 @@ def sign_reply(private_key: str, request_id: str, spec_digest: str,
     fields = _reply_receipt(out, request_id, spec_digest, provider)
     out["payer"] = fields["payer"]
     out["amount"] = fields["amount"]
+    out["channel_id"] = fields["channel_id"]
     out["charged"] = fields["charged"]
     out["receipt_sig"] = sr.sign_hash(key, sr.receipt_hash(fields))
     return out

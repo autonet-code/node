@@ -989,6 +989,10 @@ class AutonetBridge:
                                       ("anchor_election_address",
                                        "anchor_election_address"),
                                       ("rep_claim_address", "rep_claim_address"),
+                                      ("service_registry_address",
+                                       "service_registry_address"),
+                                      ("payment_channel_address",
+                                       "payment_channel_address"),
                                       ("dao_registry_address", "dao_registry_address"),
                                       ("dao_address", "governor_address")):
                 value = getattr(self.config, atn_key, "") or ""
@@ -1401,6 +1405,14 @@ class AutonetBridge:
                 receipts.attach(
                     str(library.rpb_address),
                     lambda event, _lib=library: _lib.submit_events([event]))
+                # A review the close dropped (its service registered after
+                # the snapshot, or its batch lost) goes out again after the
+                # next change of the carried state.
+                review_drv = getattr(service, "_federated_close_driver", None)
+                if review_drv is not None:
+                    review_drv.state_listeners.append(
+                        lambda _d=review_drv, _r=receipts:
+                            _r.resend_missing(_d.service_reviews_of))
             # Sanctioned authors (docs/accountability.md): agents may not
             # propose adopting their tools.
             tool_store.sanction_check = lambda addr: self.sanctions.check(addr)

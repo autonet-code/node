@@ -13,7 +13,10 @@ evidence, a blob holding the reviewer's text and the provider's signed
 reply, kept in the tool store's blob store so peers can read it with
 ``fetch_evidence`` like a tool flag's evidence. The review is signed with
 the payer's key and handed to the library service (``attach``), so it
-rides the open epoch's batch; the next close counts it.
+rides the open epoch's batch. The close counts it once its payment is on
+chain as of the close's snapshot; one the carried state lacks (its service
+was registered after the snapshot, or its batch was lost) is sent again
+after each close for ``RESEND_WINDOW_S`` (``resend_missing``).
 
 Daemon-local state: ``<data_dir>/services/receipts/receipts.jsonl``,
 ``reviews.jsonl`` and ``blobs/``.
@@ -33,6 +36,9 @@ log = logging.getLogger(__name__)
 # Receipts kept in memory (the newest); the file keeps every one.
 MEMORY_CAP = 20_000
 EVIDENCE_CHARS = 20_000
+# A review the carried state lacks is sent again after each close for this
+# long (its service registered too late for the snapshot, or its batch lost).
+RESEND_WINDOW_S = 14 * 86400
 
 MALWARE_EVIDENCE_REQUIRED = (
     "a malware flag needs evidence: say what the service did and how it "
@@ -55,6 +61,9 @@ class ReceiptStore:
         self._lock = threading.RLock()
         self._rows: dict[str, dict[str, Any]] = {}
         self._reviews: dict[str, dict[str, Any]] = {}
+        # (service key, payer) -> the latest review sent, with its event,
+        # for ``resend_missing``.
+        self._latest: dict[tuple[str, str], dict[str, Any]] = {}
         self._blobs: Any = None
         self._evidence_blobs = evidence_blobs
         # Set when the daemon joins a jurisdiction (``attach``): the
@@ -243,19 +252,54 @@ class ReceiptStore:
             return {"error": f"the review could not be sent: {exc}"}
         kept = {"request_id": got["request_id"], "service": skey,
                 "provider": got["provider"], "spec_digest": got["spec_digest"],
-                "payer": reviewer, **ok["record"]}
+                "payer": reviewer, **ok["record"], "sent_at": int(time.time())}
         with self._lock:
             self._dir.mkdir(parents=True, exist_ok=True)
             with self._reviews_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(kept, sort_keys=True) + "\n")
-            self._reviews[got["request_id"]] = kept
+                fh.write(json.dumps({**kept, "event": event}, sort_keys=True) + "\n")
+            self._keep_review({**kept, "event": event})
         out = {"ok": True, "sent": True, **kept,
-               "counted": "rides the open epoch's batch; the next close "
+               "counted": "rides the open epoch's batch; it counts once its "
+                          "payment is on chain as of a close's snapshot, and "
                           "replaces any earlier review of this service by "
                           "this payer"}
+        out.pop("paid", None)
         if ignored:
             out["ignored_axes"] = sorted(ignored)
         return out
+
+    def resend_missing(self, carried: Callable[[str, str], dict[str, Any]],
+                       *, now: Optional[float] = None) -> int:
+        """Send again each latest review, younger than ``RESEND_WINDOW_S``,
+        that the carried state lacks: ``carried(provider, digest)`` is the
+        close's payer -> review map for one service. A review the close
+        dropped (its service was not registered as of the snapshot yet, or
+        its batch never reached the closing daemons) gets in once it can.
+        Returns how many were sent."""
+        if self.review_sink is None:
+            return 0
+        t = float(now if now is not None else time.time())
+        with self._lock:
+            latest = dict(self._latest)
+        sent = 0
+        for (skey, payer), row in sorted(latest.items()):
+            event = row.get("event")
+            if not isinstance(event, dict) or t - float(row.get("sent_at") or 0) > RESEND_WINDOW_S:
+                continue
+            provider, _, digest = skey.partition(":")
+            try:
+                have = (carried(provider, digest) or {}).get(payer)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(have, dict) and (int(have.get("ts") or 0), str(have.get("hash") or "")) \
+                    >= (int(row.get("ts") or 0), str(row.get("hash") or "")):
+                continue
+            try:
+                self.review_sink(event)
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("resending a service review failed: %s", exc)
+        return sent
 
     def _store_evidence(self, receipt: dict[str, Any], reviewer: str,
                         text: str, ts: int) -> str:
@@ -305,7 +349,13 @@ class ReceiptStore:
                     keep(row)
 
     def _keep_review(self, row: dict[str, Any]) -> None:
-        self._reviews[_rid(row.get("request_id"))] = row
+        public = {k: v for k, v in row.items() if k != "event"}
+        self._reviews[_rid(row.get("request_id"))] = public
+        key = (str(row.get("service") or ""), str(row.get("payer") or ""))
+        old = self._latest.get(key)
+        if old is None or (int(row.get("ts") or 0), str(row.get("hash") or "")) \
+                > (int(old.get("ts") or 0), str(old.get("hash") or "")):
+            self._latest[key] = row
 
 
 def receipts_for(runtime: Any) -> Optional[ReceiptStore]:
