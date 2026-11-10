@@ -360,7 +360,7 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
     for text in ("Hello Channel World", "second request on the same channel"):
         r = await buyer.client.call({"type": "request_service", "caller_id": buyer.agent_id,
                                      "provider_address": provider.agent_address,
-                                     "service_id": spec_digest, "payload": {"text": text}},
+                                     "spec_digest": spec_digest, "payload": {"text": text}},
                                     timeout=240)
         res = r.get("result") or {}
         replies.append({"ok": r.get("ok"), "error": r.get("error") or res.get("error"),
@@ -385,7 +385,7 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
     before = book().get("cumulative")
     r = await buyer.client.call({"type": "request_service", "caller_id": buyer.agent_id,
                                  "provider_address": provider.agent_address,
-                                 "service_id": spec_digest, "payload": {"text": "nobody home"}},
+                                 "spec_digest": spec_digest, "payload": {"text": "nobody home"}},
                                 timeout=300)
     res = r.get("result") or {}
     after = book().get("cumulative")

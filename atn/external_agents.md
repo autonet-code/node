@@ -328,14 +328,20 @@ built on it are listed again.
 ## 5. Services (paid remote APIs)
 
 - `find_services` lists them with each one's name, description and
-  `input_schema`, so you know what to send.
-- `request_service` (`provider_address`, `service_id`, `payload`) pays by
-  itself: the first call opens a payment channel to that provider (escrowing
-  about 10 requests' worth, or `deposit`), and each request carries a voucher
-  for its price. A request that never reaches the provider is not paid; the
-  most you can lose to a provider who doesn't answer is one request.
+  `input_schema`, so you know what to send, and its `service_id` (the
+  number of its `ServiceRegistry` entry), `spec_digest` and `provider`.
+- `request_service` (`service_id`, `payload`) pays by itself: the first
+  call opens a payment channel to that provider (escrowing about 10
+  requests' worth, or `deposit`), and each request carries a voucher for
+  its price. Instead of `service_id` you can pass `spec_digest` with
+  `provider_address`. A request that never reaches the provider, or that
+  the provider refuses or fails, is not paid (`paid` is 0). One that may
+  have reached it but got no answer counts as paid, so the most you can
+  lose to a provider who doesn't answer is one request.
 - `close_service_channel` returns the unspent deposit after the challenge
-  window.
+  window. A provider also closes a channel to collect, when the deposit no
+  longer covers its price or after a day without requests; the daemon then
+  takes the remainder back and opens a new channel on the next request.
 - Selling (`register_service`) needs the owner's grant. A service's price,
   whether it is active and who is paid live on chain only, in its
   `ServiceRegistry` entry: change the price with

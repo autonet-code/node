@@ -1359,8 +1359,8 @@ _TOOLS: list[ToolDefinition] = [
             "Pass 'query' to filter by a substring against locally-known service "
             "names/descriptions. Each row carries the service's spec (name, "
             "description, input_schema), fetched from the network when this "
-            "daemon doesn't hold it. To invoke one: request_service (it pays "
-            "through a payment channel). Read-only."
+            "daemon doesn't hold it. To invoke one: request_service with its "
+            "service_id (it pays through a payment channel). Read-only."
         ),
         input_schema={
             "type": "object",
@@ -1483,22 +1483,27 @@ _TOOLS: list[ToolDefinition] = [
             "Invoke a service on the provider's daemon (cross-daemon call). "
             "Reaches the provider over libp2p by the peer id in the on-chain "
             "agent registry (directly or through a relay, so providers behind "
-            "NAT work), else at its on-chain WS endpoint. Payment: by default a "
-            "payment channel to the provider (opened on first use, escrowing "
-            "'deposit', default 10 requests' worth; the unspent part comes back "
-            "on close_service_channel) and a signed voucher per request, spent "
-            "only if the request reached the provider. Or pass a direct proof "
-            "(tx_hash + request_id from pay_for_service). Pass the "
-            "'service_id''s spec_digest as 'service_id' is looked up on chain, "
-            "and the request 'payload' (matching the service's input schema). "
-            "Returns the provider's result, or a clear error if the provider "
-            "is unreachable or the payment failed verification."
+            "NAT work), else at its on-chain WS endpoint. Name the service by "
+            "'service_id' (its number from find_services: its spec and "
+            "provider are read from the chain) or by 'spec_digest' with "
+            "'provider_address', and pass the request 'payload' (matching the "
+            "service's input schema). Payment: by default a payment channel to "
+            "the provider (opened on first use, escrowing 'deposit', default 10 "
+            "requests' worth; the unspent part comes back on "
+            "close_service_channel, or when the provider closes the channel) "
+            "and a signed voucher per request. A request the provider refuses "
+            "or fails is not paid ('paid' is 0); one that may have reached the "
+            "provider but got no answer is counted as paid. Or pass a direct "
+            "proof (tx_hash + request_id from pay_for_service). Returns the "
+            "provider's result, or a clear error if the provider is "
+            "unreachable or the payment failed verification."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "provider_address": {"type": "string", "description": "The provider agent's address (0x...)."},
-                "service_id": {"type": "string", "description": "The service's spec digest (from find_services)."},
+                "service_id": {"type": "integer", "description": "The service's number in the ServiceRegistry (service_id from find_services)."},
+                "spec_digest": {"type": "string", "description": "Or: the service's spec digest (spec_digest from find_services), with provider_address."},
+                "provider_address": {"type": "string", "description": "The provider's address (0x...). Needed with spec_digest; with service_id it is read from the chain."},
                 "payload": {
                     "type": "object",
                     "description": "The request arguments (per the service input schema).",
@@ -1508,7 +1513,7 @@ _TOOLS: list[ToolDefinition] = [
                 "request_id": {"type": "string", "description": "Optional: that payment's request_id (bytes32 hex)."},
                 "deposit": {"type": "integer", "description": "Optional: ATN base units to escrow when a new channel to this provider is opened (default 10x the ask)."},
             },
-            "required": ["provider_address", "service_id", "payload"],
+            "required": ["payload"],
         },
     ),
     ToolDefinition(
@@ -3625,24 +3630,55 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     WS endpoint) and return the reply.
 
     Thin wrapper over ``atn.service_client.request_service`` (shared with the
-    ``service`` inference provider)."""
+    ``service`` inference provider).
+
+    The service is named either by its ServiceRegistry number
+    (``service_id``, as find_services returns it; its digest and provider
+    are read from that entry) or by ``spec_digest`` with
+    ``provider_address`` (a digest alone is not unique: anyone can register
+    a copy of a public spec)."""
     from . import service_client
 
     provider_address = str(input.get("provider_address") or "").strip()
-    service_id = str(input.get("service_id") or "").strip()
+    spec_digest = service_client.normalize_digest(
+        str(input.get("spec_digest") or ""))
+    raw_id = input.get("service_id")
     payload = input.get("payload")
     tx_hash = str(input.get("tx_hash") or "").strip()
     request_id = str(input.get("request_id") or "").strip()
-    if not provider_address:
-        return {"error": "Missing required field: 'provider_address'"}
-    if not service_id:
-        return {"error": "Missing required field: 'service_id'"}
     if not isinstance(payload, dict):
         return {"error": "'payload' must be an object"}
     if bool(tx_hash) != bool(request_id):
         return {"error": "A direct payment needs both 'tx_hash' and "
                          "'request_id' (from pay_for_service); omit both to "
                          "pay through a payment channel."}
+    entry: dict[str, Any] | None = None
+    if raw_id not in (None, ""):
+        try:
+            number = int(str(raw_id).strip())
+        except (TypeError, ValueError):
+            return {"error": "'service_id' is the service's number from "
+                             "find_services; pass a spec digest as 'spec_digest'"}
+        entry = await service_client.read_service(runtime._config.rpb, number)
+        if entry.get("error"):
+            return {"error": str(entry["error"])}
+        found = service_client.normalize_digest(str(entry.get("spec_digest") or ""))
+        if spec_digest and spec_digest != found:
+            return {"error": f"service #{number} is another spec than "
+                             f"{spec_digest[:16]}"}
+        if provider_address and provider_address.lower() != \
+                str(entry.get("provider") or "").lower():
+            return {"error": f"service #{number} is provided by "
+                             f"{entry.get('provider')}, not {provider_address}"}
+        spec_digest = found
+        provider_address = str(entry.get("provider") or "")
+    elif not spec_digest:
+        return {"error": "Name the service: 'service_id' (its number from "
+                         "find_services) or 'spec_digest' with "
+                         "'provider_address'"}
+    if not provider_address:
+        return {"error": "Missing required field: 'provider_address' (or "
+                         "pass 'service_id' to read it from the chain)"}
     blocked = await _sanctioned(runtime, provider_address, "buy services from")
     if blocked:
         return blocked
@@ -3659,19 +3695,20 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
 
     if tx_hash:
         return await service_client.request_service(
-            runtime._config.rpb, provider_address, service_id, payload,
+            runtime._config.rpb, provider_address, spec_digest, payload,
             tx_hash=tx_hash, request_id=request_id,
             client_address=client_addr, payer_key=payer_key)
 
     # Channel path (docs/services_market.md: settlement is the prepaid
-    # channel; #45): a voucher for this one request, committed only if the
-    # request may have reached the provider. A provider that never gets it
-    # can never collect it.
+    # channel; #45): a voucher for this one request, counted only if the
+    # provider served it, or if it may have reached the provider and no
+    # answer says otherwise. A provider that never gets it can never
+    # collect it, and one that refuses or fails it keeps nothing.
     from .on_chain import ServiceMarketClient
-    from .service_channels import voucher_for
+    from .service_channels import settle_voucher, voucher_for
 
-    ask = await service_client.lookup_service_ask(
-        runtime._config.rpb, provider_address, service_id)
+    ask = entry if entry is not None else await service_client.lookup_service_ask(
+        runtime._config.rpb, provider_address, spec_digest)
     if ask.get("error"):
         return ask
     if not ask.get("active"):
@@ -3701,15 +3738,25 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
                                         provider_address, amount, deposit)
             if voucher.get("error"):
                 return voucher
-        reply = await service_client.request_service(
-            runtime._config.rpb, provider_address, service_id, payload,
-            request_id=service_client.new_request_id(),
-            client_address=client_addr, payer_key=payer_key, voucher=voucher)
-        if voucher is not None and reply.get("delivered"):
-            book.commit(client_addr, provider_address,
-                        voucher["channel_id"], voucher["cumulative_amount"])
+            # Written down before it goes out: a daemon stopped mid-request
+            # counts it at start, since the provider may hold it.
+            book.reserve(client_addr, provider_address,
+                         voucher["channel_id"], voucher["cumulative_amount"])
+        try:
+            reply = await service_client.request_service(
+                runtime._config.rpb, provider_address, spec_digest, payload,
+                request_id=service_client.new_request_id(),
+                client_address=client_addr, payer_key=payer_key, voucher=voucher)
+        except BaseException:
+            if voucher is not None:
+                # Unknown whether it left: count it (never behind the provider).
+                book.commit(client_addr, provider_address,
+                            voucher["channel_id"], voucher["cumulative_amount"])
+            raise
         if voucher is not None:
-            reply["paid"] = amount if reply.get("delivered") else 0
+            paid = settle_voucher(book, client_addr, provider_address,
+                                  voucher, reply)
+            reply["paid"] = amount if paid else 0
             reply["channel_id"] = voucher["channel_id"]
         return reply
 

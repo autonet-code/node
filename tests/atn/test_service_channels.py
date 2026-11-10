@@ -8,9 +8,11 @@ import pytest
 
 from atn.service_channels import (
     CLIENT_CLOSING,
+    CLOSING,
     SETTLED,
     ChannelBook,
     close_channel,
+    settle_voucher,
     sweep_refunds,
     voucher_for,
 )
@@ -99,3 +101,238 @@ async def test_open_failure_is_reported(tmp_path):
     m.open_channel = broke
     out = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=5)
     assert "insufficient balance" in out["error"] and book.get(PAYER, PROVIDER) is None
+
+
+# ---------------------------------------------------------------------------
+# Counting a voucher: only what the provider may hold (never behind it)
+# ---------------------------------------------------------------------------
+
+async def _sent(book, m, reply):
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100)
+    book.reserve(PAYER, PROVIDER, v["channel_id"], v["cumulative_amount"])
+    return settle_voucher(book, PAYER, PROVIDER, v, reply)
+
+
+@pytest.mark.asyncio
+async def test_served_request_counts(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    assert await _sent(book, m, {"delivered": True, "ok": True, "charged": True})
+    assert book.get(PAYER, PROVIDER)["cumulative"] == 100
+
+
+@pytest.mark.asyncio
+async def test_refused_or_failed_request_does_not_count(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    assert not await _sent(book, m, {"delivered": True, "ok": False, "charged": False})
+    ch = book.get(PAYER, PROVIDER)
+    assert ch["cumulative"] == 0 and "pending" not in ch
+    # The next request signs the same total again.
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100)
+    assert v["cumulative_amount"] == 100
+
+
+@pytest.mark.asyncio
+async def test_unanswered_request_that_may_have_arrived_counts(tmp_path):
+    # A timeout after sending, or an error from a relay (no word from the
+    # provider): it may have served it and kept the voucher.
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    assert await _sent(book, m, {"delivered": True, "error": "no reply within 300s"})
+    assert await _sent(book, m, {"delivered": True, "ok": False,
+                                 "error": "the provider did not reply through the relay"})
+    assert book.get(PAYER, PROVIDER)["cumulative"] == 200
+
+
+@pytest.mark.asyncio
+async def test_undelivered_request_does_not_count(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    assert not await _sent(book, m, {"error": "no path", "delivered": False})
+    assert book.get(PAYER, PROVIDER)["cumulative"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_voucher_out_when_the_daemon_stopped_counts_at_start(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100)
+    book.reserve(PAYER, PROVIDER, v["channel_id"], v["cumulative_amount"])
+    # Restart before the reply: the provider may hold it.
+    again = ChannelBook(tmp_path / "ch.json")
+    ch = again.get(PAYER, PROVIDER)
+    assert ch["cumulative"] == 100 and "pending" not in ch
+
+
+@pytest.mark.asyncio
+async def test_a_channel_the_provider_closed_is_replaced(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100)
+    book.commit(PAYER, PROVIDER, v["channel_id"], 100)
+    m.state[1] = {"status": CLOSING, "closes_at": 0}      # provider collected
+    v2 = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100)
+    assert v2["channel_id"] == 2 and v2["cumulative_amount"] == 100
+    assert m.closed == []                       # no startClose on a closed channel
+    assert "1" in book.closing()
+    out = await sweep_refunds(book, m, lambda payer: "k")
+    assert m.withdrawn == [1] and out[0]["action"] == "withdrew"
+
+
+@pytest.mark.asyncio
+async def test_sweep_notices_a_provider_close_and_refunds_after_the_window(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100)
+    book.commit(PAYER, PROVIDER, v["channel_id"], 100)
+    m.state[1] = {"status": CLOSING, "closes_at": 500}
+    out = await sweep_refunds(book, m, lambda payer: "k", now=100)
+    assert {"channel_id": "1", "action": "closed_by_provider"} in out
+    assert book.get(PAYER, PROVIDER) is None and m.withdrawn == []
+    out = await sweep_refunds(book, m, lambda payer: "k", now=600)
+    assert m.withdrawn == [1] and book.closing() == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_start_close_is_sent_again_by_the_sweep(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), FakeMarket()
+    await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100, deposit=150)
+    book.commit(PAYER, PROVIDER, 1, 100)
+    real_close = m.start_close
+
+    async def fail(key, cid):
+        return {"success": False, "error": "rpc down"}
+    m.start_close = fail
+    v = await voucher_for(book, m, "k", PAYER, PROVIDER, ask=100)   # spent: replace
+    assert v["channel_id"] == 2 and "1" in book.closing()
+    assert m.state[1]["status"] == 1                   # still Open on chain
+    m.start_close = real_close
+    out = await sweep_refunds(book, m, lambda payer: "k", now=0)
+    assert {"channel_id": "1", "action": "close_started", "error": None} in out
+    assert m.closed == [1]
+    out = await sweep_refunds(book, m, lambda payer: "k", now=0)
+    assert m.withdrawn == [1] and book.closing() == {}
+
+
+# ---------------------------------------------------------------------------
+# The request_service agent tool: paid only for what was served
+# ---------------------------------------------------------------------------
+
+DIGEST = "ab" * 32
+
+
+def _buyer(tmp_path, monkeypatch, replies, entry=None):
+    from types import SimpleNamespace
+
+    from atn import agent_tools, on_chain, service_client
+
+    market = FakeMarket()
+
+    class Market(FakeMarket):
+        channel_available = True
+
+        def __init__(self, cfg):
+            self.__dict__ = market.__dict__
+
+    async def ask(cfg, provider, digest):
+        return {"active": True, "ask_amount": 100}
+
+    async def read(cfg, number):
+        return dict(entry) if entry else {"error": f"no on-chain service #{number}"}
+
+    sent = []
+
+    async def request(cfg, provider, digest, payload, **kw):
+        sent.append({"provider": provider, "digest": digest, **kw})
+        return dict(replies.pop(0))
+
+    async def clear(runtime, address, what):
+        return None
+
+    monkeypatch.setattr(on_chain, "ServiceMarketClient", Market)
+    monkeypatch.setattr(service_client, "lookup_service_ask", ask)
+    monkeypatch.setattr(service_client, "read_service", read)
+    monkeypatch.setattr(service_client, "request_service", request)
+    monkeypatch.setattr(agent_tools, "_sanctioned", clear)
+    identity = SimpleNamespace(address=PAYER)
+    rt = SimpleNamespace(
+        _config=SimpleNamespace(rpb=SimpleNamespace()),
+        get_agent=lambda aid: SimpleNamespace(identity=identity),
+        registry=SimpleNamespace(get_agent_key=lambda aid: "k"),
+        channel_book=ChannelBook(tmp_path / "ch.json"))
+    return rt, sent
+
+
+async def _call(rt, **args):
+    from atn.agent_tools import _request_service
+    return await _request_service(rt, {"payload": {}, "_caller_id": "agent-1", **args})
+
+
+@pytest.mark.asyncio
+async def test_request_refused_by_the_provider_is_not_paid(tmp_path, monkeypatch):
+    rt, sent = _buyer(tmp_path, monkeypatch, [
+        {"delivered": True, "ok": False, "charged": False, "error": "backing failed"},
+        {"delivered": True, "ok": True, "charged": True, "result": {}}])
+    failed = await _call(rt, provider_address=PROVIDER, spec_digest=DIGEST)
+    assert failed["paid"] == 0
+    assert rt.channel_book.get(PAYER, PROVIDER)["cumulative"] == 0
+    served = await _call(rt, provider_address=PROVIDER, spec_digest=DIGEST)
+    assert served["paid"] == 100
+    # The failed request's total was signed again for the served one.
+    assert [s["voucher"]["cumulative_amount"] for s in sent] == [100, 100]
+    assert rt.channel_book.get(PAYER, PROVIDER)["cumulative"] == 100
+
+
+@pytest.mark.asyncio
+async def test_unanswered_request_is_counted_as_paid(tmp_path, monkeypatch):
+    rt, _ = _buyer(tmp_path, monkeypatch, [
+        {"delivered": True, "error": "Provider did not reply within 300s."}])
+    out = await _call(rt, provider_address=PROVIDER, spec_digest=DIGEST)
+    assert out["paid"] == 100
+    assert rt.channel_book.get(PAYER, PROVIDER)["cumulative"] == 100
+
+
+@pytest.mark.asyncio
+async def test_a_numeric_service_id_is_read_from_the_chain(tmp_path, monkeypatch):
+    entry = {"service_id": 4, "provider": PROVIDER, "spec_digest": "0x" + DIGEST.upper(),
+             "ask_amount": 250, "active": True}
+    rt, sent = _buyer(tmp_path, monkeypatch,
+                      [{"delivered": True, "ok": True, "charged": True}], entry=entry)
+    out = await _call(rt, service_id=4)
+    assert out["paid"] == 250
+    assert sent[0]["provider"] == PROVIDER and sent[0]["digest"] == DIGEST
+    assert sent[0]["voucher"]["cumulative_amount"] == 250
+
+
+@pytest.mark.asyncio
+async def test_service_id_naming_errors(tmp_path, monkeypatch):
+    entry = {"service_id": 4, "provider": PROVIDER, "spec_digest": DIGEST,
+             "ask_amount": 250, "active": True}
+    rt, sent = _buyer(tmp_path, monkeypatch, [], entry=entry)
+    assert "spec_digest" in (await _call(rt, service_id=DIGEST))["error"]
+    assert "provided by" in (await _call(rt, service_id=4,
+                                         provider_address="0x" + "99" * 20))["error"]
+    assert "another spec" in (await _call(rt, service_id="4",
+                                          spec_digest="cd" * 32))["error"]
+    assert "Name the service" in (await _call(rt, provider_address=PROVIDER))["error"]
+    assert "provider_address" in (await _call(rt, spec_digest=DIGEST))["error"]
+    assert sent == []
+
+
+def test_market_client_methods_run_off_the_event_loop():
+    """Every async ServiceMarketClient method runs on a worker thread
+    (on_chain._off_the_loop), so a chain call never blocks the loop."""
+    import asyncio
+    import threading
+
+    from atn.config import RPBConfig
+    from atn.on_chain import ServiceMarketClient
+
+    seen = []
+
+    def fake_web3(self):
+        seen.append(threading.get_ident())
+        raise ConnectionError("no chain in this test")
+
+    smc = ServiceMarketClient(RPBConfig(rpc_url="http://x", payment_channel_address="0x1"))
+    smc._get_web3 = fake_web3.__get__(smc)
+
+    async def main():
+        assert await smc.get_channel(1) is None
+        return threading.get_ident()
+    loop_thread = asyncio.run(main())
+    assert seen and seen[0] != loop_thread

@@ -171,7 +171,7 @@ async def test_sessions_sign_one_voucher_at_a_time(tmp_path, monkeypatch):
     monkeypatch.setattr(service_client, "request_service", request)
     monkeypatch.setattr(agent_tools, "_sanctioned", clear)
     provider = "0x" + "56" * 20
-    args = {"provider_address": provider, "service_id": "s", "payload": {}}
+    args = {"provider_address": provider, "spec_digest": "s", "payload": {}}
     out = await asyncio.gather(
         execute_tool("request_service", args, rt, caller_id="cc-a"),
         execute_tool("request_service", args, rt, caller_id="cc-b"))

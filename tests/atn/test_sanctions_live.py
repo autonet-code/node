@@ -91,7 +91,7 @@ def test_agent_cannot_pay_or_buy_from_a_sanctioned_household(monkeypatch):
     paid = asyncio.run(_pay_for_service(rt, {"recipient": AGENT, "amount": 1}))
     assert "sanctioned" in paid["error"]
     bought = asyncio.run(_request_service(rt, {
-        "provider_address": AGENT, "service_id": "s", "payload": {},
+        "provider_address": AGENT, "spec_digest": "s", "payload": {},
         "tx_hash": "0x1", "request_id": "r"}))
     assert "sanctioned" in bought["error"]
 
