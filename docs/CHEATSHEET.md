@@ -32,7 +32,7 @@ npx hardhat compile
 
 ### Economy proof-of-life
 ```bash
-python scripts/local_e2e_tool_economy.py    # register → publish → invoke → attest → close → on-chain mint
+python scripts/local_e2e_tool_economy.py    # publish → review → fees → close + mint → ATN and REP claims → channel
 ```
 
 ### Tests (never run the whole suite: 1700+ tests, slow)

@@ -89,7 +89,7 @@ removed with its contracts.
 One script exercises the full tool-economy loop end to end (see `docs/local_e2e.md`):
 
 ```bash
-python scripts/local_e2e_tool_economy.py    # register → publish → adopt → epoch mint
+python scripts/local_e2e_tool_economy.py    # publish → review → fees → close + mint → ATN and REP claims → channel
 ```
 
 ## Running tests
