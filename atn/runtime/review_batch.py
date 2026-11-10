@@ -109,8 +109,7 @@ TOOL_BOND_REVIEW_ABI = [
          ("snapshot", "uint48"), ("supply", "uint256"), ("revealDeadline", "uint256"),
          ("unscoredBps", "uint256")], "view"),
     _fn("getRound", [("digest", "bytes32"), ("epoch", "uint256")],
-        [("stage", "uint8"), ("weight", "uint256"), ("reviewCount", "uint256"),
-         ("beforeConclusion", "bool")], "view"),
+        [("stage", "uint8"), ("weight", "uint256"), ("reviewCount", "uint256")], "view"),
     _fn("roundAxis", [("digest", "bytes32"), ("epoch", "uint256"), ("i", "uint256")],
         [("sum", "int256"), ("mass", "uint256")], "view"),
     _review_fn("reviewAt", [("digest", "bytes32"), ("epoch", "uint256"), ("i", "uint256")]),
@@ -135,12 +134,11 @@ TOOL_BOND_REVIEW_ABI = [
     _fn("claim", [("digest", "bytes32"), ("epoch", "uint256"), ("reviewer", "address")]),
     _fn("toolRating", [("digest", "bytes32"), ("key", "bytes32")],
         [("sum", "int256"), ("mass", "uint256")], "view"),
+    # Decision 2026-11-10: malware 0 none, 1 by the reviewers, 2 by the DAO;
+    # cleared once the DAO cleared it; share on the 1e18 scale.
     _fn("verdicts", [("", "bytes32")],
-        [("concludedAt", "uint48"), ("appealEnds", "uint48"), ("heldUntil", "uint48"),
-         ("ruling", "uint8"), ("settled", "bool"), ("share", "uint64"),
-         ("yesMass", "uint256"), ("bondPool", "uint256")], "view"),
-    _fn("claimBondShare", [("digest", "bytes32"), ("epoch", "uint256"),
-                           ("reviewer", "address")]),
+        [("concludedAt", "uint48"), ("malware", "uint8"), ("cleared", "bool"),
+         ("share", "uint64"), ("repBurned", "uint256")], "view"),
 ]
 
 # Substrate's owner binding and the epoch's REP timepoint, and RepToken's
@@ -410,8 +408,7 @@ class ReviewBondClient:
     async def round_of(self, digest: str, epoch: int) -> Optional[dict[str, Any]]:
         def fn(b, s):
             r = b.functions.getRound(_b32(digest), int(epoch)).call()
-            return {"stage": int(r[0]), "weight": int(r[1]), "reviews": int(r[2]),
-                    "before_conclusion": bool(r[3])}
+            return {"stage": int(r[0]), "weight": int(r[1]), "reviews": int(r[2])}
         return await self._read(fn)
 
     async def review_of(self, digest: str, epoch: int,
@@ -503,21 +500,15 @@ class ReviewBondClient:
             _b32(digest), int(epoch), reviewer))
 
     async def verdict_of(self, digest: str) -> Optional[dict[str, Any]]:
-        """The tool's malware verdict on ToolBond (Decision 2026-11-09)."""
+        """The tool's malware verdict on ToolBond (Decision 2026-11-10):
+        ``malware`` 0 none, 1 by the reviewers, 2 by the DAO; ``cleared``
+        once the DAO cleared it."""
         def fn(b, s):
             v = b.functions.verdicts(_b32(digest)).call()
-            return {"concluded_at": int(v[0]), "appeal_ends": int(v[1]),
-                    "held_until": int(v[2]), "ruling": int(v[3]),
-                    "settled": bool(v[4]), "share": int(v[5]),
-                    "yes_mass": int(v[6]), "bond_pool": int(v[7])}
+            return {"concluded_at": int(v[0]), "malware": int(v[1]),
+                    "cleared": bool(v[2]), "share": int(v[3]),
+                    "rep_burned": int(v[4])}
         return await self._read(fn)
-
-    async def claim_bond_share(self, private_key: str, digest: str, epoch: int,
-                               reviewer: str) -> dict[str, Any]:
-        """A malware-yes review's share of the slashed bond, paid to the
-        reviewer through the service rail."""
-        return await self._write(private_key, lambda b, s, a: b.functions.claimBondShare(
-            _b32(digest), int(epoch), reviewer))
 
 
 # ---------------------------------------------------------------------------

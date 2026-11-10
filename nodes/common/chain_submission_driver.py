@@ -97,8 +97,8 @@ class ChainSubmissionConfig:
     # alongside the on-chain owners of the local agents.
     owner_wallet: str = ""
     # ToolBond. Set => after the claims the operator shows ToolBond each
-    # tool the anchor concluded and settles malware verdicts that are due
-    # (verdict_submitter, Decision 2026-11-09).
+    # tool the anchor concluded, which settles its malware verdict
+    # (verdict_submitter, Decisions 2026-11-09 and 2026-11-10).
     tool_bond_address: str = ""
 
 
@@ -170,8 +170,6 @@ class ChainSubmissionDriver:
         # nobody follows any more holds up every later one.
         self._elections_path = Path(elections_path) if elections_path else None
         self._load_elections()
-        self._verdicts_path = (self._elections_path.parent / "open_verdicts.json"
-                               if self._elections_path else None)
         self._verdict_submitter: Optional[Any] = None
 
     def governed_anchorer(self) -> Optional[GovernedAnchorer]:
@@ -579,9 +577,6 @@ class ChainSubmissionDriver:
             if done:
                 with self._lock:
                     self._pending.pop(epoch_id, None)
-        verdicts = self._verdicts()
-        if verdicts is not None and verdicts.open_verdicts:
-            verdicts.settle_due()
 
     def _ensure_ticker(self) -> None:
         with self._lock:
@@ -685,11 +680,10 @@ class ChainSubmissionDriver:
                 if row.get("error"):
                     logger.warning("epoch %s: tool %s not concluded on chain: %s",
                                    epoch_id, row["digest"][:12], row["error"])
-            verdicts.settle_due()
         return results
 
     def _verdicts(self, op: Optional[Voter] = None) -> Optional[Any]:
-        """The verdict submitter (conclude, settleMalware), operator-signed;
+        """The verdict submitter (conclude), operator-signed;
         None without a ToolBond address, an anchorer or an operator key."""
         if self._verdict_submitter is not None:
             return self._verdict_submitter
@@ -721,7 +715,7 @@ class ChainSubmissionDriver:
         self._verdict_submitter = VerdictSubmitter(
             w3=w3, tool_bond_address=self.config.tool_bond_address,
             substrate=self._anchorer._get_contract(), resolver=self._blob_resolver,
-            send=send, state_path=self._verdicts_path)
+            send=send)
         return self._verdict_submitter
 
     def _claim_rep(self, claimants: List[str], op: Voter) -> None:

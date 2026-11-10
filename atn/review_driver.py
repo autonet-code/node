@@ -352,14 +352,6 @@ class ReviewDriver:
             digest = entry.digest
             if batch.rounds.get(digest) in ("claimed", "none"):
                 continue
-            if batch.rounds.get(digest) == "bond_pending":
-                # A malware yes: its share of the slashed bond once the
-                # tool's verdict settles (Decision 2026-11-09).
-                if await self._claim_bond_share(batch, digest, own_key or gas_key):
-                    claimed += 1
-                if batch.rounds.get(digest) == "bond_pending":
-                    open_rounds += 1
-                continue
             rnd = await client.round_of(digest, batch.epoch)
             if rnd is None:
                 open_rounds += 1
@@ -399,10 +391,8 @@ class ReviewDriver:
                 continue
             res = await client.claim(key, digest, batch.epoch, batch.agent)
             if res.get("success") or reverted_with(res, "NothingToClaim"):
-                batch.rounds[digest] = "bond_pending" if entry.malware else "claimed"
+                batch.rounds[digest] = "claimed"
                 claimed += 1 if res.get("success") else 0
-                if entry.malware:
-                    open_rounds += 1
             else:
                 batch.last_error = f"claim {digest[:12]}: {res.get('error')}"
                 open_rounds += 1
@@ -410,26 +400,6 @@ class ReviewDriver:
             batch.status = "settled"
         store.save(batch)
         return finalized, claimed
-
-    async def _claim_bond_share(self, batch: EpochBatch, digest: str,
-                                key: Optional[str]) -> bool:
-        """Claim a malware-yes review's share of the tool's slashed bond
-        once its verdict is settled; mark the round claimed when there is
-        nothing (left) to claim. True when a claim went out."""
-        client = self.client
-        reader = getattr(client, "verdict_of", None)
-        verdict = await reader(digest) if reader is not None else None
-        if verdict is None or not verdict.get("settled"):
-            return False                       # still open, or never concluded
-        if int(verdict.get("bond_pool") or 0) == 0 or not key:
-            batch.rounds[digest] = "claimed"
-            return False
-        res = await client.claim_bond_share(key, digest, batch.epoch, batch.agent)
-        if res.get("success") or reverted_with(res, "NothingToClaim"):
-            batch.rounds[digest] = "claimed"
-            return bool(res.get("success"))
-        batch.last_error = f"bond share {digest[:12]}: {res.get('error')}"
-        return False
 
 
 def batch_rows(runtime: Any) -> list[dict[str, Any]]:

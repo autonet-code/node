@@ -367,38 +367,12 @@ class TestDriver:
         assert got["finalized"] == 0
         bond.now += 11
         got = await drv.tick()
-        # No appeal window per round any more: both Done and claimed. D2's
-        # malware yes waits for the verdict; this ToolBond has none to read.
+        # Both rounds Done and claimed; a malware yes waits for nothing,
+        # since a slashed stake goes to the treasury (Decision 2026-11-10).
         assert got["claimed"] == 2
         b = store.load(addr, 3, [])
-        assert b.rounds == {D1: "claimed", D2: "bond_pending"} and b.status == "revealed"
+        assert b.rounds == {D1: "claimed", D2: "claimed"} and b.status == "settled"
         assert not [c for c in bond.calls if c[0] == "forfeit"]
-
-    async def test_a_malware_yes_claims_its_bond_share_once_settled(self, tmp_path):
-        rt, bond, addr, store, drv = await _driver_setup(tmp_path)
-        verdict = {"settled": False, "bond_pool": 0}
-        shares: list = []
-
-        async def verdict_of(digest):
-            return dict(verdict) if digest == D2 else None
-
-        async def claim_bond_share(key, digest, epoch, reviewer):
-            shares.append(digest)
-            return {"success": True}
-        bond.verdict_of, bond.claim_bond_share = verdict_of, claim_bond_share
-        drv.on_local_close()
-        await drv.tick()
-        bond.epoch, bond.anchored[3] = 4, bond.now + 1
-        await drv.tick()
-        bond.now += 5
-        await drv.tick()
-        b = store.load(addr, 3, [])
-        # D2 was flagged malware: its round waits for the tool's verdict.
-        assert b.rounds == {D1: "claimed", D2: "bond_pending"} and b.status == "revealed"
-        verdict.update(settled=True, bond_pool=50)
-        await drv.tick()
-        b = store.load(addr, 3, [])
-        assert shares == [D2] and b.rounds[D2] == "claimed" and b.status == "settled"
 
     async def test_review_that_did_not_count_is_skipped(self, tmp_path):
         rt, bond, addr, store, drv = await _driver_setup(tmp_path)

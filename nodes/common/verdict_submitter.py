@@ -1,29 +1,24 @@
-"""Open and settle ToolBond's malware verdicts from anchored closes
-(Decision 2026-11-09, docs/tool_substrate.md).
+"""Show ToolBond the malware verdicts of anchored closes (Decisions
+2026-11-09 and 2026-11-10, docs/tool_substrate.md).
 
 Each close commits, in the anchor's agentMintRoot, one leaf per tool that
 concluded in it with the tool's malware share in bps (the close is the one
 definition of the share). After the anchor lands, someone has to show
 ToolBond each leaf: ``ToolBond.conclude(digest, anchorIndex, shareBps,
 proof)`` records the conclusion and, when more than half the reviewing REP
-said malware, opens the appeal window. Once the window (and any registered
-appeal) has passed, or the DAO has ruled, ``settleMalware(digest)``
-applies the verdict. Both are permissionless and idempotent on chain; every
-daemon that claims a household's mint does them too (the operator pays
-the gas), so they never depend on one daemon.
+said malware, settles the verdict at once (the stake's share to the
+treasury, the household's REP burned). There is no appeal window: the DAO
+clears or designates a verdict by proposal at any time. The call is
+permissionless and idempotent on chain; every daemon that claims a
+household's mint makes it too (the operator pays the gas), so it never
+depends on one daemon.
 
-``conclude_epoch`` runs once per anchored epoch, from the claim path;
-``settle_due`` on every tick, for the verdicts this daemon opened or saw
-open (kept in a small JSON file so a restart remembers them).
+``conclude_epoch`` runs once per anchored epoch, from the claim path.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import threading
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .authoritative_encoding import cid_for_blob, decode_agent_mint_blob, decode_concluded
@@ -45,11 +40,9 @@ def _fn(name, inputs, outputs=(), mutability="nonpayable"):
 TOOL_BOND_VERDICT_ABI = [
     _fn("conclude", [("digest", "bytes32"), ("anchorIndex", "uint256"),
                      ("shareBps", "uint256"), ("proof", "bytes32[]")]),
-    _fn("settleMalware", [("digest", "bytes32")]),
     _fn("verdicts", [("", "bytes32")],
-        [("concludedAt", "uint48"), ("appealEnds", "uint48"), ("heldUntil", "uint48"),
-         ("ruling", "uint8"), ("settled", "bool"), ("share", "uint64"),
-         ("yesMass", "uint256"), ("bondPool", "uint256")], "view"),
+        [("concludedAt", "uint48"), ("malware", "uint8"), ("cleared", "bool"),
+         ("share", "uint64"), ("repBurned", "uint256")], "view"),
 ]
 
 _ANCHOR_COMPONENTS = [
@@ -62,49 +55,18 @@ _ANCHOR_COMPONENTS = [
 
 
 class VerdictSubmitter:
-    """Concludes and settles verdicts with one sender key. ``send(fn)``
-    signs and sends a contract call, returning ``{"success", "error"?}``;
-    tests and the driver supply it."""
+    """Concludes verdicts with one sender key. ``send(fn)`` signs and sends a
+    contract call, returning ``{"success", "error"?}``; tests and the driver
+    supply it."""
 
     def __init__(self, *, w3: Any, tool_bond_address: str, substrate: Any,
-                 resolver: Any, send: Callable[[Any], Dict[str, Any]],
-                 state_path: Optional[Path] = None) -> None:
+                 resolver: Any, send: Callable[[Any], Dict[str, Any]]) -> None:
         self._w3 = w3
         self._bond = w3.eth.contract(address=w3.to_checksum_address(tool_bond_address),
                                      abi=TOOL_BOND_VERDICT_ABI)
         self._substrate = substrate
         self._resolver = resolver
         self._send = send
-        self._path = Path(state_path) if state_path else None
-        self._lock = threading.Lock()
-        self._open: Dict[str, int] = self._load()   # digest -> share bps
-
-    # -- persistence ---------------------------------------------------------
-    def _load(self) -> Dict[str, int]:
-        if self._path is None or not self._path.exists():
-            return {}
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            return {str(k): int(v) for k, v in (data or {}).items()}
-        except (OSError, ValueError, TypeError):
-            logger.warning("verdict state %s unreadable; starting empty", self._path)
-            return {}
-
-    def _save(self) -> None:
-        if self._path is None:
-            return
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(dict(sorted(self._open.items()))), encoding="utf-8")
-            os.replace(tmp, self._path)
-        except OSError as e:
-            logger.warning("failed to persist verdict state: %s", e)
-
-    @property
-    def open_verdicts(self) -> Dict[str, int]:
-        with self._lock:
-            return dict(self._open)
 
     # -- conclude ------------------------------------------------------------
     def _anchor_index(self, epoch_id: str) -> Optional[int]:
@@ -159,43 +121,8 @@ class VerdictSubmitter:
                             row["error"] = res.get("error", "conclude failed")
                 else:
                     row["concluded"] = "already"
-                if bps * 2 > _BPS:
-                    with self._lock:
-                        self._open[digest] = int(bps)
+                row["malware"] = bps * 2 > _BPS
             except Exception as e:  # noqa: BLE001
                 row["error"] = str(e)
             rows.append(row)
-        self._save()
         return rows
-
-    # -- settle --------------------------------------------------------------
-    def settle_due(self, now: Optional[int] = None) -> List[str]:
-        """Settle every open malware verdict whose window and holds have
-        passed (or that the DAO ruled). Returns the digests settled."""
-        settled: List[str] = []
-        if now is None:
-            try:
-                now = int(self._w3.eth.get_block("latest")["timestamp"])
-            except Exception:  # noqa: BLE001
-                return settled
-        for digest in sorted(self.open_verdicts):
-            try:
-                d = bytes.fromhex(digest)
-                concluded_at, appeal_ends, held_until, ruling, done = (
-                    self._bond.functions.verdicts(d).call()[:5])
-                if done or int(concluded_at) == 0:
-                    if done:
-                        with self._lock:
-                            self._open.pop(digest, None)
-                    continue
-                if int(ruling) == 0 and (now <= int(appeal_ends) or now <= int(held_until)):
-                    continue
-                res = self._send(self._bond.functions.settleMalware(d))
-                if res.get("success"):
-                    settled.append(digest)
-                    with self._lock:
-                        self._open.pop(digest, None)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("settling the verdict on %s failed: %s", digest[:12], e)
-        self._save()
-        return settled
