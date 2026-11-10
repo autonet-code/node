@@ -863,7 +863,8 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         listed = await ws_c._handle_message({
             "type": "register_service", "msg_id": "svc-1", "name": "word-count",
             "description": "Word counts on C's machine.", "input_schema": WORDS_SCHEMA,
-            "backing_tool": reg["digest"], "ask": {"amount": str(SERVICE_ASK)}},
+            "backing_tool": reg["digest"], "ask": {"amount": str(SERVICE_ASK)},
+            "unit": "one word count of a text"},
             owner_session())
         if not listed.get("ok") or not listed["result"].get("on_chain"):
             raise RuntimeError(f"register_service: {listed}")
