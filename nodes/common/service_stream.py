@@ -77,6 +77,7 @@ MAX_DATA_BYTES = 1024 * 1024
 WRITE_CHUNK = 65000  # Noise's 65535-byte limit with yamux's header on top
 OPEN_TIMEOUT = 60.0          # the provider's gate reads the chain
 VOUCHER_WAIT = 30.0          # unpaid usage this long ends the stream
+RECEIPT_WAIT = 5.0           # a closing buyer waits this long for receipts
 DATA_BUFFER_FRAMES = 64
 
 
@@ -131,7 +132,7 @@ class StreamHandler:
     async def release(self, open_msg: dict, token: Any) -> None:
         return None
 
-    def sign(self, open_msg: dict, request_id: str, reply: dict) -> dict:
+    async def sign(self, open_msg: dict, request_id: str, reply: dict) -> dict:
         return reply
 
     async def serve(self, stream: "ServiceStream") -> None:
@@ -228,6 +229,7 @@ class ServiceStream:
         self._changed = trio.Event()
         self._asked = False
         self._buyer_done = ""       # why the buyer pays no more
+        self._reader_done = trio.Event()
         # Buyer-side payment.
         self.voucher_source: Optional[Callable[[int], Awaitable[Optional[dict]]]] = None
         self.on_receipt: Optional[Callable[[str, Optional[bool]], Any]] = None
@@ -287,15 +289,21 @@ class ServiceStream:
         self.closed = True
         self.close_reason = reason or "closed"
         if self.role == "provider":
-            await self._release_unentered()
+            # Not served = not paid, also when the stream ends by a
+            # cancellation (the host shutting down).
+            with trio.CancelScope(shield=True), trio.move_on_after(15):
+                await self._release_unentered()
         with trio.CancelScope(shield=True), trio.move_on_after(3):
             try:
                 await self._write(KIND_CONTROL, _control(
                     {"type": "close", "reason": self.close_reason}), force=True)
             except Exception:  # noqa: BLE001 (the far end is gone)
                 pass
+            # Half-close: the peer's last receipts and its close can still
+            # be read. The stream is closed fully when both sides are done.
             try:
-                await self.raw.close()
+                closer = getattr(self.raw, "close_write", None)
+                await (closer() if closer is not None else self.raw.close())
             except Exception:  # noqa: BLE001
                 pass
         self._data_tx.close()
@@ -336,7 +344,7 @@ class ServiceStream:
                  "result": {"request_id": request_id, "units": units,
                             "covered": self.covered, "used": self.used}}
         if self.handler is not None:
-            reply = self.handler.sign(self.open_msg, request_id, reply)
+            reply = await self.handler.sign(self.open_msg, request_id, reply)
         reply["type"] = "receipt"
         reply["request_id"] = request_id
         try:
@@ -354,14 +362,15 @@ class ServiceStream:
 
     async def _release_unentered(self) -> None:
         for v in self._vouchers:
-            if not v.kept:
-                v.kept = True  # settled either way
-                if self.handler is not None:
-                    try:
-                        await self.handler.release(self.open_msg, v.token)
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("releasing a stream voucher failed: %s", e)
-                await self._receipt(v.request_id, True, False, units=v.units)
+            if v.kept:
+                continue
+            if self.handler is not None:
+                try:
+                    await self.handler.release(self.open_msg, v.token)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("releasing a stream voucher failed: %s", e)
+            v.kept = True  # settled: released
+            await self._receipt(v.request_id, True, False, units=v.units)
 
     async def _on_voucher(self, frame: dict) -> None:
         rid = str(frame.get("request_id") or "")
@@ -398,7 +407,15 @@ class ServiceStream:
         frame = {**fields, "type": "voucher", "units": units}
         rid = str(frame.get("request_id") or "")
         self.unsettled[rid] = units
-        await self._send_control(frame)
+        try:
+            await self._send_control(frame)
+        except StreamClosed:
+            # Closed meanwhile: it never left, so it is not paid.
+            self.unsettled.pop(rid, None)
+            self.receipts[rid] = False
+            if self.on_receipt is not None:
+                self.on_receipt(rid, False)
+            raise
 
     def _on_receipt(self, msg: dict) -> None:
         rid = str(msg.get("request_id") or "")
@@ -422,7 +439,13 @@ class ServiceStream:
             while True:
                 kind, payload = await read_frame(self.raw)
                 if kind == KIND_DATA:
-                    await self._data_tx.send(payload)
+                    # After this side closed, the data is dropped but the
+                    # reader goes on: the peer's receipts and close follow.
+                    if not self.closed:
+                        try:
+                            await self._data_tx.send(payload)
+                        except (trio.ClosedResourceError, trio.BrokenResourceError):
+                            pass
                     continue
                 msg = json.loads(payload.decode("utf-8"))
                 if not isinstance(msg, dict):
@@ -447,6 +470,8 @@ class ServiceStream:
             log.debug("service stream reader ended: %s", e)
             if not self.close_reason:
                 self.close_reason = f"stream broke: {e}"
+        finally:
+            self._reader_done.set()
         await self.aclose(self.close_reason or "closed by the peer")
 
     def _settle_unknown(self) -> None:
@@ -533,9 +558,16 @@ async def open_on(raw: Any, open_msg: dict, *,
                 yield stream
             finally:
                 await stream.aclose(stream.close_reason or "closed by the buyer")
+                # The provider answers a close with the receipts of the
+                # vouchers it released, then its own close: wait for them,
+                # or an unused voucher would be counted as paid.
+                with trio.move_on_after(RECEIPT_WAIT):
+                    await stream._reader_done.wait()
                 nursery.cancel_scope.cancel()
     finally:
         stream._settle_unknown()
+        with trio.CancelScope(shield=True):
+            await _quiet_close(raw)
 
 
 async def serve_incoming(raw: Any, handler: Optional[StreamHandler], *,
@@ -605,10 +637,10 @@ async def serve_incoming(raw: Any, handler: Optional[StreamHandler], *,
     finally:
         if not stream.closed:
             await stream.aclose("ended")
-        else:
-            # Released inside aclose; a cancellation may have skipped it.
-            with trio.CancelScope(shield=True):
-                await stream._release_unentered()
+        with trio.CancelScope(shield=True):
+            # Released inside aclose; a cancellation may have cut it short.
+            await stream._release_unentered()
+            await _quiet_close(raw)
 
 
 async def _quiet_close(raw: Any) -> None:
