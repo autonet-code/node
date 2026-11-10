@@ -159,6 +159,12 @@ async def _read_frame_no_close(stream, max_len: int = MAX_FRAME_BYTES) -> bytes:
 WEIGHTS_PROTOCOL = TProtocol("/autonet/weights/1.0.0")
 ACTIVATIONS_PROTOCOL = TProtocol("/autonet/activations/1.0.0")
 CAPABILITY_PROTOCOL = TProtocol("/autonet/capability/1.0.0")
+def _pruned(content_hash: str) -> bool:
+    """A pruned tool's blob (Decision 2026-11-10): never announced or fetched."""
+    from .pruned_tools import is_pruned
+    return is_pruned(content_hash)
+
+
 BLOB_PROTOCOL = TProtocol("/autonet/blob/1.0.0")
 # A blob request frame is "<hash>" (a "|<hops>" suffix from older daemons is
 # ignored). A peer answers from what it holds and never forwards: a fetcher
@@ -2535,8 +2541,9 @@ class AutonetHost:
         ``peer_ids`` given) at once, and meanwhile look its providers up in
         the DHT and ask them (dialled directly or through a relay circuit).
         The first answer whose sha256 matches wins. Returns None when
-        nobody reachable holds it within ``timeout``."""
-        if not self._host:
+        nobody reachable holds it within ``timeout``, and for a pruned tool's
+        blob (Decision 2026-11-10)."""
+        if not self._host or _pruned(content_hash):
             return None
         result: List[Optional[bytes]] = [None]
         asked: Set[str] = set()
@@ -2576,8 +2583,8 @@ class AutonetHost:
         DHT peer took the record (False with no DHT peers yet: the next
         mesh round retries)."""
         content_hash = str(content_hash).strip().lower()
-        if len(content_hash) != 64:
-            return False
+        if len(content_hash) != 64 or _pruned(content_hash):
+            return False      # a pruned tool's blob is never announced
         self._provided.add(content_hash)
         if self._dht is None:
             return False
@@ -2650,6 +2657,11 @@ class AutonetHost:
         addresses changed), and the ones never announced yet."""
         if self._dht is None or not self._provided:
             return
+        # Blobs pruned since they were announced stop being re-announced.
+        gone = [c for c in self._provided if _pruned(c)]
+        for c in gone:
+            self._provided.discard(c)
+            self._provided_at.pop(c, None)
         now = time.time()
         due = [c for c in self._provided
                if force or now - self._provided_at.get(c, 0) >= self._provide_interval]

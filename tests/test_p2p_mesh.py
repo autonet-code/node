@@ -70,6 +70,26 @@ def test_proxy_from_env(monkeypatch):
     assert p2p_mesh.proxy_from_env() == "http://proxy:3128"
 
 
+def test_a_pruned_blob_is_never_announced_or_fetched():
+    """Decision 2026-11-10: the blobs of a pruned tool leave the DHT."""
+    import trio
+    from nodes.common import pruned_tools
+    host = AutonetHost(node_id="pruner")
+    cid = "ab" * 32
+    try:
+        pruned_tools.replace([cid])
+        assert trio.run(host.provide_blob, cid) is False and cid not in host._provided
+        assert trio.run(host.fetch_blob_from_network, cid) is None
+        pruned_tools.replace([])
+        host._provided.add(cid)
+        pruned_tools.replace([cid])
+        host._dht = object()          # any DHT: the pruned blob leaves first
+        trio.run(host._reprovide, False)
+        assert cid not in host._provided
+    finally:
+        pruned_tools.replace([])
+
+
 def test_peer_cache_roundtrip(tmp_path):
     path = tmp_path / "p2p_peers.json"
     cache = p2p_mesh.PeerCache(path, limit=2)
