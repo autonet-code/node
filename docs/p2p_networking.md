@@ -1,9 +1,10 @@
 # P2P networking behind NAT
 
 Most daemons run on home or cloud machines that cannot accept inbound
-connections. This page covers how they still join, gossip and fetch blobs.
-Code: `nodes/common/p2p.py`, `nodes/common/blob_resolver.py`,
-`nodes/common/config.py`.
+connections. This page covers how they still join, gossip, fetch blobs and
+open service streams to each other. Code: `nodes/common/p2p.py`,
+`nodes/common/blob_resolver.py`, `nodes/common/circuit_relay.py`,
+`nodes/common/service_stream.py`, `nodes/common/config.py`.
 
 ## Config
 
@@ -34,6 +35,13 @@ Home users need no network setup. With no `announce_addrs`:
    listen addresses. This also covers a manual port forward, and repeating
    the check every `reach_interval` follows a changed home IP with no DNS.
 3. Otherwise the daemon stays NAT'd and keeps working by dialling out.
+
+Whether a daemon announces a dialable address is advertised in its
+capability (`NodeCapability.reachable`: configured announce addresses, or
+one the reach check confirmed). Buyers dial a reachable provider directly;
+a NAT'd one is reached through a relay. The app shows it to the owner
+(`list_services` returns `reachability`, with advice when the daemon is not
+reachable), and catalog rows show it per provider (`reachable`).
 
 - A **reachable** daemon (public IP, port forward or tunnel) sets
   `announce_addrs` to its public address. That address then replaces the
@@ -76,12 +84,30 @@ Home users need no network setup. With no `announce_addrs`:
   carry-over, agent mints, over
   `/autonet/blob-offer/1.0.0`; it fetches what it lacks from the offerer),
   so a joiner can install the anchored state when every daemon that
-  computed it is offline (issue #44), forwards service calls one hop, and answers reachability checks. No close, no chain, no agents, no model. It
-  prints its full multiaddr on start: that is the address to publish.
+  computed it is offline (issue #44), forwards service calls one hop,
+  relays connections between daemons connected to it (circuit relay v2,
+  below), and answers reachability checks. No close, no chain, no agents,
+  no model. It prints its full multiaddr on start: that is the address to
+  publish.
 
 ```
 atn relay --port 4001 --announce /dns4/hub.example.org/tcp/4001
 ```
+
+Relayed connections are unlimited by default (a relay gives bandwidth the
+way a torrent seed does; relays are not paid). Its operator may cap them:
+
+| Flag | Env | Meaning (0 = no limit) |
+|---|---|---|
+| `--circuit-max-duration` | `AUTONET_RELAY_CIRCUIT_MAX_DURATION` | Seconds one relayed connection may stay open |
+| `--circuit-max-bytes` | `AUTONET_RELAY_CIRCUIT_MAX_BYTES` | Bytes one relayed connection may carry, both ways together |
+| `--max-circuits` | `AUTONET_RELAY_MAX_CIRCUITS` | Relayed connections open at once |
+| `--no-circuits` | `AUTONET_RELAY_NO_CIRCUITS` | Relay no connections at all |
+
+Circuit relay v2 stacks default to tight limits (go-libp2p: 2 minutes and
+128 KiB per relayed connection; py-libp2p 0.6: 1 GiB per reservation and
+four reservations in all), which would end any stream within minutes; none
+of those apply here.
 
 Without `--jurisdiction` it relays the jurisdiction this install would
 join; pass `--jurisdiction <chain_id>:<DAO>` (repeatable) to choose. To make
@@ -90,8 +116,8 @@ a relay a seed, the DAO writes its printed multiaddr into
 
 ## The ws transport (relays behind an HTTPS proxy)
 
-`p2p.transport` (`AUTONET_P2P_TRANSPORT`, `atn relay --transport`) is `tcp`
-(default) or `ws`. py-libp2p runs ONE transport per host, so every node of a
+`p2p.transport` (`AUTONET_P2P_TRANSPORT`, `atn relay --transport`) is `ws`
+(default) or `tcp`. py-libp2p runs ONE transport per host, so every node of a
 network must use the same one.
 
 - **Hiding a relay's address.** A `ws` relay can sit behind an HTTPS proxy
@@ -158,13 +184,101 @@ stream, same-stream framing (write without closing, read, close).
   most `service_relay_timeout` (600 s; relay flag `--service-timeout`).
 - **Capabilities are kept under the peer that sent them** (the stream's
   Noise-authenticated peer id), not the peer id the payload names, so a
-  peer can claim the relay role only for itself.
+  peer can claim the relay role only for itself. Unknown capability keys
+  are dropped, not fatal.
+
+## Peer info
+
+`/autonet/peer-info/1.0.0`: `{"peer": <id>}` in, `{"peer", "connected",
+"reachable", "addrs", "roles", "timestamp"}` out, from the capability that
+peer sent the answering node. A daemon asks its relays (seeds and peers
+advertising the relay role) at once, to learn whether a peer it is not
+connected to says it is reachable and at which addresses, and which relay
+is connected to it. Answers are cached for 10 minutes
+(`AutonetHost.peer_reachable`, which asks in the background on a miss).
+
+## Relayed connections (circuit relay v2)
+
+Two daemons connected to the same relay get a libp2p connection to each
+other through it (`nodes/common/circuit_relay.py`). The dialer sends the
+relay a HOP CONNECT naming the target; the relay opens a STOP stream to
+the target and copies bytes between the two streams; the two ends run
+Noise and yamux over them. The relay sees only ciphertext, and each end
+has authenticated the other's peer id.
+
+- Every host accepts relayed connections (py-libp2p's own STOP handler).
+  Only a host given `circuit_relay_caps` (`atn relay`) relays them, and
+  only to a target already connected to it: a relay never dials for a
+  CONNECT.
+- The HOP side is ours, not py-libp2p 0.6's `CircuitV2Protocol`: that one
+  writes each read of up to 65535 bytes to the other stream in one write,
+  which Noise refuses (its message limit is 65535 bytes and yamux adds a
+  12-byte header), so any relayed transfer above about 64 KiB breaks. It
+  also wants the dialer to hold a reservation, accepts four reservations in
+  all, caps each at 1 GiB and keys circuits by peer, so one buyer's closing
+  circuit closes another's to the same provider. Ours copies in 65000-byte
+  writes, needs no reservation (a RESERVE is answered OK), and applies the
+  operator's caps per circuit.
+- Wire: py-libp2p 0.6's circuit v2 messages (protobufs without a length
+  prefix). It does not interoperate with go-libp2p or rust-libp2p relays,
+  which length-prefix, nor with py-libp2p 0.8 (whose target must hold a
+  reservation).
+- Proven on both transports (`tcp`, `ws`) with megabytes each way
+  (`tests/test_service_stream.py`).
+
+## Service streams
+
+`/autonet/service-stream/1.0.0` gives a buyer's and a provider's daemons a
+two-way stream for a stream service (`nodes/common/service_stream.py`;
+the handshake, payment and receipts are in `docs/services_market.md`,
+Decision 2026-11-10 "a stream between buyer and seller"). Frames are
+`[kind][4-byte length][payload]`, kind `C` (JSON control) or `D`
+(application bytes).
+
+The path, in the owner's order (`AutonetHost.route_to`):
+
+1. a connection already open to the provider;
+2. a direct dial to the addresses the provider advertises as reachable
+   (its capability, or its relays' answers);
+3. a relayed connection through a relay that is connected to it (relays
+   that answered "connected" first).
+
+Hole punching would sit between 2 and 3; it is not tried (below). A
+relayed connection the buyer opened for a stream is closed when no stream
+uses it.
 
 ## Not covered
 
-- Hole punching (py-libp2p ships DCUtR) and circuit relay v2 are not used. NAT'd daemons cannot
-  dial each other directly; gossip, blobs and service calls go through
-  reachable peers.
+- **Hole punching (DCUtR) is not used.** py-libp2p 0.6 (the version
+  pinned, `libp2p>=0.6.0,<0.7`) ships `DCUtRProtocol`, but it cannot punch
+  a NAT: it exchanges the host's listen addresses instead of the addresses
+  peers observe, it dials with `host.connect`, which returns at once while
+  the relayed connection exists (so no direct dial happens), and it reports
+  success by checking the peer's addresses in the peerstore rather than
+  the connection's transport, so it reports success over the relayed
+  connection. Its TCP transport dials from an ephemeral port (no
+  `SO_REUSEPORT`, no source bind), and TCP hole punching needs both sides
+  to dial from the port the other dials. Running it would fake a direct
+  connection, so it is off.
+- **What it would take.** py-libp2p 0.8.1 (tried in a separate venv; its
+  own circuit relay carried 5 MB both ways on `tcp` and `ws` once the
+  target reserved) has a DCUtR written for TCP: observed addresses,
+  source-bound dials with `SO_REUSEPORT`, closing the relayed connection
+  after the upgrade. It was read, not run against a real NAT (localhost
+  cannot show a punch). Its WebSocket transport still dials from an
+  ephemeral port (`dial_with_source` exists only for TCP), so on `ws`, the
+  daemon's default, hole punching would still not work; a `tcp` network
+  could use it. Upgrading means moving off `libp2p.tools.async_service` (renamed to
+  `anyio_service` in 0.8, which breaks `nodes/common/p2p.py`'s imports),
+  re-checking the py-libp2p quirks this host works around, and moving the
+  relay to 0.8's wire (length-prefixed messages, a reservation by the
+  target). For `ws` it also needs a source-bound dial in the WebSocket
+  transport, upstream or in a fork. Until then a NAT'd buyer reaches a
+  NAT'd provider only through a relay.
+- Relayed connections run end to end Noise but cross the relay's
+  bandwidth; a relay is not paid, so a busy jurisdiction depends on
+  operators willing to run uncapped relays, or on providers being
+  reachable.
 - Blobs held only in the in-memory resolver map (carry bundles) are not
   persisted, so a daemon that restarts cannot serve the
   ones it published before the restart. Peers that fetched them can.

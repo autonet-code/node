@@ -160,7 +160,9 @@ remotely. Agents don't need it.
 
 **Relay (`atn relay`).** A networking-only node: seed, gossip and blob
 relay (world events and service specs), a short log of event batches for catch-up, the state blobs each
-anchor commits (daemons offer them after every close), reach checks. No close, chain or agents. Seeds are listed in the
+anchor commits (daemons offer them after every close), reach checks, and
+relayed connections between daemons connected to it (circuit relay v2,
+unlimited unless its operator caps them; relays are not paid). No close, chain or agents. Seeds are listed in the
 DAO Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 
 **Chain.** In this repo (`contracts/core/`): `Substrate.sol` (ATN, epoch
@@ -191,7 +193,13 @@ agent directory.
 - Buyer to service provider: libp2p `/autonet/service/1.0.0` to the
   provider's on-chain peer id, direct or one hop through a relay (so NAT'd
   providers can sell); the provider's wss endpoint only when libp2p cannot
-  deliver.
+  deliver. A stream service (its spec names a `protocol`) gets a two-way
+  stream instead (`/autonet/service-stream/1.0.0`, Decision 2026-11-10 in
+  `services_market.md`): over an open connection, else a direct dial to a
+  reachable provider, else a relayed connection; channel vouchers travel on
+  it as the provider meters usage. Hole punching is not done (py-libp2p
+  0.6 cannot). An agent opens one with `open_service_stream` and gets a
+  local port; the provider pipes it to a local backend.
 - Daemon to chain: one RPC URL. Contract addresses come from the
   jurisdiction's Registry, read at each start (latest block). The close's
   parameters (REP, charter, sanctions, mint gate, review params, epoch rules) are read

@@ -48,6 +48,96 @@ Master-disable / fingerprinting is fleet hygiene for honest daemons,
 not a defense against dishonest ones. The defense is that lying has a
 wallet attached and receipts are forever.
 
+## Decision (2026-11-10): a stream between buyer and seller
+
+A service call was one request and one reply. Services also need a two-way
+stream between the buyer's and the seller's daemons: inference streaming,
+a video call, anything. Decided by the owner:
+
+1. **The application is the parties' business.** The spec names the
+   application protocol, `protocol: {id, description}` (`id` a name and a
+   version number, "openai-chat/1", "webrtc-sdp/1"; validated in
+   `atn/service_spec.py`). The network gives the two daemons a stream and
+   nothing more.
+2. **Direct first, a relay last.** A connection already open, else a direct
+   dial to the addresses a reachable provider advertises, else a circuit
+   relay v2 connection through a relay. Hole punching (DCUtR) belongs
+   between the last two and is not done: py-libp2p 0.6 cannot
+   (`docs/p2p_networking.md`, "Not covered"). Relays are not paid and
+   relayed connections are unlimited by default, like torrent seeding,
+   unless the relay's operator caps them (`atn relay
+   --circuit-max-duration`, `--circuit-max-bytes`, `--max-circuits`).
+3. **Providers are encouraged to be reachable.** `list_services` returns
+   `reachability` (`reachable`, the addresses, advice when buyers reach the
+   daemon only through a relay), and catalog rows carry `reachable` per
+   provider (its libp2p capability, or a relay's account of it; null until
+   known).
+4. **Vouchers travel alongside the stream**, and the provider serves only
+   while they cover the usage.
+
+### As built
+
+- **Handshake** (`/autonet/service-stream/1.0.0`,
+  `nodes/common/service_stream.py`). The buyer's first frame is the
+  `service_request` frame of the request/reply rail with `"type":
+  "service_stream"`: spec digest, request id, args, a channel voucher and
+  `payer_signature`. The provider runs the same gate
+  (`WebSocketBridge._validate_service_payment`: on-chain price, payee and
+  active flag, the voucher, the payer's signature, the replay guard), after
+  the checks that need no payment (known, not retired, a stream service,
+  a backend), and answers with one reply signed like a service reply
+  (`receipt_sig` over `ok`, `result`, `error`, `charged`). `result.units`
+  is what the opening voucher pays for: its increment over the channel
+  divided by the on-chain price (or the gate's own count when it gives
+  one). A buyer takes a reply only when it is signed by the address it
+  pays. Streams are paid with channel vouchers; a `tx_hash` opening is
+  refused before the gate, so it costs nothing.
+- **Vouchers on the stream.** The provider meters what it serves
+  (`ServiceStream.consume(units)`). When coverage runs low it sends
+  `{"type": "voucher_needed", "units": n}`; the buyer answers `{"type":
+  "voucher", ...}`: a payment proof under a fresh request id whose `args`
+  are `{"stream": <opening request id>, "units": n}`, signed by the payer.
+  The provider checks it with the same gate and requires the opening's
+  payer. Usage no voucher covers within 30 s closes the stream; a buyer
+  that will pay no more says `{"type": "no_voucher"}` and still gets what
+  it paid for.
+- **Not served = not paid.** A voucher is reserved when accepted and kept
+  (`ServiceStore.keep_channel_voucher`, logged with the verified payer)
+  only once usage enters the units it covers; the others are released when
+  the stream ends, also on a cancellation. Each outcome goes back in a
+  signed `{"type": "receipt", "charged": ...}`; the buyer's channel book
+  counts a voucher on `charged: true` or when no receipt came, and drops it
+  on `charged: false`. A closing buyer waits up to 5 s for the receipts.
+- **The voucher interface** (for the metered channels): the network layer
+  calls `voucher_source(units) -> fields | None` for the next voucher
+  (`request_id`, `args`, `channel_id`, `cumulative_amount`, `signature`,
+  `payer_signature`), `on_receipt(request_id, charged)` with each outcome,
+  and `verify(reply, request_id)` on every reply and receipt. The daemon
+  fills it from the household's channel (`service_channels.voucher_for` for
+  ask x units), one voucher at a time per channel: a stream holds the
+  channel's lock while one of its vouchers is outstanding.
+- **The daemon's ends** (`atn/service_streams.py`). The provider pipes an
+  accepted stream to the service's backend, a local address in
+  `backing_tool` (`tcp://127.0.0.1:<port>`, loopback only), where the owner
+  runs the application. The pipe meters by the spec's `unit`: a time unit
+  (second, minute, hour) once per period while the stream is open, a size
+  unit (byte, KB, MB, GB, KiB, MiB, GiB) per started unit carried either
+  way, anything else once for the whole stream. The buyer's agent calls
+  `open_service_stream` (agent API, services group) and gets a 127.0.0.1
+  port for one local connection; the stream lasts while that connection
+  is open.
+- Proven between real libp2p hosts: a direct stream, a reachable provider
+  dialled directly instead of through the relay, a stream through a relay
+  on `tcp` and `ws` (also through `atn relay` itself), an unpaid or
+  wrongly signed stream refused by the real gate, vouchers following
+  metered usage through the gate with an unused one released on both
+  sides (`tests/test_service_stream.py`, `tests/atn/test_service_streams.py`).
+- **Not built.** Hole punching (above). The app does not yet show
+  `reachable` or the reachability advice, nor open streams for the owner;
+  the owner's `invoke_service` stays request/reply. Concurrent streams and
+  request/reply calls to one provider share one channel and wait for each
+  other's outstanding voucher.
+
 ## Decision (2026-11-10): the unit of work; metered on channels
 
 Decided by the owner.
@@ -420,6 +510,7 @@ sha256-addressed JSON, same rail as tool manifests:
   "author_sig": "...",              // over canonical bytes, sig excluded
   "endpoint_hint": "wss://...",     // mutable presence lives on-chain, this is advisory
   "image_uri": "https://...jpg",    // display-plane only: listing-card banner, advisory, not embedded
+  "protocol": {"id": "openai-chat/1", "description": "..."},  // optional: a stream service (Decision 2026-11-10)
   "version_of": null,
   "created_ts": 0
 }
