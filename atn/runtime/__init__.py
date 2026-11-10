@@ -672,60 +672,76 @@ class Runtime:
             self._pending_grants.pop(agent_id, None)
         return None
 
-    def _channel_key_for(self, provider: str) -> str | None:
-        """The key that closes a channel as ``provider``: the serving agent's
-        own key, the operator key for an external agent's service, or the
-        daemon's owner key for an owner-authored service."""
-        addr = str(provider or "").lower()
-        if self.registry.is_operator_address(provider):
-            return self.registry.daemon_operator_key() or None
-        agent_id = self.registry.get_agent_id_by_address(provider)
+    def _channel_key_for(self, address: str) -> str | None:
+        """The key that acts on a channel as ``address`` (its provider when
+        settling, its client when refunding): the operator key for the
+        operator (the owner surface and every external agent act as it,
+        Decision 2026-11-08), else the native agent's own key."""
+        addr = str(address or "").lower()
+        if not addr:
+            return None
+        try:
+            operator_key = self.registry.daemon_operator_key()
+        except Exception:  # noqa: BLE001 (no vault: no operator)
+            operator_key = ""
+        if operator_key:
+            from eth_account import Account
+            if Account.from_key(operator_key).address.lower() == addr:
+                return operator_key
+        agent_id = self.registry.get_agent_id_by_address(address)
         if agent_id:
             return self.registry.get_agent_key(agent_id) or None
-        rpb = getattr(self._config, "rpb", None)
-        if addr and addr == str(getattr(rpb, "owner_wallet", "") or "").lower():
-            return str(getattr(rpb, "private_key", "") or "") or None
         return None
 
-    async def _settle_channels_loop(self) -> None:
-        """Sweep payment channels a client started closing, at a quarter of
-        the challenge window (bounded to [30 s, 300 s]). Idle when no
-        PaymentChannel is configured. Never lets an exception kill it."""
-        from ..channel_settlement import settle_closing_channels
+    async def settle_channels_once(self) -> dict[str, Any]:
+        """One payment-channel sweep, both sides: as a provider, close the
+        channels due (atn/channel_settlement.py); as a buyer, take back what
+        closed channels did not pay (atn/service_channels.sweep_refunds).
+        Returns what was done, and ``interval``, the seconds until the next
+        sweep (a quarter of the challenge window, in [30 s, 300 s])."""
+        from ..channel_settlement import DEFAULT_IDLE_CLOSE_S, settle_channels
         from ..on_chain import ServiceMarketClient
+        from ..service_channels import sweep_refunds
 
+        rpb = getattr(self._config, "rpb", None)
+        smc = ServiceMarketClient(rpb) if rpb is not None else None
+        if smc is None or not smc.channel_available:
+            return {"interval": 300.0}
+        store = getattr(self, "service_store", None)
+        book = getattr(self, "channel_book", None)
+        selling = store is not None and bool(store.channel_vouchers())
+        buying = book is not None and bool(book.closing() or book.all_open())
+        if not selling and not buying:
+            return {"interval": 300.0}
+        try:
+            window = float(await asyncio.to_thread(
+                lambda: smc._channel_contract().functions
+                .challengeWindow().call()))
+            interval = max(30.0, min(300.0, window / 4.0))
+        except Exception:   # noqa: BLE001
+            interval = 60.0
+        out: dict[str, Any] = {"interval": interval}
+        if selling:
+            idle = getattr(rpb, "channel_idle_close_s", DEFAULT_IDLE_CLOSE_S)
+            out["settled"] = await settle_channels(
+                store, smc, self._channel_key_for, idle_close_s=float(idle))
+        if buying:
+            out["refunds"] = await sweep_refunds(book, smc, self._channel_key_for)
+        return out
+
+    async def _settle_channels_loop(self) -> None:
+        """Run ``settle_channels_once`` at the interval it returns. Idle
+        when no PaymentChannel is configured. Never lets an exception kill
+        it."""
         interval = 60.0
         while True:
             try:
                 await asyncio.sleep(interval)
-                rpb = getattr(self._config, "rpb", None)
-                smc = ServiceMarketClient(rpb) if rpb is not None else None
-                if smc is None or not smc.channel_available:
-                    interval = 300.0
-                    continue
-                store = getattr(self, "service_store", None)
-                book = getattr(self, "channel_book", None)
-                selling = store is not None and bool(store.channel_vouchers())
-                refunding = book is not None and bool(book.closing())
-                if not selling and not refunding:
-                    interval = 300.0
-                    continue
-                try:
-                    window = float(await asyncio.to_thread(
-                        lambda: smc._channel_contract().functions
-                        .challengeWindow().call()))
-                    interval = max(30.0, min(300.0, window / 4.0))
-                except Exception:   # noqa: BLE001
-                    interval = 60.0
-                if selling:
-                    await settle_closing_channels(store, smc, self._channel_key_for)
-                if refunding:
-                    # As a buyer: take back what closed channels did not pay.
-                    from ..service_channels import sweep_refunds
-                    await sweep_refunds(book, smc, self._channel_key_for)
+                interval = float((await self.settle_channels_once())["interval"])
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 — never let the sweep die
+                interval = 60.0
                 log.debug("channel settlement sweep failed", exc_info=True)
 
     async def _reap_connectors_loop(self) -> None:
@@ -769,8 +785,9 @@ class Runtime:
             self._connector_reaper = asyncio.create_task(
                 self._reap_connectors_loop())
 
-        # Payment-channel settlement: answer every client-started close with
-        # the best voucher before the window ends (atn/channel_settlement.py).
+        # Payment-channel settlement: as a provider, collect (a client's
+        # close, a spent deposit, an idle channel; atn/channel_settlement.py);
+        # as a buyer, take back what closed channels did not pay.
         self._channel_settler = asyncio.create_task(self._settle_channels_loop())
 
         # Approved adoptions still waiting for a code holder to come online

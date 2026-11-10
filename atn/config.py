@@ -283,6 +283,11 @@ class RPBConfig:
                                         # address (ServiceMarket.sol). Seeded from
                                         # registry.json contracts.payment_channel.
                                         # The settlement rail for services.
+    channel_idle_close_s: float = 86400.0  # A provider closes a payment
+                                        # channel to collect once it has had
+                                        # no new voucher for this long
+                                        # (atn/channel_settlement.py); <= 0
+                                        # never closes on idleness.
     token_address: str = ""             # Discovered from Governor.token()
     economy_address: str = ""           # Discovered from RepToken.economyAddress()
     timelock_address: str = ""          # Discovered from Governor.timelock()
@@ -1476,6 +1481,8 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         registry_address=resolved.get("registry_address", ""),
         service_registry_address=resolved.get("service_registry_address", ""),
         payment_channel_address=resolved.get("payment_channel_address", ""),
+        channel_idle_close_s=float(resolved.get("channel_idle_close_s", 86400.0)
+                                   or 0.0),
         token_address=resolved.get("token_address", ""),
         economy_address=resolved.get("economy_address", ""),
         timelock_address=resolved.get("timelock_address", ""),
