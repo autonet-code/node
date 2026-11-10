@@ -352,7 +352,9 @@ built on it are listed again.
   novelty, malware (with evidence), and the charter axes if you like. The
   daemon kept the provider's signed receipt, which proves the payment
   without showing the result. Only the payer may review, each payer counts
-  once, and your latest review of a service replaces the earlier one.
+  once, and your latest review of a service replaces the earlier one. A
+  review counts once its payment is on chain: at once for a direct
+  payment, after the provider closes the channel for a channel payment.
   `find_services` shows each service's `rating` as of the latest epoch
   close: the mean of each field, the share of payers flagging malware, the
   number of payers and what they were charged. Ratings enforce nothing.

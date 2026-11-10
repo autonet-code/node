@@ -95,8 +95,11 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   (correctness, simplicity read as the buyer's convenience, novelty,
   malware with evidence, the charter axes). Authority comes from payment,
   not REP: only the payer named in the provider's signed receipt (which
-  says the request was charged) may review it, and every payer counts
-  once. The reviews ride the epoch batches; the close keeps each payer's
+  says the request was charged) may review it, the service must be
+  registered, a review counts only once that payment is on chain (a direct
+  payment, or the channel's close, read pinned to the snapshot like REP),
+  and every payer counts once, so rating oneself costs a real payment per
+  payer. The reviews ride the epoch batches; the close keeps each payer's
   latest per service and commits the ratings (means, the share flagging
   malware, payers, amount charged) in the anchored state. They inform
   other buyers and enforce nothing: no mint, no REP, no slashing.

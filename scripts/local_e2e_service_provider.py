@@ -35,9 +35,12 @@ buyer's sweep takes the remainder back after the challenge window.
 
 Then the review (stage 12, Decision 2026-11-10): the buyer's daemon kept
 the seller's signed receipt of the served request, the child reviews it
-with the review_service agent tool, the event rides a batch into a real
-federated close, and the close's carry bundle (the anchored state) holds
-the service's rating, which the buyer's catalog search shows.
+with the review_service agent tool, and the event rides a batch into a
+real federated close pinned to the chain (read_service_snapshot). Pinned
+before the seller's channel close, the review waits for its payment;
+pinned after it, the settlement covers the review, the close's carry
+bundle (the anchored state) holds the service's rating, and the buyer's
+catalog search shows it.
 
 The LLM seam is the ONE thing mocked: the selling daemon's provider manager
 builds a canned-response fake for the upstream provider its service names,
@@ -1100,6 +1103,9 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
 
     s10 = board.stage(10, "the provider's own close collects its best voucher")
     closed_view = None
+    # The last block before the channel's settlement (stage 12 pins a close
+    # to it: the review there waits for its payment).
+    block_before_close = w3.eth.block_number
     try:
         if s9.status != "PASS":
             raise RuntimeError("stage 9 did not complete")
@@ -1228,7 +1234,17 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         assert review.get("ok"), review
         assert len(sent) == 1 and sent[0]["reviewer"] == child_addr.lower()
 
-        # The event rides the buyer's batch into the next close.
+        # The event rides the buyer's batch into the next close, which reads
+        # the chain pinned to its snapshot block: the registered services,
+        # the payments and the closed channels (read_service_snapshot).
+        from nodes.common.voice_state import read_service_snapshot
+
+        def pinned(block: int) -> Dict[str, Any]:
+            return read_service_snapshot(
+                w3, block=block, substrate_address=addresses["substrate"],
+                service_registry_address=addresses["serviceRegistry"],
+                payment_channel_address=addresses["paymentChannel"])
+
         kp = Keypair.generate()
         batch = EventBatch(rpb_address=jurisdiction, sender_pubkey=kp.public_key,
                            batch_seq=1, events=list(sent), prev_batch_hash=b"",
@@ -1245,12 +1261,29 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             tool_ratings_path=close_dir / "tool_ratings.json",
             service_reviews_path=close_dir / "service_reviews.json",
             service_ratings_path=close_dir / "service_ratings.json")
+        key = service_key(seller_addr, spec_digest)
+        cid = str(kept["channel_id"])
+        assert int(cid) == channel_id, (cid, channel_id)
+
+        # Pinned before the seller's close: registered, not yet settled.
+        before = pinned(block_before_close)
+        assert key in before["registered"] and cid not in before["channels"]
+        drv.service_snapshot = before
+        waiting = drv.run({"epoch_id": "e2e-service-reviews-0"})
+        assert waiting is not None
+        assert key not in waiting.close_result["service_ratings"]
+        held = waiting.close_result["service_reviews"][key][child_addr.lower()]
+        assert held["paid"] is False, held
+
+        # Pinned after it: the settlement covers the review, which counts.
+        drv.service_snapshot = pinned(w3.eth.block_number)
+        assert drv.service_snapshot["channels"][cid]["paid"] == 2 * price
+        gossip.drain_epoch_batches.return_value = [batch]   # replayed: no change
         fed = drv.run({"epoch_id": "e2e-service-reviews-1"})
         assert fed is not None, "the close returned nothing"
         assert fed.close_result["authoritative_payload"]["carry_cid"] == \
             cid_for_blob(fed.carry_bundle_blob)
         carry = decode_carry_bundle(fed.carry_bundle_blob)["carry"]
-        key = service_key(seller_addr, spec_digest)
         rating = carry["service_ratings"].get(key)
         assert rating, carry["service_ratings"]
         assert rating["payers"] == 1 and rating["correctness"] == 0.9, rating

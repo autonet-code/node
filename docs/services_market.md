@@ -63,21 +63,25 @@ before they buy. Decided by the owner; built in
   "malicious code" definition, which fits services: for example an
   inference model primed to make the buyer's agent leak data or run
   harmful commands), and the optional charter axes, scored as tools score
-  them (an unscored axis counts as half the top score). Physical harm falls
+  them (an unscored axis counts at the Registry's `unscored_axis_bps`
+  pinned to the snapshot, as for tools). Physical harm falls
   under correctness or the charter. A malware yes needs evidence: the
   reviewer's text plus the receipt and the provider's signed reply, kept
   as a content-addressed blob in the reviewer's tool-store blobs, which
   peers read with `fetch_evidence` like a tool flag's evidence.
 - **Authority from payment, not REP.** Only the address that paid for a
-  request may review it, every counted review weighs the same, and the
-  provider cannot review itself. Reviews enforce nothing: no mint, no REP,
-  no slashing, nothing on chain beyond what the anchor commits.
+  request may review it, a review counts only once that payment is on
+  chain, every counted review weighs the same, and the provider cannot
+  review itself. Reviews enforce nothing: no mint, no REP, no slashing,
+  nothing on chain beyond what the anchor commits.
 - **Receipts.** The provider's reply signature (`receipt_sig`) is a
   receipt: keccak of the ABI encoding of (`autonet:service_receipt:v1`,
   request id, spec digest, provider address, the payer the gate verified,
-  `ok`, `charged`, the amount charged, sha256 of the canonical
-  `{"error", "result"}` JSON), signed EIP-191. The reply carries `payer`
-  and `amount` next to `charged`. The result itself is not covered, so a
+  `ok`, `charged`, the amount charged, the payment channel of a voucher
+  payment or 0 for a direct one, sha256 of the canonical
+  `{"error", "result"}` JSON), signed EIP-191. The reply carries `payer`,
+  `amount` and `channel_id` next to `charged`. The result itself is not
+  covered, so a
   review proves the receipt without revealing what the provider returned.
   The buyer's verification (`reply_from_provider`) checks the same hash,
   and `request_service` hands every authentic reply's receipt to the
@@ -94,7 +98,7 @@ before they buy. Decided by the owner; built in
   ```
   {"kind": "service_review", "v": 1,
    "receipt": {request_id, spec_digest, provider, payer, ok, charged,
-               amount, result_hash, sig},
+               amount, channel_id, result_hash, sig},
    "review": {jurisdiction, correctness, simplicity, novelty, malware,
               axes, evidence_hash, note, ts},
    "reviewer": "0x...", "sig": "0x..."}
@@ -103,44 +107,69 @@ before they buy. Decided by the owner; built in
   Scores are in hundredths as on ToolBond's wire. The reviewer signs
   keccak(`autonet:service_review:v1`, the receipt hash, sha256 of the
   review's canonical JSON).
-- **Proof in the close, with no chain reads.** An event counts when its
-  receipt is well formed, says `charged: true` and is signed by the
-  provider it names; the reviewer is the receipt's payer, signed the
-  review, and is not the provider; the review names this jurisdiction (the
-  batch's rpb address), has every field in range, evidence with a malware
-  yes, and is dated at most an hour after its batch.
+- **A valid event.** Its receipt is well formed, says `charged: true`
+  and is signed by the provider it names; the reviewer is the receipt's
+  payer, signed the review, and is not the provider; the review names this
+  jurisdiction (the batch's rpb address), has every field in range,
+  evidence with a malware yes, and is dated at most an hour after its
+  batch.
+- **Proof on chain, pinned to the snapshot.** The close reads, like REP
+  and the ToolBond rounds, from logs up to the snapshot block
+  (`voice_state.read_service_snapshot`): the ServiceRegistry's
+  `ServiceRegistered` pairs, Substrate's `ServicePayment` events, the
+  PaymentChannel's `ChannelOpened` and `ChannelClosed`, and the Registry's
+  `unscored_axis_bps`. A review of a (provider, digest) pair the registry
+  never registered is dropped, new or carried; the entry's provider is the
+  pair's provider and the receipt must be signed by it. A review counts
+  only once its payment is on chain: for a direct payment, a
+  `ServicePayment` with the receipt's request id from the payer to the
+  provider whose amount covers the receipt's; for a voucher, the receipt's
+  channel (client the payer, provider the provider) closed with a settled
+  amount covering the amounts of the reviews drawing on it, earliest
+  first. Until then it waits in the carried state (`paid: false`) and
+  counts at the first close whose snapshot has the payment. So a
+  self-rating through addresses the provider controls costs the fee and
+  gas of a real payment per payer, like the provider record. Before the
+  first anchor the snapshot is empty and no review counts.
 - **Counting.** One review per (provider, spec digest, payer): a later
   review (larger signed `ts`, then larger review hash) replaces the
   earlier, so a replayed old review changes nothing. A service's rating is
-  the mean of each field over its payers' latest reviews, the share of
-  payers flagging malware, each charter axis's mean and their mean
-  together (`value`), the number of payers and the total their receipts
-  charged. Payers of the provider's own household and sanctioned
+  over its payers' latest paid reviews: the mean of each field, the share
+  of payers flagging malware, each charter axis's mean and their mean
+  together (`value`), the number of payers, the total their receipts
+  charged, and how many reviews wait for their payment (`pending`). Payers
+  of the provider's own household and sanctioned
   households (both from the pinned inputs) are kept but not counted.
   Ratings are keyed by (provider address, spec digest), so a copy
   registered under another address never shares a rating. Integer sums and
   sorted iteration make every daemon compute the same bytes. The carried
-  state is bounded: the 1000 most recent payers per service and the 256
-  most recently reviewed services per provider.
+  state is bounded: 1000 reviews per service, paid ones kept first (so
+  reviews that cost nothing cannot push out paid ones), of which at most
+  100 wait for a payment, and 256 services per provider.
 - **Anchored state.** Two carry maps, `service_reviews`
   (`<provider>:<digest>` -> payer -> latest review) and `service_ratings`
   (`<provider>:<digest>` -> rating), ride the carry bundle next to the tool
   maps, so a follower or a joiner gets them from the anchor's `carry_cid`.
+  A data dir without them starts them empty.
+- **Resending.** The buyer's daemon sends a review again after each close
+  that lacks it, for 14 days (`ReceiptStore.resend_missing`): a review of
+  a service registered after the snapshot, or one whose batch was lost,
+  gets in once it can.
 - **Search.** `ServiceCatalog.search` rows (`market_services`,
   `find_services`) carry `rating` for genuine entries, read from the close
   driver's `service_rating(provider, digest)` through the catalog's
   `rating_provider`. `service_receipts` (WS) lists the household's
   receipts and the reviews sent from them.
-- **What a receipt cannot prove.** The close reads no chain, so the amount
-  is the provider's word, and a provider can sign receipts for addresses
-  it controls and review itself through them. That only lifts its own
-  service's rating, which buyers weigh with the number of payers and the
-  amounts; nobody can forge a receipt for another provider's service.
+- **Same inputs everywhere.** The snapshot depends on the ServiceRegistry
+  and PaymentChannel addresses, so every daemon of a jurisdiction must read
+  the same ones (`blockchain.service_registry_address` and
+  `payment_channel_address`, seeded like the other contracts).
 - Proven by `tests/test_service_reviews.py`,
   `tests/atn/test_service_receipts.py` and
   `scripts/local_e2e_service_provider.py` stage 12 (the child reviews a
-  paid request, a real close's carry bundle rates the service, the
-  buyer's search shows it).
+  channel-paid request; a close pinned before the seller's channel close
+  holds it waiting, one pinned after counts it, its carry bundle rates the
+  service and the buyer's search shows it).
 
 ## Decision (2026-11-10): a stream between buyer and seller
 
@@ -768,8 +797,9 @@ failed signature check does not consume the id.
 ### 4. Reviews (BUILT 2026-11-10)
 
 A review is the payer's signed rating of one paid request, proven by the
-provider's signed receipt, carried as a `service_review` event in the
-epoch batches and counted by the epoch-close into per-service ratings in
+provider's signed receipt and the payment on chain, carried as a
+`service_review` event in the epoch batches and counted by the epoch-close
+into per-service ratings in
 the anchored carry bundle (Decision "service reviews in the epoch-close"
 at the top: fields, receipt and event formats, counting, bounds). Only
 addresses that paid can review (receipt-gated, so the fake-review problem

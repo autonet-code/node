@@ -42,9 +42,11 @@ registered in the packaged jurisdiction keeps it. It:
   reviews and ratings), the same one a joiner or a rewind installs;
 - keeps the provider's signed receipt of every service reply its buyers
   read (`atn/service_receipts.py`) and sends the payer's reviews of paid
-  requests (`review_service`) on the epoch batch; the close rates each
-  service from them (Decision 2026-11-10, `services_market.md`) and
-  service search shows the rating;
+  requests (`review_service`) on the epoch batch, again after a close
+  that lacks one; the close counts a review once its service is
+  registered and its payment is on chain, read pinned to the snapshot
+  (Decision 2026-11-10, `services_market.md`), and service search shows
+  the rating;
 - reviews on its agents' behalf (commit-reveal): commits when its close
   fires, reveals once that epoch is anchored. Every review carries
   correctness, simplicity, novelty and malware; a malware flag's evidence
