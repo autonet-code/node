@@ -28,7 +28,7 @@ import logging
 import struct
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 try:
@@ -185,6 +185,16 @@ BATCHES_PROTOCOL = TProtocol("/autonet/batches/1.0.0")
 # computed it. Everyone else answers {"kept": 0}.
 BLOB_OFFER_PROTOCOL = TProtocol("/autonet/blob-offer/1.0.0")
 BLOB_OFFER_MAX_CIDS = 16
+# What a peer knows of another (issue: service streams): {"peer": id} in,
+# {"peer", "connected", "reachable", "addrs", "roles", "timestamp"} out,
+# from the capability that peer sent it (kept under its own peer id). A
+# buyer asks its relays, so it can dial a reachable provider directly and
+# pick a relay that is connected to a NAT'd one.
+PEER_INFO_PROTOCOL = TProtocol("/autonet/peer-info/1.0.0")
+# How long a relay's answer about a peer is trusted for ``peer_reachable``,
+# and the least time between two background lookups of one peer.
+PEER_INFO_TTL = 600.0
+PEER_INFO_RETRY = 120.0
 GUILD_GOSSIP_TOPIC_PREFIX = "/autonet/guild/"
 PROVIDER_REGISTRY_TOPIC = "/rpb/provider-registry/"
 
@@ -293,6 +303,10 @@ class NodeCapability:
     #                              payForService funds)
     #   - "schema":         int  (1, for forward-compat)
     inference: Dict = field(default_factory=dict)
+    # Whether this node announces an address peers can dial (configured
+    # announce addresses, or one the reach check confirmed). A NAT'd node
+    # is reached only over connections it opened, or through a relay.
+    reachable: bool = False
     timestamp: float = field(default_factory=time.time)
 
     def to_bytes(self) -> bytes:
@@ -301,7 +315,9 @@ class NodeCapability:
     @classmethod
     def from_bytes(cls, data: bytes) -> "NodeCapability":
         d = json.loads(data.decode("utf-8"))
-        return cls(**d)
+        # Keys this build does not know are dropped, not fatal.
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 @dataclass
@@ -545,6 +561,15 @@ class AutonetHost:
         # Longest a forwarding peer waits for the target's reply (the
         # requester's own timeout is honoured when it is shorter).
         self.service_relay_timeout = 600.0
+        # Set (a circuit_relay.RelayCaps) before run() to relay circuits for
+        # other peers (atn relay). Every host accepts relayed connections.
+        self.circuit_relay_caps: Optional[Any] = None
+        self.circuit_relay: Optional[Any] = None
+        self._service_stream_handler: Optional[Any] = None
+        self._peer_info_cache: Dict[str, Tuple[float, dict]] = {}
+        self._peer_info_due: Dict[str, float] = {}
+        self._stream_users: Dict[str, int] = {}
+        self._circuits_opened: Set[str] = set()
 
         # State (initialized in run())
         self._host: Optional[IHost] = None
@@ -627,6 +652,7 @@ class AutonetHost:
             # Update our capability with actual peer ID and addresses
             self._capability.peer_id = peer_id
             self._capability.listen_addrs = [str(a) for a in addrs]
+            self._capability.reachable = bool(self._announce_resolved)
 
             self.logger.info(
                 f"P2P host started: {peer_id[:16]}... "
@@ -709,6 +735,7 @@ class AutonetHost:
                     self.logger.info(f"Announce address changed to {[str(a) for a in fresh]}")
                     self._announce_resolved = fresh
                     self._capability.listen_addrs = self.addrs
+                    self._capability.reachable = bool(fresh)
                     await self.advertise_capability()
             await self._dial_seeds(list(self._bootstrap_peers))
 
@@ -802,6 +829,7 @@ class AutonetHost:
         )
         self._announce_resolved = fresh
         self._capability.listen_addrs = self.addrs
+        self._capability.reachable = bool(fresh)
         await self.advertise_capability()
 
     async def _auto_reach_loop(self) -> None:
@@ -2101,6 +2129,258 @@ class AutonetHost:
             pass
 
     # =========================================================================
+    # Relayed connections and service streams (circuit_relay.py,
+    # service_stream.py; Decision 2026-11-10 in docs/services_market.md)
+    # =========================================================================
+
+    def _pid(self, peer_id: Any) -> Any:
+        return PeerID.from_base58(peer_id) if isinstance(peer_id, str) else peer_id
+
+    def connection_path(self, peer_id: Any) -> Optional[str]:
+        """"direct" when a direct connection to ``peer_id`` is open,
+        "relayed" when only relayed ones are, None when not connected."""
+        if self._host is None:
+            return None
+        try:
+            conns = self._host.get_network().get_connections(self._pid(peer_id))
+        except Exception:  # noqa: BLE001
+            return None
+        if not conns:
+            return None
+        from .circuit_relay import is_relayed
+        return "relayed" if all(is_relayed(c) for c in conns) else "direct"
+
+    async def _handle_peer_info_stream(self, stream):
+        """Tell the asker what we know of a peer: whether we are connected
+        to it and what its own capability says (stored under the peer id
+        that sent it, so it is that peer's word)."""
+        try:
+            req = json.loads((await _read_frame_no_close(stream)).decode("utf-8"))
+            peer = str(req.get("peer") or "") if isinstance(req, dict) else ""
+            out: Dict[str, Any] = {"peer": peer,
+                                   "connected": peer in self.get_connected_peers()}
+            cap = self._known_capabilities.get(peer)
+            if cap is not None:
+                out.update({"reachable": bool(getattr(cap, "reachable", False)),
+                            "addrs": list(cap.listen_addrs or []),
+                            "roles": list(cap.roles or []),
+                            "timestamp": cap.timestamp})
+            await _write_frame_no_close(stream, json.dumps(out).encode("utf-8"))
+            await stream.close()
+        except Exception as e:
+            self.logger.debug(f"peer-info request failed: {e}")
+
+    async def peer_info(self, via: Any, peer: str, timeout: float = 5.0) -> Optional[dict]:
+        """What the connected peer ``via`` knows of ``peer`` (see
+        PEER_INFO_PROTOCOL), or None."""
+        if self._host is None:
+            return None
+        try:
+            with trio.fail_after(timeout):
+                stream = await self._host.new_stream(self._pid(via), [PEER_INFO_PROTOCOL])
+                await _write_frame_no_close(stream, json.dumps({"peer": peer}).encode("utf-8"))
+                data = await _read_frame_no_close(stream)
+            try:
+                await stream.close()
+            except Exception:
+                pass
+            info = json.loads(data.decode("utf-8")) if data else None
+        except Exception as e:
+            self.logger.debug(f"peer-info via {str(via)[:16]} failed: {e}")
+            return None
+        return info if isinstance(info, dict) and info.get("peer") == peer else None
+
+    async def relay_peer_infos(self, target: str) -> Dict[str, dict]:
+        """Ask every connected relay at once what it knows of ``target``.
+        The newest capability any of them reports is cached for
+        ``peer_reachable``."""
+        out: Dict[str, dict] = {}
+
+        async def one(relay: str) -> None:
+            info = await self.peer_info(relay, target)
+            if info is not None:
+                out[relay] = info
+        async with trio.open_nursery() as nursery:
+            for relay in self._relay_candidates(target):
+                nursery.start_soon(one, relay)
+        known = [i for i in out.values() if "reachable" in i]
+        if known:
+            best = max(known, key=lambda i: float(i.get("timestamp") or 0))
+            self._peer_info_cache[target] = (time.time(), best)
+        return out
+
+    def peer_reachable(self, peer_id: str) -> Optional[bool]:
+        """Whether ``peer_id`` says it is directly reachable: its own
+        capability when it sent us one, else the last answer a relay gave;
+        None when unknown. A miss or a stale answer asks the relays in the
+        background. Safe from any thread; never waits."""
+        peer_id = str(peer_id or "")
+        if not peer_id:
+            return None
+        cap = self._known_capabilities.get(peer_id)
+        if cap is not None:
+            return bool(getattr(cap, "reachable", False))
+        hit = self._peer_info_cache.get(peer_id)
+        now = time.time()
+        if hit is None or now - hit[0] > PEER_INFO_TTL:
+            if self._peer_info_due.get(peer_id, 0.0) <= now:
+                self._peer_info_due[peer_id] = now + PEER_INFO_RETRY
+                token, nursery = self._trio_token, self._nursery
+                if token is not None and nursery is not None:
+                    try:
+                        token.run_sync_soon(nursery.start_soon,
+                                            self.relay_peer_infos, peer_id)
+                    except Exception:  # noqa: BLE001 (host shutting down)
+                        pass
+        if hit is None:
+            return None
+        value = hit[1].get("reachable")
+        return bool(value) if isinstance(value, bool) else None
+
+    def _advertised_addrs(self, target: str, infos: Dict[str, dict]) -> List[str]:
+        """Addresses ``target`` advertises as dialable: from its own
+        capability, or from relays' answers, only when it says it is
+        reachable (a NAT'd peer's listen addresses are private)."""
+        addrs: List[str] = []
+        cap = self._known_capabilities.get(target)
+        if cap is not None and getattr(cap, "reachable", False):
+            addrs.extend(cap.listen_addrs or [])
+        for info in infos.values():
+            if info.get("reachable"):
+                addrs.extend(info.get("addrs") or [])
+        out = []
+        for a in dict.fromkeys(str(x) for x in addrs):
+            if "/p2p-circuit" in a:
+                continue
+            out.append(a.split("/p2p/")[0])
+        return out
+
+    async def route_to(self, target: str, direct_timeout: float = 10.0) -> Tuple[str, str]:
+        """Have a connection to ``target`` for a service stream, in the
+        order the owner decided (2026-11-10): one already open; else a
+        direct dial to the addresses ``target`` advertises as reachable (its
+        own capability, or as relays report it); else a circuit through a
+        relay connected to it. Hole punching is not tried: py-libp2p 0.6
+        cannot do it (docs/p2p_networking.md, "Not covered").
+
+        Returns ``(path, relay)``: path "direct" or "relayed", relay the
+        relay's peer id when this call opened a circuit. Raises
+        ``ConnectionError`` when nothing reaches the target."""
+        if self._host is None:
+            raise ConnectionError("libp2p host not running")
+        target = str(target)
+        if target == self.peer_id:
+            raise ConnectionError("cannot open a stream to this node itself")
+        pid = self._pid(target)
+        path = self.connection_path(pid)
+        if path is not None:
+            return path, ""
+        errors: List[str] = []
+        infos = await self.relay_peer_infos(target)
+        addrs = self._advertised_addrs(target, infos)
+        if addrs:
+            try:
+                maddrs = [Multiaddr(a) for a in addrs]
+                with trio.fail_after(direct_timeout):
+                    await self._host.connect(PeerInfo(pid, maddrs))
+                if self.connection_path(pid) == "direct":
+                    return "direct", ""
+            except (Exception, trio.TooSlowError) as e:
+                errors.append(f"direct dial: {e or 'timed out'}")
+        from .circuit_relay import dial_via_relay
+        relays = [r for r in self._relay_candidates(target)
+                  if (infos.get(r) or {}).get("connected", True)]
+        relays.sort(key=lambda r: not (infos.get(r) or {}).get("connected", False))
+        for relay in relays:
+            try:
+                await dial_via_relay(self._host, relay, pid)
+                self._circuits_opened.add(target)
+                return "relayed", relay
+            except ConnectionError as e:
+                errors.append(f"{relay[:16]}: {e}")
+        if not relays:
+            errors.append("no connected relay is connected to it")
+        raise ConnectionError(f"no path to {target[:16]} ({'; '.join(errors)})")
+
+    async def _close_relayed(self, peer_id: Any) -> None:
+        from .circuit_relay import is_relayed
+        try:
+            conns = list(self._host.get_network().get_connections(self._pid(peer_id)))
+        except Exception:  # noqa: BLE001
+            return
+        for conn in conns:
+            if is_relayed(conn):
+                with trio.CancelScope(shield=True), trio.move_on_after(3):
+                    try:
+                        await conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+    def set_service_stream_handler(self, handler: Optional[Any]) -> None:
+        """Serve ``/autonet/service-stream/1.0.0`` with ``handler`` (a
+        ``service_stream.StreamHandler``, run in the host's trio loop).
+        None refuses every stream."""
+        self._service_stream_handler = handler
+
+    async def _handle_service_stream_open(self, stream):
+        from .circuit_relay import is_relayed
+        from .service_stream import serve_incoming
+        try:
+            peer = str(stream.muxed_conn.peer_id)
+            path = "relayed" if is_relayed(stream.muxed_conn) else "direct"
+        except Exception:  # noqa: BLE001
+            peer, path = "", ""
+        await serve_incoming(stream, self._service_stream_handler,
+                             path=path, peer=peer)
+
+    @asynccontextmanager
+    async def service_stream(self, target: str, open_msg: dict, *,
+                             verify: Optional[Callable[[dict, str], bool]] = None,
+                             voucher_source: Optional[Callable[[int], Awaitable[Optional[dict]]]] = None,
+                             on_receipt: Optional[Callable[[str, Optional[bool]], Any]] = None,
+                             timeout: float = 60.0, direct_timeout: float = 10.0):
+        """Open a paid two-way stream to the provider ``target`` (its peer
+        id) and yield the accepted ``service_stream.ServiceStream``.
+
+        The path is ``route_to``'s: direct first, a relay circuit last.
+        ``open_msg`` is the signed opening (a ``service_request`` frame);
+        ``verify(reply, request_id)`` checks the provider's signature on
+        its replies and receipts, ``voucher_source(units)`` gives the next
+        voucher and ``on_receipt(request_id, charged)`` hears each one's
+        outcome (see service_stream.py). Raises ``ConnectionError`` when no
+        path reached the target (nothing was sent),
+        ``service_stream.StreamRefused`` when the provider refused it, and
+        ``TimeoutError`` when it was sent but not answered. A circuit this
+        call opened is closed once no stream uses it."""
+        from .circuit_relay import is_relayed
+        from .service_stream import SERVICE_STREAM_PROTOCOL, open_on
+        target = str(target)
+        _path, relay = await self.route_to(target, direct_timeout)
+        self._stream_users[target] = self._stream_users.get(target, 0) + 1
+        try:
+            try:
+                with trio.fail_after(15):
+                    raw = await self._host.new_stream(self._pid(target),
+                                                      [SERVICE_STREAM_PROTOCOL])
+            except Exception as e:
+                raise ConnectionError(f"could not open a stream to {target[:16]}: {e}") from e
+            path = "relayed" if is_relayed(raw.muxed_conn) else "direct"
+            async with open_on(raw, open_msg, verify=verify,
+                               voucher_source=voucher_source, on_receipt=on_receipt,
+                               timeout=timeout, path=path, peer=target,
+                               relay=relay) as stream:
+                yield stream
+        finally:
+            left = self._stream_users.get(target, 1) - 1
+            if left > 0:
+                self._stream_users[target] = left
+            else:
+                self._stream_users.pop(target, None)
+                if target in self._circuits_opened:
+                    self._circuits_opened.discard(target)
+                    await self._close_relayed(target)
+
+    # =========================================================================
     # Batch catch-up (/autonet/batches/1.0.0), issue #41
     # =========================================================================
 
@@ -2518,6 +2798,25 @@ class AutonetHost:
         self._host.set_stream_handler(
             BLOB_OFFER_PROTOCOL, self._handle_blob_offer_stream
         )
+        self._host.set_stream_handler(
+            PEER_INFO_PROTOCOL, self._handle_peer_info_stream
+        )
+        # Relayed connections and service streams (circuit_relay.py,
+        # service_stream.py): every host accepts relayed connections and
+        # serves streams for its handler; a relay also relays circuits.
+        try:
+            from .circuit_relay import CIRCUIT_AVAILABLE, CircuitRelay, install_stop
+            from .service_stream import SERVICE_STREAM_PROTOCOL
+            if CIRCUIT_AVAILABLE:
+                install_stop(self._host)
+                if self.circuit_relay_caps is not None:
+                    self.circuit_relay = CircuitRelay(self._host, self.circuit_relay_caps)
+                    self.circuit_relay.install()
+            self._host.set_stream_handler(
+                SERVICE_STREAM_PROTOCOL, self._handle_service_stream_open
+            )
+        except Exception as e:  # noqa: BLE001 (streams off, the rest works)
+            self.logger.warning(f"service streams unavailable: {e}")
 
     # =========================================================================
     # Summary / Introspection

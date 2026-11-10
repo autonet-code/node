@@ -16,6 +16,12 @@ A seed and meeting point for daemons, light enough for a small server:
   - a service relay: a paid service request addressed to a provider the
     relay is connected to is forwarded one hop and the reply piped back
     (``/autonet/service/1.0.0``; bytes only, the relay serves nothing);
+  - a circuit relay (circuit relay v2, ``nodes/common/circuit_relay.py``):
+    two peers connected to it get a libp2p connection to each other
+    through it, end to end encrypted, which service streams use when the
+    provider cannot be dialled. Unlimited unless the operator caps it
+    (``--circuit-max-duration``, ``--circuit-max-bytes``,
+    ``--max-circuits``); relays are not paid;
   - the reachability check that tells home daemons whether peers can
     reach them.
 
@@ -32,7 +38,9 @@ to choose.
 Every flag has an env twin (``AUTONET_P2P_PORT``, ``AUTONET_P2P_HOST``,
 ``AUTONET_P2P_ANNOUNCE``, ``AUTONET_P2P_BOOTSTRAP``,
 ``AUTONET_RELAY_JURISDICTIONS``, ``AUTONET_RELAY_DIR``,
-``AUTONET_RELAY_SERVICE_TIMEOUT``). It prints its full
+``AUTONET_RELAY_SERVICE_TIMEOUT``, ``AUTONET_RELAY_CIRCUIT_MAX_DURATION``,
+``AUTONET_RELAY_CIRCUIT_MAX_BYTES``, ``AUTONET_RELAY_MAX_CIRCUITS``,
+``AUTONET_RELAY_NO_CIRCUITS``). It prints its full
 multiaddr on start: that is the address to publish as a bootstrap seed.
 """
 
@@ -95,6 +103,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                     default=float(env("AUTONET_RELAY_SERVICE_TIMEOUT", "600")),
                     help="longest wait (s) for a provider's reply to a "
                          "forwarded service request")
+    # Relayed connections are unlimited unless the operator caps them (a
+    # relay gives bandwidth like a torrent seed; circuit relay v2 stacks
+    # default to tight caps, go-libp2p's 2 minutes and 128 KiB).
+    ap.add_argument("--circuit-max-duration", type=float,
+                    default=float(env("AUTONET_RELAY_CIRCUIT_MAX_DURATION", "0")),
+                    help="seconds one relayed connection may stay open (0 = no limit)")
+    ap.add_argument("--circuit-max-bytes", type=int,
+                    default=int(env("AUTONET_RELAY_CIRCUIT_MAX_BYTES", "0")),
+                    help="bytes one relayed connection may carry, both ways "
+                         "(0 = no limit)")
+    ap.add_argument("--max-circuits", type=int,
+                    default=int(env("AUTONET_RELAY_MAX_CIRCUITS", "0")),
+                    help="relayed connections open at once (0 = no limit)")
+    ap.add_argument("--no-circuits", action="store_true",
+                    default=env("AUTONET_RELAY_NO_CIRCUITS", "") not in ("", "0"),
+                    help="do not relay connections (gossip, blobs and service "
+                         "requests are still relayed)")
     args = ap.parse_args(argv)
     if args.jurisdiction is None:
         args.jurisdiction = _csv(env("AUTONET_RELAY_JURISDICTIONS", ""))
@@ -115,6 +140,7 @@ async def run(args: argparse.Namespace) -> None:
     from .common.blob_store import BlobStore
     from .common.event_gossip import (
         BatchLog, SignedBatch, _verify, topic_for_rpb, topic_for_services)
+    from .common.circuit_relay import RelayCaps
     from .common.p2p import AutonetHost, NodeCapability
 
     data = Path(args.data_dir).expanduser()
@@ -133,6 +159,12 @@ async def run(args: argparse.Namespace) -> None:
     # Service requests: forwarding is built into the host (it has no service
     # handler of its own, so anything addressed to the relay itself is refused).
     host.service_relay_timeout = args.service_timeout
+    if not args.no_circuits:
+        host.circuit_relay_caps = RelayCaps(
+            max_duration=max(0.0, float(args.circuit_max_duration or 0)),
+            max_bytes=max(0, int(args.circuit_max_bytes or 0)),
+            max_circuits=max(0, int(args.max_circuits or 0)))
+        logger.info("relaying connections (%s)", host.circuit_relay_caps.describe())
     async with host.run():
         # Blobs: serve what is on disk, and keep what we relay on disk
         # (replacing the default in-memory relay cache).
