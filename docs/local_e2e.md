@@ -473,10 +473,10 @@ is reachable from such a session.
 
 # Local end-to-end: reviews, the review mint and malware verdicts
 
-`scripts/local_e2e_tool_security.py` proves the reviews redesign (Decision
-2026-11-09, `docs/tool_substrate.md`; trustless-contracts ToolBond 7967e68)
-against real contracts on a local hardhat node, driving the daemon code
-paths.
+`scripts/local_e2e_tool_security.py` proves the reviews redesign and the
+malware verdicts (Decisions 2026-11-09 and 2026-11-10,
+`docs/tool_substrate.md`; trustless-contracts ToolBond 8dcc1be) against real
+contracts on a local hardhat node, driving the daemon code paths.
 
 ## Run
 
@@ -487,9 +487,8 @@ python scripts/local_e2e_tool_security.py
 Needs `node_modules` with hardhat + `@openzeppelin/contracts` at or above
 the repo root, and a trustless-contracts checkout (env
 `TRUSTLESS_CONTRACTS_DIR`, default `C:/code/dao/trustless-contracts`). The
-jurisdiction sources it needs (ToolBond, DaoProposalHold, IGovernor,
-RepToken, Registry, their interfaces and `mocks/MockProposalGovernor`) are
-COPIED into a scratch hardhat project at `build/e2e_tool_security/`
+jurisdiction sources it needs (ToolBond, RepToken, Registry and their
+interfaces) are COPIED into a scratch hardhat project at `build/e2e_tool_security/`
 (gitignored) next to this repo's `Substrate.sol`, compiled with solc 0.8.26
 and served on port 8557 (`E2E_TOOL_SECURITY_PORT`). The checkout is never
 written. HOME, USERPROFILE and KEYSTORE_DIR point at a temp dir for the
@@ -498,11 +497,11 @@ whole run. About two minutes after the compile.
 ## What it proves
 
 1. **Chain up**: a Registry holding the default charter (the four value
-   axes), RepToken, Substrate (deployer as governor and vaultMinter),
-   MockProposalGovernor (appeal holds), ToolBond (minStake 100 ATN, reveal
-   window 300 s, degrade 10%, author slash 100%, reviewer share 40%, unbond
-   delay 120 s, appeal period 600 s; the timelock is an EOA so the run plays
-   the DAO's rulings), and `setSlasher(ToolBond)`.
+   axes) and owned by the timelock (it is the treasury), RepToken,
+   Substrate (deployer as governor and vaultMinter), ToolBond (minStake 100
+   ATN, reveal window 300 s, degrade 10%, author slash 100%, reviewer share
+   40%, unbond delay 120 s, no appeal period; the timelock is an EOA so the
+   run plays the DAO's proposals), and `setSlasher(ToolBond)`.
 2. **Fleet**: two real `Runtime`s, every agent its own household. Daemon A
    hosts `author-1` and `rev-1`, daemon B `rev-2` and `rev-3`; they fetch
    manifests, code and evidence from each other through
@@ -522,35 +521,40 @@ whole run. About two minutes after the compile.
    blob daemon B fetches (`fetch_evidence`).
 7. **Finalize and claim**: accuracy over the four fields and four axes
    (0.91875 on the clean tool), REP conserved, the bounty paid 6:4 to the
-   households, ratings as REP-weighted means; rev-1's malware rounds wait on
-   the verdict for a bond share.
+   households, ratings as REP-weighted means; rev-1's malware rounds are
+   claimed like the others (a slashed stake goes to the treasury).
 8. **Withdraw guard**: unbond + withdraw of a tool 60% of its REP calls
    malware reverts MalwareSuspected; a top-up cancels the unbond.
 9. **Close**: `read_voice_state` pinned to anchor 2 feeds
    `federated_epoch_close`: all three conclude ({clean 0, bad 6000, 6000}
    bps), each a third of the 5 ATN pool by its REP; the clean author side is
-   60% x V x C x S (0.327746) x N; the bad tools' author sides are fixed in
-   ATN and reserved outside the carry (0.074535 ATN for one, nothing for the
-   one whose correctness mean is below 0). The blob and the agentMintRoot
+   60% x V x C x S (0.327746) x N; the bad tools' author sides are unpaid,
+   recorded in ATN (`malware_unpaid`: 0.074535 ATN for one, nothing for the
+   one whose correctness mean is below 0) and carried over, and both are
+   pruned. The blob and the agentMintRoot
    (mint and concluded leaves) are anchored and every claimant claims
    through `AuthoritativeChainSubmitter`.
 10. **Verdicts**: `VerdictSubmitter` concludes all three from the anchored
-    leaves; only the author can register an appeal (a reviewer reverts
-    NotAuthor), which holds the verdict until the proposal can land; the DAO
-    rules one bad tool malware (the whole bond slashed, the author's REP
-    burned) and clears the other; rev-1's driver claims the slashed bond
-    through the service rail.
-11. **Next close**: pinned after the rulings, the cleared tool's author is
-    paid exactly the amount its conclusion reserved, outside the pool,
-    which carries over untouched.
+    leaves, which settles both malware verdicts at once: 60% of each stake
+    to the treasury, the author household's REP x 100% x 0.6 burned per
+    tool, nothing to the flaggers; the author withdraws what the slash left
+    of one; every batch settles.
+11. **The DAO's word**: only the timelock designates or clears
+    (NotTimelock), and clear needs a verdict (WrongStage); it designates
+    the clean tool (the whole stake to the treasury, no REP burn) and clears
+    one bad tool (ToolBond returns the REP it burned); the treasury pays
+    that tool's author the slashed stake and the recorded unpaid amount
+    (`Registry.transferERC20`). The next close, pinned after them, prunes
+    the designated tool, un-prunes the cleared one, mints nothing (a tool
+    is paid once) and conserves the pools (minted + carried = both pools).
 12. **Owner surfaces**: WS `tool_security_status`, `tool_round_reviews`
     (both households' reviews of a tool, whose evidence hash daemon B
     fetches) and `review_batches`.
 
-Not covered: anchoring through a real DAO proposal (the governor is an EOA
-here), forfeit of a missed reveal, a verdict settled by the reviewers'
-share after the window (S0 covers it), REP moved between reviewers of
-different accuracy (two reviewers per round are symmetric).
+Not covered: anchoring and the DAO's actions through a real DAO proposal
+(the governor and the timelock are EOAs here), forfeit of a missed reveal,
+REP moved between reviewers of different accuracy (two reviewers per round
+are symmetric), daemon-side pruning of blobs (unit tests cover it).
 
 # Local end-to-end: the robot MVP
 
