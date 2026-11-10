@@ -319,31 +319,61 @@ class TestNoChainDegrade:
 
 class TestChargedReachesTheBuyer:
     """``service_client.request_service`` passes on the provider's
-    ``charged`` (kept this request's payment or not) and adds none of its
-    own: a relay's error or a timeout leaves the question open, which the
-    buyer's book counts as paid."""
+    ``charged`` (kept this request's payment or not), signed with the rest
+    of its reply, and adds none of its own: a relay's error, an unsigned
+    reply or a timeout leaves the question open, which the buyer's book
+    counts as paid."""
 
-    @staticmethod
-    async def _send(monkeypatch, outcome):
+    PROVIDER_KEY = "0x" + "c3" * 32
+    RID = "0x" + "01" * 32
+
+    @classmethod
+    def _provider(cls) -> str:
+        from eth_account import Account
+        return Account.from_key(cls.PROVIDER_KEY).address
+
+    @classmethod
+    def _signed(cls, reply: dict) -> dict:
+        import atn.service_client as sc
+        return sc.sign_reply(cls.PROVIDER_KEY, cls.RID, DIGEST, reply)
+
+    @classmethod
+    async def _send(cls, monkeypatch, outcome):
         from types import SimpleNamespace
 
         import atn.service_client as sc
 
-        async def fake(host, peer, frame, timeout):
+        async def fake(host, peer, frame, timeout, **_kw):
             if isinstance(outcome, BaseException):
                 raise outcome
             return dict(outcome)
         monkeypatch.setattr(sc, "p2p_request", fake)
         host = SimpleNamespace(_trio_token=object())
         return await sc.request_service(
-            MagicMock(), PROVIDER_ADDR, DIGEST, {}, p2p_host=host,
-            peer_id="12D3KooWtest", request_id="0x" + "01" * 32)
+            MagicMock(), cls._provider(), DIGEST, {}, p2p_host=host,
+            peer_id="12D3KooWtest", request_id=cls.RID)
 
     @pytest.mark.asyncio
     async def test_provider_refusal_says_not_charged(self, monkeypatch):
+        out = await self._send(monkeypatch, self._signed(
+            {"ok": False, "charged": False, "error": "backing failed"}))
+        assert out["delivered"] is True and out["charged"] is False
+
+    @pytest.mark.asyncio
+    async def test_an_unsigned_charged_flag_is_not_believed(self, monkeypatch):
+        """Only the provider's signed word says the payment was not kept: a
+        relay cannot make the buyer drop a voucher the provider holds."""
         out = await self._send(monkeypatch, {"ok": False, "charged": False,
                                              "error": "backing failed"})
-        assert out["delivered"] is True and out["charged"] is False
+        assert out["delivered"] is True and "charged" not in out
+        assert out["authenticated"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_relay_cannot_flip_a_signed_charged_flag(self, monkeypatch):
+        reply = self._signed({"ok": True, "charged": True, "result": {"x": 1}})
+        reply["charged"] = False
+        out = await self._send(monkeypatch, reply)
+        assert "charged" not in out and out["ok"] is False
 
     @pytest.mark.asyncio
     async def test_relay_error_and_timeout_leave_it_open(self, monkeypatch):

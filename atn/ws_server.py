@@ -4453,23 +4453,15 @@ class WebSocketBridge:
         payer = self._verified_payer(msg, record, gate)
         reservation = gate.get("reservation")
         try:
-            # Inference-backed: the work item is a chat completion served
-            # off this daemon's provider stack. Payment already cleared
-            # above; the gate is backing-agnostic on purpose.
-            if record.inference:
-                result = await self._serve_inference_request(
-                    record, args, upstream)
-            else:
-                # Owner-sanctioned dispatch: selling a tool IS the owner's
-                # choice.
-                result = await self.runtime.tool_store.call(
-                    tool_record, args, caller_id=None)
+            reply = await self._dispatch_service(
+                record, args, msg_id, request_id,
+                upstream=upstream, tool_record=tool_record)
         except BaseException:
             # Not served (a crash in the backing, or the call was cancelled).
             if reservation is not None:
                 store.release_channel_voucher(reservation)
             raise
-        ok = "error" not in result
+        ok = bool(reply.get("ok"))
         if reservation is not None:
             if ok:
                 store.keep_channel_voucher(reservation)
@@ -4481,7 +4473,26 @@ class WebSocketBridge:
         store.record_request(spec_digest, request_id, payer, ok=ok,
                              amount=amount if charged else "0")
         # A direct payment is on chain already, whatever the dispatch did.
-        return {"msg_id": msg_id, "ok": ok, "charged": charged,
+        reply["charged"] = charged
+        return reply
+
+    async def _dispatch_service(
+        self, record: Any, args: dict[str, Any], msg_id: Any, request_id: str,
+        *, upstream: Any = None, tool_record: Any = None,
+    ) -> dict[str, Any]:
+        """Run one paid work item on its backing (checked before the
+        payment gate); the reply frame."""
+        # Inference-backed: the work item is a chat completion served off
+        # this daemon's provider stack. Payment already cleared; the gate
+        # is backing-agnostic on purpose.
+        if record.inference:
+            result = await self._serve_inference_request(
+                record, args, upstream)
+        else:
+            # Owner-sanctioned dispatch: selling a tool IS the owner's choice.
+            result = await self.runtime.tool_store.call(
+                tool_record, args, caller_id=None)
+        return {"msg_id": msg_id, "ok": "error" not in result,
                 "result": {"request_id": request_id, **result}}
 
     # ------------------------------------------------------------------

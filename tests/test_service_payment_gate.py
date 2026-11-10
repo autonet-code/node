@@ -676,8 +676,11 @@ class TestNotServedNotPaid:
             "valid": True, "status": 1, "provider": PROVIDER_ADDR})
         server = WebSocketBridge(rt)
         calls = []
+        # The backing is checked before the payment gate: make it resolve
+        # (the dispatch itself is stubbed below).
+        monkeypatch.setattr(rt.tool_store, "get", lambda digest: object())
 
-        async def dispatch(self, record, args, msg_id, request_id):
+        async def dispatch(self, record, args, msg_id, request_id, **_backing):
             calls.append(request_id)
             outcome = outcomes.pop(0)
             if isinstance(outcome, BaseException):
