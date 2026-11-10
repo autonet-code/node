@@ -152,7 +152,10 @@ async def test_service_requests_cross_the_relay(tmp_path):
                 await trio.sleep(0.05)
         relay_pid = relay_addr[0].split("/p2p/")[1]
 
-        a = AutonetHost(node_id="nat-a", listen_host="127.0.0.1")
+        # The relay is a's seed, as the DAO Registry lists it: a forwards
+        # service requests through seeds and advertised relays only.
+        a = AutonetHost(node_id="nat-a", listen_host="127.0.0.1",
+                        bootstrap_peers=[relay_addr[0]])
         c = AutonetHost(node_id="nat-c", listen_host="127.0.0.1")
 
         async def serve(msg):

@@ -144,12 +144,21 @@ stream, same-stream framing (write without closing, read, close).
   `SERVICE_RELAY_MAX_HOPS = 1` and a missing `hops` means 0, so a request
   travels at most one hop and a relay never fans it out.
 - **Client (`AutonetHost.request_service`):** direct when connected to the
-  target; else each connected peer in turn, relays (capability role
-  `relay`) first, with `hops: 1`, moving on only on a `relay_error` or a
-  failed dial. It raises `ConnectionError` when nothing was delivered and
+  target; else each connected relay in turn with `hops: 1`. A relay is a
+  connected seed (the DAO Registry's `bootstrap` list, so it counts from
+  the moment it connects) or a peer that advertised the capability role
+  `relay`; other daemons are never asked, because a request's args are
+  plaintext to whoever forwards it. The client moves on after a
+  `relay_error`, a failed dial, or a reply its `accept` callback refuses
+  (the buyer accepts only a reply signed by the provider it paid,
+  `docs/services_market.md`); all relay attempts share the caller's
+  deadline. It raises `ConnectionError` when nothing was delivered and
   `TimeoutError` when a delivered request got no reply. Connect limit 15 s;
   reply limit is the caller's (default 300 s); a forwarding peer waits at
   most `service_relay_timeout` (600 s; relay flag `--service-timeout`).
+- **Capabilities are kept under the peer that sent them** (the stream's
+  Noise-authenticated peer id), not the peer id the payload names, so a
+  peer can claim the relay role only for itself.
 
 ## Not covered
 

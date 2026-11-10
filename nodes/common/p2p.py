@@ -1438,11 +1438,23 @@ class AutonetHost:
         )
 
     async def _handle_capability_stream(self, stream):
-        """Handle incoming capability advertisement."""
+        """Handle incoming capability advertisement.
+
+        Kept under the peer id the stream comes from (Noise-authenticated),
+        never the one the payload names: a peer can describe only itself, so
+        it cannot claim the relay role for another peer or strip it from a
+        real relay."""
         try:
             data = await _read_framed(stream)
             cap = NodeCapability.from_bytes(data)
-            self._known_capabilities[cap.peer_id] = cap
+            try:
+                sender = str(stream.muxed_conn.peer_id)
+            except Exception:
+                sender = ""
+            if not sender:
+                return
+            cap.peer_id = sender
+            self._known_capabilities[sender] = cap
 
             self.logger.debug(
                 f"Received capability from {cap.peer_id[:16]}...: "
@@ -1942,26 +1954,55 @@ class AutonetHost:
             raise TimeoutError("the stream closed without a reply")
         return json.loads(raw.decode("utf-8"))
 
+    def _seed_peer_ids(self) -> set:
+        """Peer ids named in this host's seed list (the DAO Registry's
+        ``bootstrap`` key, or local config)."""
+        out = set()
+        for addr in self._bootstrap_peers or []:
+            text = str(addr)
+            if "/p2p/" in text:
+                pid = text.rsplit("/p2p/", 1)[1].split("/", 1)[0]
+                if pid:
+                    out.add(pid)
+        return out
+
     def _relay_candidates(self, target: str) -> List[str]:
-        """Connected peers other than the target, relays first."""
-        def is_relay(pid: str) -> bool:
+        """Connected peers that may forward a service request to the target:
+        seeds and peers that advertised the relay role, never the target.
+
+        A request's args (a prompt, a document) are plaintext to the peer
+        that forwards it, so it is not offered to every daemon in the mesh,
+        only to relays. Seeds count as relays from the moment they connect:
+        a relay advertises its role on an interval, and the DAO lists its
+        seeds."""
+        seeds = self._seed_peer_ids()
+
+        def forwards(pid: str) -> bool:
             cap = self._known_capabilities.get(pid)
-            return bool(cap and "relay" in (cap.roles or []))
-        peers = [p for p in self.get_connected_peers() if p != target]
-        return sorted(peers, key=lambda p: not is_relay(p))
+            return pid in seeds or bool(cap and "relay" in (cap.roles or []))
+        return [p for p in self.get_connected_peers()
+                if p != target and forwards(p)]
 
     async def request_service(self, target_peer_id: str, message: dict,
                               timeout: float = 300.0,
-                              connect_timeout: float = 15.0) -> dict:
+                              connect_timeout: float = 15.0,
+                              accept: Optional[Callable[[dict], bool]] = None,
+                              ) -> dict:
         """Send a ``service_request`` to the peer ``target_peer_id`` and
         return its reply.
 
-        Direct when connected to the target; otherwise each connected peer
-        (relays first) is asked in turn to forward it one hop. A peer that
-        is not connected to the target answers with ``relay_error`` at
-        once and the next is tried. Once a request has been handed to a
-        path that reached the target, no other path is tried, so a paid
-        request is never sent twice.
+        Direct when connected to the target; otherwise each connected relay
+        (see ``_relay_candidates``) is asked in turn to forward it one hop.
+        A relay that is not connected to the target answers with
+        ``relay_error`` at once and the next is tried.
+
+        ``accept(reply)`` says whether a relayed reply is the target's own
+        (the buyer checks the provider's signature on it). A reply it
+        refuses was made up or altered on the way, so the next relay is
+        tried: the provider's replay guard serves one payment once, so a
+        second copy costs nothing. When every relay fails that way, the last
+        refused reply is returned (the request may have reached the target).
+        All relay attempts share one deadline of ``timeout``.
 
         Raises ``ConnectionError`` if no path reached the target (nothing
         was delivered) and ``TimeoutError`` if it was delivered but no
@@ -1976,20 +2017,37 @@ class AutonetHost:
                 self.logger.debug("direct service call to %s failed: %s",
                                   target[:16], e)
         errors: List[str] = []
-        envelope = {"target": target, "hops": SERVICE_RELAY_MAX_HOPS,
-                    "timeout": float(timeout), "msg": message}
-        for relay in self._relay_candidates(target):
+        refused: Optional[dict] = None
+        deadline = trio.current_time() + float(timeout)
+        for n, relay in enumerate(self._relay_candidates(target)):
+            remaining = deadline - trio.current_time()
+            if n and remaining < 1.0:
+                errors.append("out of time")
+                break
+            remaining = max(remaining, 0.1)
+            envelope = {"target": target, "hops": SERVICE_RELAY_MAX_HOPS,
+                        "timeout": remaining, "msg": message}
             try:
                 reply = await self._service_exchange(
-                    relay, envelope, timeout + connect_timeout, connect_timeout)
+                    relay, envelope, remaining + connect_timeout,
+                    connect_timeout)
             except ConnectionError as e:
                 errors.append(str(e))
                 continue
             if isinstance(reply, dict) and reply.get("relay_error"):
                 errors.append(f"{relay[:16]}: {reply['relay_error']}")
                 continue
+            if accept is not None and not accept(reply):
+                self.logger.warning(
+                    "service reply through %s is not the target's own; "
+                    "trying the next relay", relay[:16])
+                refused = reply if isinstance(reply, dict) else {"ok": False}
+                errors.append(f"{relay[:16]}: reply not from the target")
+                continue
             return reply
-        detail = "; ".join(errors) if errors else "no connected peers"
+        if refused is not None:
+            return refused
+        detail = "; ".join(errors) if errors else "no connected relay"
         raise ConnectionError(f"no path to {target[:16]} ({detail})")
 
     async def _handle_service_stream(self, stream):
