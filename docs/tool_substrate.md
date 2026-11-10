@@ -1,5 +1,50 @@
 # Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
+## Decision (2026-11-10): the DAO's word replaces the appeal machinery; malware is pruned
+
+Supersedes, in Decision 2026-11-09, the held pay, the appeal window and its
+registration, the slashed bond paid to the yes reviewers, and "disqualified
+means unpaid, nothing else" for malware. The current rules are in
+`economy_design.md`. Owner decisions, 2026-11-10.
+
+- **A malware verdict settles at the conclusion.** The close leaves the
+  author side unpaid (also for composites using the tool), fixes in ATN
+  what it would have paid and records it in the carried state
+  (`tool_rounds.tools[d].unpaid`); the ATN stays unminted and carries over.
+  `ToolBond.conclude` slashes the bond's share of yes and burns that share
+  of the author household's REP at once. Nothing is held or reserved, so
+  the close loses the reservation and release paths.
+- **The slashed stake goes to the treasury**, never to the flaggers. Paying
+  flaggers mainly added a reason to flag falsely; the deterrent (unpaid,
+  slashed, burned) is unchanged, and flaggers still have accuracy (REP
+  moves) and their own safety as reasons to check.
+- **The DAO speaks by proposal at any time.** The timelock is the ultimate
+  authority over the contracts, so a special appeal flow was redundant.
+  `ToolBond.clear(digest)` reverses a verdict and gives back the REP
+  ToolBond burned for the tool: an ordinary proposal, which also returns
+  the stake and pays the recorded amounts from the treasury
+  (`Registry.transferERC20`); minting the REP those amounts would have
+  earned is a RepToken action, so constitutional. `ToolBond.designate
+  (digest)` makes any bonded tool malware (the whole bond to the treasury,
+  no REP burn inside): a `RepToken.burn` in the same proposal, and a
+  sanction, make it constitutional, since any protected action protects
+  the batch. Punishing wrong flaggers is a constitutional burn too: a
+  ToolBond path would let an ordinary majority burn REP. Cash paid out
+  can't be taken back, which is why Projects keep their own appeal flow.
+- **Pruning.** The close lists (`tool_rounds.pruned`) every tool with an
+  uncleared malware verdict (the DAO's word replacing the reviewers'),
+  every tool built on one, and every registration it refused for importing
+  one (a consensus check: ToolBond never sees dependencies). Daemons drop
+  them from the library index, delete their blobs except what the
+  household installed, never serve or fetch them, drop them from search
+  and refuse to adopt them or any composite on them (adoption used to
+  install dependencies with no malware check). A composite whose dependency
+  is flagged later stops earning, and its author can withdraw the stake.
+  A clearing lists the tools again. An appeal brings its own evidence: the
+  author gives voters the manifest and the code, checked against the
+  digests; the network does not keep malware for it.
+- **Search** shows each match's highest dependency malware share.
+
 ## Decision (2026-11-09): fixed review fields, the score formula, malware, no containment
 
 Amends Decision 2026-11-07 (the share of the pool, conclusion and the

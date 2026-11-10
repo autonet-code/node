@@ -29,10 +29,10 @@ services (the fees those payments burn are the volume that ends an epoch).
 The volume ramps up over the run, so epochs should get shorter. A canary
 rides along: one household publishes a tool that reads outside its
 workspace next to an honest control, and two scripted reviewers flag it
-as malware with evidence: it concludes with its author side held, its
-verdict settles after a two-minute appeal window (the bond and the
-author's REP slashed by the share of yes) and the yes reviewers claim the
-slashed bond. Every agent API reply names the tools the agent adopted and
+as malware with evidence: it concludes with its author side unpaid, and
+its verdict settles at once (the bond's share of yes to the treasury, the
+author's REP burned by that share); the close then prunes it. Every agent
+API reply names the tools the agent adopted and
 the household has not reviewed (``review_due``); the run logs each change.
 After the activity, payments alone keep epochs closing until the late
 tool's close is anchored and claimed (at most 15 minutes).
@@ -282,10 +282,8 @@ def deploy_jurisdiction(run: Path, usdc: str, owners: List[str], bootstrap: str)
         "VOTING_DELAY_SECS": str(VOTING_DELAY_SECS),
         "VOTING_PERIOD_SECS": str(VOTING_PERIOD_SECS),
         "TIMELOCK_DELAY_SECS": str(TIMELOCK_DELAY_SECS),
-        # Reviews reveal and finalize within minutes, not the default day,
-        # and a malware verdict settles two minutes after it opens.
+        # Reviews reveal and finalize within minutes, not the default day.
         "TOOLBOND_REVEAL_WINDOW_SECS": "60",
-        "TOOLBOND_APPEAL_PERIOD_SECS": "120",
         "EPOCH_TARGET_SHARE": str(EPOCH_TARGET_SHARE),
         "BOOTSTRAP": bootstrap,
         "MEMBERS": ",".join(owners),
@@ -1025,8 +1023,8 @@ class Activity:
 
     def report_verdicts(self) -> None:
         """Malware verdicts on ToolBond: each tool the anchored closes
-        concluded, its malware share, and how a verdict settled (the bond
-        slashed, the author's REP burned, the reviewers' bond shares)."""
+        concluded, its malware share, and each slash (the bond's share to the
+        treasury, the author's REP burned) and clearing."""
         w3 = self.w3
         tb = w3.eth.contract(address=w3.to_checksum_address(self.j["autonet"]["toolBond"]),
                              abi=artifact("ToolBond.sol/ToolBond.json")["abi"])
@@ -1038,17 +1036,17 @@ class Activity:
             for e in tb.events.Concluded.get_logs(from_block=0):
                 a = e["args"]
                 log(f"VERDICT: {name(a['digest'])} concluded at anchor {a['anchorIndex']}, "
-                    f"malware share {int(a['malwareShare']) / 1e18:.3f}"
-                    f"{', appeal window open' if int(a['appealEnds']) else ''}")
-            for e in tb.events.MalwareSettled.get_logs(from_block=0):
+                    f"malware share {int(a['malwareShare']) / 1e18:.3f}")
+            for e in tb.events.MalwareSlashed.get_logs(from_block=0):
                 a = e["args"]
-                log(f"VERDICT: {name(a['digest'])} settled malware={a['malware']}: bond "
-                    f"slashed {int(a['bondSlashed']) / 1e6:g} ATN, REP burned "
+                by = {1: "the reviewers", 2: "the DAO"}.get(int(a["by"]), str(a["by"]))
+                log(f"VERDICT: {name(a['digest'])} malware by {by}: bond "
+                    f"slashed {int(a['bondSlashed']) / 1e6:g} ATN to the treasury, REP burned "
                     f"{int(a['repBurned']) / 1e18:g}")
-            for e in tb.events.BondShareClaimed.get_logs(from_block=0):
+            for e in tb.events.Cleared.get_logs(from_block=0):
                 a = e["args"]
-                log(f"VERDICT: {name(a['digest'])} bond share {int(a['amount']) / 1e6:g} ATN "
-                    f"to reviewer {str(a['reviewer'])[:10]} (epoch {a['epoch']})")
+                log(f"VERDICT: {name(a['digest'])} cleared by the DAO, REP returned "
+                    f"{int(a['repReturned']) / 1e18:g}")
         except Exception as exc:  # noqa: BLE001
             log(f"VERDICT: read failed: {exc}")
 
@@ -1149,8 +1147,7 @@ async def drain(act: Activity, cap_s: float = 900.0) -> None:
 
 def _tool_mint_line(names: Dict[str, Dict[str, str]], tool_mint: Dict[str, Any]) -> str:
     """One close's concluding tools: weight, score (V x C x S), the author's
-    and the reviewers' mint, and whether a malware verdict held the author
-    side."""
+    and the reviewers' mint, and what a malware verdict left unpaid."""
     parts = []
     for digest, e in sorted((tool_mint or {}).items()):
         if not isinstance(e, dict):
@@ -1160,8 +1157,8 @@ def _tool_mint_line(names: Dict[str, Dict[str, str]], tool_mint: Dict[str, Any])
                      f"score={float(e.get('score') or 0):.3f} "
                      f"author={float(e.get('author_mint') or 0):.4f} "
                      f"reviewers={float(e.get('reviewer_mint') or 0):.4f}"
-                     f"{' MALWARE(author side held)' if e.get('malware') else ''}"
-                     f"{' released' if e.get('released') else ''}")
+                     + (f" MALWARE(unpaid {float(e.get('unpaid') or 0):.4f})"
+                        if e.get('malware') else ""))
     return "; ".join(parts) if parts else "no tool concluded"
 
 

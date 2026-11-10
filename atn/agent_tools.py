@@ -1301,7 +1301,7 @@ _TOOLS: list[ToolDefinition] = [
         description=(
             "Sign and send any transaction from this household's operator, "
             "which an external agent acts as on chain: a werule proposal or "
-            "vote, ToolBond registerDaoProposal for an appeal, any contract "
+            "vote, a proposal clearing a malware verdict, any contract "
             "call. The daemon signs it with the operator key, waits for the "
             "receipt and returns tx_hash, status (1 succeeded, 0 reverted), "
             "block, gas_used and revert_reason when it reverted. Gas is paid "

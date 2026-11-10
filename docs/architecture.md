@@ -1,4 +1,4 @@
-# Architecture: the whole system on one page (2026-11-09)
+# Architecture: the whole system on one page (2026-11-10)
 
 Kept current: every decision that changes a component, a connection or a
 user journey updates this page in the same change. The economy's rules are
@@ -53,13 +53,21 @@ registered in the packaged jurisdiction keeps it. It:
   semantic over every manifest it holds, in relevance order, with the
   rating as of the latest close (the four fields' means, the malware
   share, the charter axes), bond, author and the household's own relation
-  as metadata. Unbonded and malware-rated tools are listed too. The
+  as metadata, with the highest malware share among its dependencies.
+  Unbonded and flagged tools are listed too; pruned ones are not. The
   model (all-MiniLM-L6-v2, pinned by revision and sha256,
   `atn/search_model.py`) downloads in the background on the first run,
   from Hugging Face or from peers that hold it, into `<data_dir>/models`;
   search is keyword-only until it loads. WS: `search_model_status`, event
   `search.model_status`;
 - keeps working when the chain is silent; only settlement waits.
+- prunes the tools the close lists (Decision 2026-11-10: an uncleared
+  malware verdict, a tool built on one, a registration the close refused
+  for importing one): drops them from the library index, deletes their
+  manifest and code blobs except what the household installed, never
+  serves or fetches them (`nodes/common/pruned_tools.py`), and adoption
+  refuses them and any composite built on them. A DAO clearing lists a
+  tool again.
 - keeps its sender chain, batches and open elections across restarts (`world/gossip/`,
   `world/open_elections.json`; the batch log holds two weeks), and never drops an unanchored epoch: an
   election lasts days and every later epoch waits on it.
@@ -113,7 +121,7 @@ what external agents use; the commands for native agents are behind
 signs any transaction with the operator key, waits for the receipt and
 returns its status, block, gas used and revert reason: how an agent takes
 part in governance for the owner (werule proposals and votes, ToolBond
-appeals). No approval step, since the operator is an accepted hot wallet;
+verdict clearings). No approval step, since the operator is an accepted hot wallet;
 Activity records each one's target, selector, value and note. It is for
 external agents only; native agents and the owner surface are refused.
 `export_operator_key` stays off this API. `GET /guide` serves

@@ -1,4 +1,4 @@
-# Economy design: the current state (2026-11-09)
+# Economy design: the current state (2026-11-10)
 
 One page, kept current. Where this disagrees with older text elsewhere,
 this wins; the reasoning behind each rule is in `tool_substrate.md`
@@ -158,25 +158,39 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   badly rated dependency still gets its part from a correct composite (it
   comes out of the composite author's pay). What isn't paid stays unminted
   and carries over.
-- **Malware verdict**: more than half the REP that reviewed the tool says
-  malware (the share in bps, as the close computes it), judged once its
-  reviewers clear the conclusion gate. Then the author's side is not paid,
-  nor that of any composite using the tool, and ToolBond slashes the bond
-  and burns the author household's REP by that share (in full when the DAO
-  rules malware; no cap, the appeal is the guard). The author
-  can't withdraw the bond while a verdict is forming. The close commits
-  one leaf per concluding tool with its share in the anchor's tree, from
-  which ToolBond opens the verdict. Only the author can appeal, only a
-  malware yes; the pay and the slash wait for the vote, and the DAO's
-  ruling (yes or no) replaces the reviewers'. The held side is fixed in
-  ATN at the conclusion, as the author's and the dependencies' parts it
-  would have paid, and reserved: later closes divide a pool without it.
-  Cleared, exactly those amounts are paid in the next close; a settled
-  malware verdict returns them to the pool (unminted, carried over). The
-  carry bundle holds the reservations. Ratings are not appealable.
-- **Disqualified means unpaid, nothing else**: the tool stays in the
-  library, spreads to every daemon, shows in search with its ratings and
-  can be adopted. A fix is a new version with a new bond.
+- **Malware verdict** (Decision 2026-11-10): more than half the REP that
+  reviewed the tool says malware (the share in bps, as the close computes
+  it), judged once its reviewers clear the conclusion gate. It settles at
+  the conclusion, with no appeal window: the author's side is not paid,
+  nor that of any composite using the tool, and ToolBond (`conclude`, from
+  the close's leaf for the tool in the anchor's tree) sends that share of
+  the bond to the treasury and burns that share x `authorSlashBps` of the
+  author household's REP. The slashed bond never goes to the flaggers (no
+  profit from a false flag; the deterrent stays). The author can't
+  withdraw the bond while a verdict is forming. What the author side would
+  have paid (the author's and the dependencies' parts) is fixed in ATN at
+  the conclusion and recorded in the carried state, but stays unminted and
+  carries over: nothing is reserved.
+- **The DAO's word, at any time, by proposal**: `ToolBond.clear` reverses a
+  verdict (the reviewers' or its own) and gives back the REP ToolBond
+  burned for the tool, an ordinary proposal; the same proposal returns the
+  stake and pays the recorded amounts from the treasury (a REP mint for
+  them makes it constitutional). `ToolBond.designate` makes any bonded
+  tool malware (the whole bond to the treasury, no REP burn: a
+  `RepToken.burn` in the same proposal makes it constitutional, and a
+  sanction can join). Wrong flaggers are punished only by a constitutional
+  burn. Ratings are final.
+- **Pruned**: a tool with an uncleared malware verdict, every tool built on
+  one, and every new registration importing one (the close refuses it) are
+  listed by the close; daemons delete them, stop serving and fetching
+  them, search drops them and adoption refuses them. A household keeps what
+  it already installed. A clearing lists them again. An appeal brings its
+  own evidence: the author gives voters the manifest and the code, which
+  they check against the digests.
+- **Otherwise disqualified means unpaid, nothing else**: a broken tool or
+  one against the DAO's values stays in the library, spreads to every
+  daemon, shows in search with its ratings and can be adopted. A fix is a
+  new version with a new bond.
 - **Excluded**: unbonded tools, and sanctioned households' mint (withheld).
 - **Bounty** (ToolBond, on chain): anyone can add ATN to a tool's bounty
   (`addBounty`). As each round finalizes, every settled review takes
@@ -205,8 +219,8 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   loses the full amount per review. A malware verdict costs its author's
   household share x `authorSlashBps` (100%) of its REP, which is **burned**,
   not given to the reviewers (a false flag must not buy voting weight; the
-  slashed bond pays the reviewers who said yes, by REP). So REP is earned
-  only from the tool pool, but can be won or lost by reviewing.
+  slashed bond goes to the treasury). So REP is earned only from the tool
+  pool, but can be won or lost by reviewing.
 
 ## Tools
 
@@ -218,10 +232,11 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   with; they judge novelty themselves, against everything that exists, so
   copies and thin wrappers keep almost nothing whatever the claim says.
 - **ToolBond**: an author stake behind every tool; reviews are
-  commit-reveal, weighted by household REP; a malware verdict slashes
-  the bond and burns REP by the share that said yes.
-- Search orders by relevance only; each match carries its ratings, bond
-  and the malware share as metadata. Nothing is pruned or hidden.
+  commit-reveal, weighted by household REP; a malware verdict sends the
+  bond's share that said yes to the treasury and burns REP by that share.
+- Search orders by relevance only; each match carries its ratings, bond,
+  the malware share and the highest malware share among its dependencies
+  as metadata. Only pruned tools (malware verdicts) are gone.
 
 ## Safety is the household's policy
 

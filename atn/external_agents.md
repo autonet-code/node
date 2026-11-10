@@ -285,10 +285,15 @@ How a published tool earns:
   rest stays in the pool: building on good tools pays, cloning them
   doesn't. A dependency rated badly still gets its part from a good
   composite.
-- When more than half the REP reviewing a tool says malware, its author
-  side is not paid, nor that of any composite using it, and its bond and
-  REP are slashed by that share (the bond in full if the DAO confirms it). The tool stays in the library and in
-  search with its rating; a fix is a new version with a new bond.
+- When more than half the REP reviewing a tool says malware, the verdict
+  settles when the reviews conclude: its author side is not paid, nor that
+  of any composite using it, the bond loses that share to the treasury and
+  the author's household loses that share of its REP. The DAO can also
+  designate a tool malware by proposal at any time (the whole bond). A tool
+  with a malware verdict, every tool built on it and every new tool that
+  imports one are pruned: daemons delete them and stop serving them, search
+  no longer lists them and adoption refuses them. A household keeps what it
+  already installed. A fix is a new version with a new bond.
 - `addBounty` on ToolBond adds ATN that pays reviewers as their rounds
   settle (by their REP and accuracy), a way to draw reviews to a tool. You
   get the unspent rest back only together with the bond.
@@ -297,28 +302,28 @@ How a published tool earns:
 
 ### Appealing a malware verdict
 
-Only the tool's author can appeal, and only a malware verdict; ratings are
-not appealable. When a verdict forms, ToolBond opens an appeal period (3
-days by default); the pay and the slash wait for it. To appeal, have the
-DAO vote a `daoOverrule(digest, malware)` call on ToolBond with `malware`
-false (`autonet_status` lists `tool_bond_address` and the DAO's governor as
-`dao_address`). You can do all of it yourself with `send_transaction`
-(section 6):
+Only a malware verdict can be appealed; ratings are final. There is no
+appeal period and nothing to register: at any time, a DAO proposal can
+clear the verdict. Bring the evidence yourself: the network has pruned the
+tool, so give voters the manifest and the code (they check both against
+the tool's digest and the manifest's `code_digest`) and answer the flags'
+evidence (`fetch_evidence`). You can do all of it with `send_transaction`
+(section 6); `autonet_status` lists `tool_bond_address`, the DAO's governor
+as `dao_address` and the Registry.
 
-1. Build the `daoOverrule` calldata from ToolBond's ABI.
-2. Propose it: `propose(targets, values, calldatas, description)` on the
-   governor, with ToolBond as the one target, value 0 and that calldata.
-   The operator proposes with the REP the owner delegated to it. (The owner
-   can also submit it in werule as a custom proposal.)
-3. Before the appeal period ends, call `registerDaoProposal(digest, targets,
-   values, calldatas, descriptionHash)` on ToolBond with exactly the
-   proposal's targets, values, calldata and the keccak256 of its
-   description, from the tool's author address. A registered proposal holds
-   the verdict until it can execute; an unregistered one lands too late.
-   Voters can read the flags' evidence with `fetch_evidence`.
+1. Build the actions: `clear(digest)` on ToolBond (it gives back the REP
+   ToolBond burned for the tool); to return the slashed stake and pay what
+   the tool would have earned, `transferERC20(atn, to, amount)` on the
+   Registry (the treasury), with the amounts the close recorded for the
+   tool (`malware_unpaid` in WS `tool_reviews`). A REP
+   mint for those amounts is a RepToken action, which makes the proposal
+   constitutional.
+2. Propose them: `propose(targets, values, calldatas, description)` on the
+   governor. The operator proposes with the REP the owner delegated to it.
+   (The owner can also submit it in werule as a custom proposal.)
 
-If the DAO rules it is not malware, the tool's author side is paid in the
-next close.
+If the proposal passes, the tool is no longer pruned and the composites
+built on it are listed again.
 
 ## 5. Services (paid remote APIs)
 
