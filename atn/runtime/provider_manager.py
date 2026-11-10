@@ -327,6 +327,7 @@ class ProviderManager:
         # Signature: (agent_id) -> private_key_hex | "" ; and
         # (agent_id) -> 0x address | "" for the client address.
         self._agent_key_resolver: Any = None
+        self._operator_key_resolver: Any = None
         self._agent_address_resolver: Any = None
         # Cache session stats when providers are removed, so the frontend
         # can still fetch stats after execution completes.
@@ -642,14 +643,31 @@ class ProviderManager:
                 "'spec_digest' under providers.service in config.yaml — "
                 "it names the specific purchased service to buy inference from."
             )
-        autonet = self._config.autonet
+        # The household buys as its operator (Decision 2026-11-08): the
+        # configured daemon key, else the vault-held operator key. The
+        # configured key alone is empty in a normal install.
+        key = ""
+        resolver = getattr(self, "_operator_key_resolver", None)
+        if resolver is not None:
+            try:
+                key = str(resolver() or "").strip()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("operator key unavailable for the service "
+                            "provider: %s", exc)
+        client = ""
+        if key:
+            try:
+                from eth_account import Account
+                client = str(Account.from_key(key).address)
+            except Exception:  # noqa: BLE001
+                client = ""
         return ServiceProvider(
             config=self._config.rpb,
             provider_address=provider_address,
             spec_digest=spec_digest,
             model=model or (pconfig.default_model if pconfig else ""),
-            owner_private_key=(getattr(autonet, "private_key", "") or "").strip(),
-            client_address=(getattr(autonet, "owner_wallet", "") or "").strip(),
+            owner_private_key=key,
+            client_address=client,
             timeout=float(extra.get("timeout") or 0.0),
             payer_kind="owner",
         )

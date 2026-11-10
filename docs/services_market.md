@@ -6,9 +6,10 @@ BUILT: the on-chain registry (register / update ask / retire), direct
 `service` consumer provider type. SPECIFIED, NOT BUILT: receipt-gated
 reviews (§4). The voucher-per-call client flow is BUILT for agents'
 `request_service` (2026-10-28, #45: `atn/service_channels.py`, one channel
-per payer and provider, a voucher committed only once the request may have
-reached the provider, refunds swept after the window); the `service`
-inference provider still pays each call up front.
+per payer and provider; a voucher counts once the provider's signed reply
+says it kept the payment, or when the outcome is unknown; refunds swept
+after the window; the provider closes to collect, Decision 2026-11-10);
+the `service` inference provider still pays each call up front.
 `ServiceRegistry` + `PaymentChannel`
 (`contracts/core/ServiceMarket.sol`) are deployed on the Autonet
 jurisdiction (Etherlink Shadownet; addresses in `registry.json` under
@@ -44,6 +45,67 @@ mint, NO decay math. The trust basis is purely behavioral:
 Master-disable / fingerprinting is fleet hygiene for honest daemons,
 not a defense against dishonest ones. The defense is that lying has a
 wallet attached and receipts are forever.
+
+## Decision (2026-11-10): not served = not paid, signed replies, providers collect
+
+An audit of the whole rail (2026-11-10) found the payment and delivery
+paths broke the principles above in ways each piece hid. Fixed:
+
+- **Not served = not paid, on both sides.** The provider's gate reserves a
+  channel voucher (a copy sent meanwhile is refused, and its request id is
+  used up) and keeps it only when the dispatch succeeds; a failure or a
+  crash releases it. Everything a request can be refused for without its
+  payment (unknown or retired service, no backing, malformed or oversized
+  inference input, an upstream provider the daemon cannot build) is
+  checked before the gate, so such a refusal leaves the payment unspent.
+  Every reply says `charged` (whether this request's payment was kept).
+  The buyer writes its voucher down as pending before sending, counts it
+  when the provider's reply says `charged: true` or when no answer from
+  the provider came back after the request may have reached it, and drops
+  it on `charged: false`. The buyer's book is never behind the provider's,
+  and ahead by at most one voucher when the outcome is unknown. A direct
+  `payForService` payment is on chain already, so it is charged whatever
+  the dispatch did.
+- **Replies are signed.** The provider signs every reply about its
+  services (request id, spec digest, and the reply's `ok`, `result`,
+  `error` and `charged`) with the key that registered the service, the
+  address the buyer paid (`service_client.sign_reply`, `receipt_sig`).
+  The buyer takes nothing else as served: an unsigned or wrongly signed
+  reply is not ok, its `charged` is not believed, and a relayed one moves
+  on to the next relay. Only relays (connected seeds and peers advertising
+  the relay role) forward requests, since a request's arguments are plain
+  to whoever forwards them; a peer's advertised capability is stored
+  under the sending peer's id, so no peer can claim or strip another's
+  relay role.
+- **Providers collect.** The provider's daemon closes a channel with its
+  best voucher when the remaining deposit is below the on-chain price,
+  when the channel has been idle for `autonet.channel_idle_close_s`
+  (default 24 h), or during a close the client started; never while a
+  request on it is being served. The buyer notices a channel the provider
+  closed, takes the remainder back after the window and opens a new one.
+  A ServiceMarket write whose gas estimate reverts is not sent; a client
+  close past its window is dropped; a failed `startClose` is sent again.
+- **The household buys as its operator** everywhere: agents, the owner's
+  `invoke_service` in the app, and the daemon-level `providers.service`
+  purchase (the configured daemon key, else the vault-held operator key).
+- **Inference names its upstream.** The `inference` block is `{provider,
+  model, max_tokens_cap, max_input_chars}`: provider and model are
+  required, serving uses exactly that provider (never a guess from the
+  model name), and `max_input_chars` (default 64,000, the messages as
+  compact JSON plus the system prompt) bounds the input the per-call price
+  covers.
+- **The request log** names only the payer the gate verified, counts
+  refused attempts without attributing them, keeps its summary as rows
+  are written (`requests_summary.json`) and rotates at 4 MiB.
+- `request_service` takes the numeric `service_id` from `find_services`
+  (digest and provider read from the chain), or `spec_digest` with
+  `provider_address`. Sanctions read an unbound address's owner again
+  after a minute. libp2p service requests have their own bounded thread
+  pool (16).
+- Proven by `scripts/local_e2e_service_provider.py` (a failed dispatch is
+  not charged, the provider's own close, the buyer's refund) and
+  `scripts/local_e2e_cross_daemon_inference.py` (a paid turn accepted
+  through the provider's signed reply).
 
 ## Decision (2026-11-10): services are published and found the way tools are
 
@@ -143,7 +205,9 @@ The v1 slice, costs eaten deliberately:
    (`messages`, `max_tokens`) through the provider daemon's OWN provider
    stack (their GPU, their local models, their API key: the owner's
    choice and the owner's upstream-ToS risk). The spec declares the
-   served model; the daemon clamps to the declared token cap.
+   upstream provider and the served model (both required since
+   2026-11-10, never guessed from the model name); the daemon clamps to
+   the declared token cap and refuses input above `max_input_chars`.
 2. **Consumer side**: a new provider type next to `rpb` wraps a
    purchased service (provider address + spec digest). An agent pointed
    at it does ordinary chat completions; underneath each call is
@@ -189,11 +253,10 @@ providers:
 
 Point an agent at `provider: service` and it does ordinary completions.
 
-- **Owner-level spend.** The payment is signed with `autonet.private_key`
-  (the daemon owner's key), not a per-agent key: buying cognition for the
-  fleet is an owner act, matching the sponsor pipe's
-  dependent-is-the-owner-wallet doctrine. An agent cannot mint itself a
-  cheaper provider.
+- **Operator spend.** The payment is signed with the operator key (the
+  configured daemon key, else the vault-held operator key): the household
+  buys as its operator (Decision 2026-11-08), not with a per-agent key.
+  An agent cannot mint itself a cheaper provider.
 - **Price read per call, request id fresh.** The service's
   `ServiceRegistry` number is scanned out once by `(provider, spec_digest)`
   (there is no digest→id index); the price is read from that entry on
@@ -235,8 +298,8 @@ failure  {ok: false, error: "<human-readable>"}
 receipt  {paid, degraded, tx_hash, amount, token, recipient}
 ```
 
-- **Owner surface, owner spend.** Signed with `autonet.private_key`, same
-  doctrine as the `service` provider type.
+- **Owner surface, operator spend.** Signed with the operator key, same
+  as the `service` provider type: the household buys as its operator.
 - **Local digest** (in `service_store`): pay, then re-enter
   `_handle_service_request` with a real `service_request` frame carrying
   the payment proof. The gate then verifies the payment we just made: the
@@ -246,10 +309,10 @@ receipt  {paid, degraded, tx_hash, amount, token, recipient}
   tool-backed buy yields `{"result": ...}` and an inference-backed one
   yields `{content, model, usage, ...}`; the handler does not reshape per
   backing.
-- **Foreign digest**: scanned out of `ServiceRegistry` for its provider +
-  ask (no digest→id index), endpoint resolved, paid, then
-  `service_client.request_service` cross-daemon. With no chain there is no
-  registry to scan, so a foreign digest is a hard failure. Unlike the
+- **Foreign digest**: the catalog names its genuine registry entry (the
+  spec's signer's), read fresh for provider and price, endpoint resolved,
+  paid, then `service_client.request_service` cross-daemon. With no chain
+  there is no registry, so a foreign digest is a hard failure. Unlike the
   local path there is no counterparty to reach at all.
 - **Receipt semantics.** `paid` means a tx exists. `degraded=true` means
   the chain was unconfigured so nothing was paid (the provider gate
@@ -262,10 +325,10 @@ receipt  {paid, degraded, tx_hash, amount, token, recipient}
   at dispatch is the outcome to avoid.
 - **Off-loop chain calls.** `on_chain.py`'s methods are `async def` but
   synchronous inside (web3 HTTP, `estimate_gas`, a
-  `wait_for_transaction_receipt(timeout=120)`). Awaited directly they
-  starve the websocket keepalive, so the payment and registry reads go
-  through `_offload` onto worker threads, the same fix
-  `owner_binding_status` needed.
+  `wait_for_transaction_receipt(timeout=120)`). `OnChainService` and
+  `ServiceMarketClient` are wrapped by `_off_the_loop` (#49), so every
+  async method runs on a worker thread and no caller starves the
+  websocket keepalive.
 
 Covered by `tests/atn/test_service_store.py`
 (`TestInvokeServiceLocal`, `TestInvokeServicePayment`).
@@ -375,11 +438,12 @@ address, so it cannot publish a dialable wss endpoint. `request_service`
    running. The provider is found by the peer id its agent bound on chain
    (`Substrate.getAgentPeerId`; stable across restarts via
    `<data_dir>/p2p.key`). Connected to that peer: one stream, direct.
-   Otherwise the request goes to connected relays first, then other
-   connected peers, one at a time, each asked to forward it one hop; a
-   peer that is not connected to the provider says so at once and the
-   next is tried. Relays and daemons both forward (`nodes/relay.py` has no
-   service handler of its own).
+   Otherwise the request goes to connected relays (connected seeds and
+   peers advertising the relay role), one at a time, each asked to forward
+   it one hop; a relay that is not connected to the provider says so at
+   once and the next is tried, as is the next after a reply the buyer
+   rejects as unsigned (Decision 2026-11-10). `nodes/relay.py` has no
+   service handler of its own.
 2. **wss endpoint**, only when libp2p could not deliver the request (no
    host, no peer id on chain, no path, or an older provider without the
    protocol). Once a request reached the provider, its reply, its error or
@@ -394,7 +458,8 @@ The payload is the same `service_request` frame the WS path sends
 (payment proof, payer signature), and the provider hands it to the same
 `_handle_service_request` with `local=False`, so the payment gate, the
 payer-signature check and the replay guard are shared. The relay carries
-bytes only; all trust stays end to end. Default wait: 300 s
+bytes only; all trust stays end to end: the provider signs its reply, and
+the buyer checks the signature against the address it paid. Default wait: 300 s
 (`DEFAULT_REQUEST_TIMEOUT`, per-call `timeout`); a relay waits at most
 `--service-timeout` (default 600 s, `AUTONET_RELAY_SERVICE_TIMEOUT`) or the
 buyer's timeout if shorter.
@@ -454,10 +519,11 @@ actually renders:
 
 - the on-chain provider record (`serviceEarnings`, `agentMintTotal`,
   registration tenure), read by the `provider_record` WS handler. It is
-  a consequence of other people's payments, so it cannot be
-  self-reported.
+  a consequence of payments, so it is costly to inflate: a provider can
+  pay itself, at the cost of the fee each time.
 - the provider-local success rate and volume from
-  `ServiceStore.summary()`, returned alongside `list_services`.
+  `ServiceStore.summary()`, returned alongside `list_services`: requests
+  that passed the payment gate, attributed only to the payer it verified.
 
 The specified design, for when it is built: a review = the payer's
 signed verdict on a request_id (ok/score/note), publishable as a gossip

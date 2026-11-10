@@ -506,6 +506,8 @@ class TestProviderManagerWiring:
                               executors={}, events=MagicMock())
         # Normally attached by the runtime; provider_list aggregates over it.
         mgr._execution_log = MagicMock(_logs={})
+        # The runtime injects the operator key (the household pays as it).
+        mgr._operator_key_resolver = lambda: OWNER_KEY
         return mgr
 
     def test_resolves_from_config(self):
@@ -517,9 +519,22 @@ class TestProviderManagerWiring:
         assert prov.provider_address == PROVIDER_ADDR
         assert prov.spec_digest == DIGEST
         assert prov.is_available
-        # Owner key + owner wallet threaded through (owner-level spend).
+        # The operator's key and address (the household buys as its
+        # operator, Decision 2026-11-08), not the owner wallet.
+        from eth_account import Account
         assert prov._owner_key == OWNER_KEY
-        assert prov._client_address == CLIENT_ADDR
+        assert prov._client_address == Account.from_key(OWNER_KEY).address
+
+    def test_pays_as_the_operator_without_a_configured_key(self):
+        """A normal install has no configured daemon key: the vault-held
+        operator key pays."""
+        mgr = self._mgr({"provider_address": PROVIDER_ADDR,
+                         "spec_digest": DIGEST})
+        mgr._config.autonet.private_key = ""
+        op_key = "0x" + "4d" * 32
+        mgr._operator_key_resolver = lambda: op_key
+        prov = mgr._resolve_provider_by_name("service", "bought-model", "a1")
+        assert prov._owner_key == op_key
 
     def test_missing_config_raises(self):
         mgr = self._mgr(None)
@@ -671,6 +686,7 @@ class TestBindingResolution:
                      else {"child-1": CHILD_ADDR})
         mgr._agent_key_resolver = lambda aid: keys.get(aid, "")
         mgr._agent_address_resolver = lambda aid: addresses.get(aid, "")
+        mgr._operator_key_resolver = lambda: OWNER_KEY
         return mgr
 
     def _defn(self, agent_id, *, binding=None, provider="ollama",

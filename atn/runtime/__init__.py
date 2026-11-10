@@ -187,6 +187,9 @@ class Runtime:
         # provider manager needs the child's OWN wallet key and address. It
         # holds no registry reference, so inject lazy resolvers.
         self.providers._agent_key_resolver = self.registry.get_agent_key
+        # The daemon-level `service` purchase pays as the operator, which
+        # signs and pays for the household (Decision 2026-11-08).
+        self.providers._operator_key_resolver = self.registry.daemon_operator_key
         self.providers._agent_address_resolver = self._agent_wallet_address
 
         # Setup providers from config (sync, before event loop)
