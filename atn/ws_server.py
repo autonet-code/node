@@ -2125,6 +2125,23 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": {"services": rows, "count": len(rows)}}
 
+        # The household's receipts of paid service requests, newest first,
+        # each with its review once one was sent (service reviews, Decision
+        # 2026-11-10). The app reviews one with `review_service` (the agent
+        # tool, which as the owner signs with the operator key).
+        if msg_type == "service_receipts":
+            from .service_receipts import receipts_for
+            store = receipts_for(self.runtime)
+            if store is None:
+                return {"msg_id": msg_id, "ok": True, "result": {"receipts": []}}
+            try:
+                limit = max(1, min(int(msg.get("limit") or 50), 500))
+            except (TypeError, ValueError):
+                limit = 50
+            rows = store.list(provider=str(msg.get("provider") or ""), limit=limit)
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"receipts": rows, "count": len(rows)}}
+
         # Semantic search + clustering over service specs.
         #
         # `service_embedding_text` (service_spec.py) has been written and

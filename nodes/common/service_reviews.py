@@ -83,8 +83,8 @@ _HEXID = re.compile(r"^[0-9a-f]{1,64}$")
 _ADDR = re.compile(r"^0x[0-9a-f]{40}$")
 _SIG = re.compile(r"^0x[0-9a-f]{130}$")
 _AMOUNT = re.compile(r"^(0|[1-9][0-9]{0,77})$")
-_RECEIPT_KEYS = frozenset({"request_id", "spec_digest", "provider", "payer", "ok",
-                           "charged", "amount", "result_hash", "sig"})
+RECEIPT_KEYS = frozenset({"request_id", "spec_digest", "provider", "payer", "ok",
+                          "charged", "amount", "result_hash", "sig"})
 _REVIEW_KEYS = frozenset({"jurisdiction", "correctness", "simplicity", "novelty",
                           "malware", "axes", "evidence_hash", "note", "ts"})
 _RANGES = {"correctness": (-100, 100), "simplicity": (0, 100), "novelty": (0, 100)}
@@ -183,7 +183,7 @@ def _int_in(value: Any, lo: int, hi: int) -> Optional[int]:
 
 def normalize_receipt(raw: Any) -> Tuple[Optional[Dict[str, Any]], str]:
     """A receipt in canonical form, signature checked, or (None, why)."""
-    if not isinstance(raw, dict) or set(raw) != _RECEIPT_KEYS:
+    if not isinstance(raw, dict) or set(raw) != RECEIPT_KEYS:
         return None, "receipt fields"
     rid, digest = raw.get("request_id"), raw.get("spec_digest")
     provider, payer = raw.get("provider"), raw.get("payer")
@@ -305,7 +305,7 @@ def build_event(private_key: str, receipt: Dict[str, Any], *, jurisdiction: str,
         "note": str(note or ""),
         "ts": int(ts),
     }
-    receipt = {k: receipt[k] for k in sorted(_RECEIPT_KEYS)}
+    receipt = {k: receipt[k] for k in sorted(RECEIPT_KEYS)}
     return {
         "kind": KIND,
         "v": EVENT_VERSION,

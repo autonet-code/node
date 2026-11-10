@@ -474,6 +474,15 @@ class Runtime:
         # The buyer's payment channels, one per (payer agent, provider) (#45).
         from ..service_channels import book_at
         self.channel_book = book_at(self._config.data_dir / "service_channels.json")
+        # The buyer's receipts of authentic replies, and its reviews of paid
+        # requests (Decision 2026-11-10); malware evidence goes to the tool
+        # store's blobs, which peers can fetch.
+        from ..service_receipts import ReceiptStore
+        from .. import service_client as _service_client
+        self.service_receipts = ReceiptStore(
+            self._config.data_dir / "services" / "receipts",
+            evidence_blobs=self.tool_store._blob_store)
+        _service_client.set_receipt_sink(self._config.rpb, self.service_receipts.record)
 
         # Tool registry
         from ..tool_registry import ToolRegistry

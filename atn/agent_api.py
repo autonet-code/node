@@ -51,7 +51,7 @@ _GROUPS: dict[str, tuple[str, ...]] = {
               "fetch_evidence"),
     "services": ("find_services", "request_service", "pay_for_service",
                  "close_service_channel", "register_service",
-                 "open_service_stream"),
+                 "open_service_stream", "review_service"),
     # Any transaction from the operator the agent acts as: governance
     # (werule proposals and votes, ToolBond appeals), any contract call.
     "chain": ("send_transaction",),

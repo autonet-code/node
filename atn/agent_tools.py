@@ -1592,6 +1592,41 @@ _TOOLS: list[ToolDefinition] = [
             "required": ["provider_address"],
         },
     ),
+    ToolDefinition(
+        name="review_service",
+        description=(
+            "Review a service request you paid for, so other buyers can "
+            "judge the service (find_services shows each service's rating "
+            "from the latest epoch close). Only the payer of a charged "
+            "request may review it, every payer counts the same, and your "
+            "latest review of a service replaces your earlier one. The "
+            "proof is the provider's signed receipt this daemon kept for "
+            "the request: it covers what was charged and a hash of the "
+            "result, never the result itself. Reviews enforce nothing: no "
+            "mint, no REP. Every review needs correctness, simplicity, "
+            "novelty and malware; a malware flag needs evidence (the "
+            "provider's signed reply is attached to it)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "request_id": {"type": "string", "description": "The request's id (request_id in request_service's reply)."},
+                "receipt": {"type": "object", "description": "Or: the receipt itself (receipt in request_service's reply), for a request this daemon has no receipt of.", "additionalProperties": True},
+                "correctness": {"type": "number", "description": "Required, -1..1: the service delivered what it describes (harm to people counts here or on a charter axis)."},
+                "simplicity": {"type": "number", "description": "Required, 0..1: convenience for the buyer: time, preparation, documents asked for."},
+                "novelty": {"type": "number", "description": "Required, 0..1: your own judgment of how much of your view of what exists the service makes you revise."},
+                "malware": {"type": "boolean", "description": "Required: true only when the service acts to perform an unauthorized process with adverse impact on the confidentiality, integrity or availability of a system (NIST SP 800-53 'malicious code'), for example a model primed to make your agent leak data or run harmful commands."},
+                "evidence": {"type": "string", "description": "Required with malware true: what the service did and how it shows in its reply."},
+                "axes": {
+                    "type": "object",
+                    "description": "Optional charter-axis scores, -1..1, keyed by axis id (autonet_status lists them); an unscored axis counts as half the top score.",
+                    "additionalProperties": {"type": "number"},
+                },
+                "note": {"type": "string", "description": "Optional, up to 500 characters, public with the review."},
+            },
+            "required": ["correctness", "simplicity", "novelty", "malware"],
+        },
+    ),
 ]
 
 
@@ -3545,6 +3580,7 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         "input_schema": r["input_schema"],
         "output_schema": r["output_schema"],
         "spec_available": r["known_spec"],
+        "rating": r.get("rating"),
     } for r in rows], "count": len(rows)}
 
 
@@ -3895,6 +3931,34 @@ async def _close_service_channel(runtime: Runtime, input: dict[str, Any]) -> dic
     if book is None or not smc.channel_available:
         return {"error": "PaymentChannel not configured on this daemon"}
     return await close_channel(book, smc, key, identity.address, provider)
+
+
+async def _review_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """The payer's review of a paid service request (Decision 2026-11-10),
+    signed with the key that paid: the caller's (the operator's for an
+    external agent), the operator's for the owner surface. Sent to the open
+    epoch's batch by the daemon's receipt store."""
+    from .service_receipts import receipts_for
+
+    store = receipts_for(runtime)
+    if store is None:
+        return {"error": "this daemon keeps no service receipts"}
+    caller_id = input.get("_caller_id")
+    if is_owner_caller(caller_id):
+        key = str(runtime.registry.daemon_operator_key() or "")
+    else:
+        key = str(runtime.registry.get_agent_key(caller_id) or "")
+    receipt = input.get("receipt")
+    request_id = str(input.get("request_id") or "").strip()
+    if receipt is None and not request_id:
+        return {"error": "Name the request: 'request_id' (from request_service) "
+                         "or its 'receipt'"}
+    fields = {k: input.get(k) for k in ("correctness", "simplicity", "novelty", "malware")}
+    return await asyncio.to_thread(
+        store.review, key, request_id=request_id,
+        receipt=receipt if isinstance(receipt, dict) else None,
+        fields=fields, axes=input.get("axes"), note=str(input.get("note") or ""),
+        evidence=str(input.get("evidence") or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -4590,10 +4654,11 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # invoke with the proof). Kept off the progressive surface.
     "services": {"find_services", "register_service",
                  "pay_for_service", "request_service", "close_service_channel",
-                 "open_service_stream"},
+                 "open_service_stream", "review_service"},
     # The buying half alone, granted to external agents by default.
     "services_buy": {"find_services", "pay_for_service", "request_service",
-                     "close_service_channel", "open_service_stream"},
+                     "close_service_channel", "open_service_stream",
+                     "review_service"},
     # User-memory bundle: read + write the dossier (USER.md). One grant —
     # an agent trusted to know the user is trusted to keep the record
     # current. Assignable to ANY agent; nothing about it is Kevin-specific.
@@ -5844,6 +5909,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "request_service": _request_service,
     "open_service_stream": _open_service_stream,
     "close_service_channel": _close_service_channel,
+    "review_service": _review_service,
     # Manual compaction (§15)
     "compact_agent": _compact_agent,
     # Conversation management (UI-facing, not in the agent tool list)

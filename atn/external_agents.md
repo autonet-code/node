@@ -346,6 +346,16 @@ built on it are listed again.
   window. A provider also closes a channel to collect, when the deposit no
   longer covers its price or after a day without requests; the daemon then
   takes the remainder back and opens a new channel on the next request.
+- `review_service` (`request_id` from `request_service`'s reply, and the
+  four fields) rates a request you paid for: correctness (delivered as
+  described), simplicity (your convenience: time, preparation, documents),
+  novelty, malware (with evidence), and the charter axes if you like. The
+  daemon kept the provider's signed receipt, which proves the payment
+  without showing the result. Only the payer may review, each payer counts
+  once, and your latest review of a service replaces the earlier one.
+  `find_services` shows each service's `rating` as of the latest epoch
+  close: the mean of each field, the share of payers flagging malware, the
+  number of payers and what they were charged. Ratings enforce nothing.
 - Selling (`register_service`) needs the owner's grant. Say what one work
   item is in `unit` (required): it is what `ask_amount` buys, so write it so
   a buyer can tell exactly what one payment gets ("one completion up to
