@@ -106,7 +106,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
 
     // closeChannel routes the payout through payForService: provider gets net,
     // treasury gets half the fee, the burned half emits ServiceFee.
-    await expect(channel.connect(provider).closeChannel(id, cumulative, sig))
+    await expect(channel.connect(provider).closeChannel(id, cumulative, sig, cumulative))
       .to.emit(channel, "ChannelClosed")
       .withArgs(id, 3000n, 2000n, anyValue)
       .and.to.emit(substrate, "ServiceFee")
@@ -153,7 +153,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
   it("a provider's close inside the client's window releases the remainder at once", async function () {
     const id = await openChannel(5000n);
     await channel.connect(client).startClose(id);
-    await channel.connect(provider).closeChannel(id, 1200n, await signVoucher(channel, client, id, 1200n));
+    await channel.connect(provider).closeChannel(id, 1200n, await signVoucher(channel, client, id, 1200n), 1200n);
     await expect(channel.withdrawRemainder(id))
       .to.emit(channel, "RemainderWithdrawn").withArgs(id, client.address, 3800n);
     expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 1200n);
@@ -163,7 +163,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const id = await openChannel(5000n);
     const sig = await signVoucher(channel, client, id, 3000n);
     await channel.connect(client).startClose(id);
-    await expect(channel.connect(provider).closeChannel(id, 3000n, sig))
+    await expect(channel.connect(provider).closeChannel(id, 3000n, sig, 3000n))
       .to.emit(channel, "ChannelClosed");
     expect(await substrate.balanceOf(provider.address)).to.equal(netOf(3000n));
 
@@ -171,14 +171,14 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const sig2 = await signVoucher(channel, client, id2, 500n);
     await channel.connect(client).startClose(id2);
     await time.increase(CHALLENGE_WINDOW + 1);
-    await expect(channel.connect(provider).closeChannel(id2, 500n, sig2))
+    await expect(channel.connect(provider).closeChannel(id2, 500n, sig2, 500n))
       .to.be.revertedWithCustomError(channel, "ChannelNotOpen");
   });
 
   it("remainder refund is fee-free (no ServiceFee on withdraw)", async function () {
     const id = await openChannel(5000n);
     const sig = await signVoucher(channel, client, id, 1000n);
-    await channel.connect(provider).closeChannel(id, 1000n, sig);
+    await channel.connect(provider).closeChannel(id, 1000n, sig, 1000n);
 
     const supplyBefore = await substrate.atnTotalSupply();
     const treasBefore = await substrate.balanceOf(treasury);
@@ -195,7 +195,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const id = await openChannel();
     const sig = await signVoucher(channel, client, id, 1000n);
     await expect(
-      channel.connect(other).closeChannel(id, 1000n, sig)
+      channel.connect(other).closeChannel(id, 1000n, sig, 1000n)
     ).to.be.revertedWithCustomError(channel, "NotProvider");
   });
 
@@ -203,7 +203,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const id = await openChannel();
     const forged = await signVoucher(channel, other, id, 1000n);
     await expect(
-      channel.connect(provider).closeChannel(id, 1000n, forged)
+      channel.connect(provider).closeChannel(id, 1000n, forged, 1000n)
     ).to.be.revertedWithCustomError(channel, "BadVoucherSignature");
   });
 
@@ -212,16 +212,16 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const sig = await signVoucher(channel, client, id, 1000n);
     // provider tries to claim more than the signed cumulative
     await expect(
-      channel.connect(provider).closeChannel(id, 2000n, sig)
+      channel.connect(provider).closeChannel(id, 2000n, sig, 2000n)
     ).to.be.revertedWithCustomError(channel, "BadVoucherSignature");
   });
 
   it("replay: cannot close the same channel twice", async function () {
     const id = await openChannel();
     const sig = await signVoucher(channel, client, id, 1000n);
-    await channel.connect(provider).closeChannel(id, 1000n, sig);
+    await channel.connect(provider).closeChannel(id, 1000n, sig, 1000n);
     await expect(
-      channel.connect(provider).closeChannel(id, 1000n, sig)
+      channel.connect(provider).closeChannel(id, 1000n, sig, 1000n)
     ).to.be.revertedWithCustomError(channel, "ChannelNotOpen");
   });
 
@@ -229,13 +229,13 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const id = await openChannel(5000n);
     // provider foolishly closes with an older, lower cumulative
     const staleSig = await signVoucher(channel, client, id, 1000n);
-    await channel.connect(provider).closeChannel(id, 1000n, staleSig);
+    await channel.connect(provider).closeChannel(id, 1000n, staleSig, 1000n);
     expect(await substrate.balanceOf(provider.address)).to.equal(netOf(1000n));
 
     // it cannot then submit the newer higher voucher — channel is Closing
     const newerSig = await signVoucher(channel, client, id, 4000n);
     await expect(
-      channel.connect(provider).closeChannel(id, 4000n, newerSig)
+      channel.connect(provider).closeChannel(id, 4000n, newerSig, 4000n)
     ).to.be.revertedWithCustomError(channel, "ChannelNotOpen");
 
     // client's remainder reflects the (larger) unclaimed GROSS portion
@@ -247,7 +247,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
   it("over-claim beyond deposit is capped at the deposit", async function () {
     const id = await openChannel(2000n);
     const sig = await signVoucher(channel, client, id, 9999n);
-    await channel.connect(provider).closeChannel(id, 9999n, sig);
+    await channel.connect(provider).closeChannel(id, 9999n, sig, 9999n);
     // capped at deposit (gross), provider receives net of that
     expect(await substrate.balanceOf(provider.address)).to.equal(netOf(2000n));
     await time.increase(CHALLENGE_WINDOW + 1);
@@ -262,7 +262,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       channel.withdrawRemainder(id)
     ).to.be.revertedWithCustomError(channel, "ChannelNotClosing");
     const sig = await signVoucher(channel, client, id, 1000n);
-    await channel.connect(provider).closeChannel(id, 1000n, sig);
+    await channel.connect(provider).closeChannel(id, 1000n, sig, 1000n);
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
     await expect(
@@ -273,7 +273,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
   it("zero-cumulative voucher pays nothing, refunds full deposit", async function () {
     const id = await openChannel(5000n);
     const sig = await signVoucher(channel, client, id, 0n);
-    await channel.connect(provider).closeChannel(id, 0n, sig);
+    await channel.connect(provider).closeChannel(id, 0n, sig, 0n);
     expect(await substrate.balanceOf(provider.address)).to.equal(0n);
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
@@ -378,7 +378,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const id = await openChannel(5000n);
     await channel.connect(provider).settle(id, 1000n, await signVoucher(channel, client, id, 1000n), 1000n);
     const sig = await signVoucher(channel, client, id, 3000n);
-    await expect(channel.connect(provider).closeChannel(id, 3000n, sig))
+    await expect(channel.connect(provider).closeChannel(id, 3000n, sig, 3000n))
       .to.emit(channel, "ChannelPaid")
       .withArgs(id, client.address, provider.address, 2000n, 3000n)
       .and.to.emit(channel, "ChannelClosed")
@@ -396,11 +396,32 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     expect(await substrate.balanceOf(await channel.getAddress())).to.equal(0n);
   });
 
+  it("close pays only up to upTo (what was served); the unserved rest of the voucher is the client's", async function () {
+    const id = await openChannel(5000n);
+    const sig = await signVoucher(channel, client, id, 3000n);
+    // A 3000 voucher paid ahead, 1200 of it served.
+    await expect(channel.connect(provider).closeChannel(id, 3000n, sig, 1200n))
+      .to.emit(channel, "ChannelPaid")
+      .withArgs(id, client.address, provider.address, 1200n, 1200n)
+      .and.to.emit(channel, "ChannelClosed")
+      .withArgs(id, 1200n, 3800n, anyValue);
+    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(1200n));
+    await expect(channel.withdrawRemainder(id))
+      .to.emit(channel, "RemainderWithdrawn").withArgs(id, client.address, 3800n);
+    // upTo at or below what settle already paid pays nothing more.
+    const id2 = await openChannel(1000n);
+    const sig2 = await signVoucher(channel, client, id2, 800n);
+    await channel.connect(provider).settle(id2, 800n, sig2, 500n);
+    await expect(channel.connect(provider).closeChannel(id2, 800n, sig2, 400n))
+      .to.emit(channel, "ChannelClosed").withArgs(id2, 500n, 500n, anyValue)
+      .and.not.to.emit(channel, "ChannelPaid");
+  });
+
   it("close with nothing new pays nothing more and emits no ChannelPaid", async function () {
     const id = await openChannel(5000n);
     const sig = await signVoucher(channel, client, id, 1000n);
     await channel.connect(provider).settle(id, 1000n, sig, 1000n);
-    await expect(channel.connect(provider).closeChannel(id, 1000n, sig))
+    await expect(channel.connect(provider).closeChannel(id, 1000n, sig, 1000n))
       .to.emit(channel, "ChannelClosed")
       .withArgs(id, 1000n, 4000n, anyValue)
       .and.not.to.emit(channel, "ChannelPaid");
@@ -408,7 +429,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const id2 = await openChannel(1000n);
     await channel.connect(provider).settle(id2, 800n, await signVoucher(channel, client, id2, 800n), 800n);
     await expect(channel.connect(provider).closeChannel(
-      id2, 300n, await signVoucher(channel, client, id2, 300n)))
+      id2, 300n, await signVoucher(channel, client, id2, 300n), 300n))
       .to.emit(channel, "ChannelClosed").withArgs(id2, 800n, 200n, anyValue);
     expect((await channel.getChannel(id2)).claimed).to.equal(800n);
   });
@@ -462,7 +483,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       .to.be.revertedWithCustomError(channel, "ChannelNotOpen");
     const id2 = await openChannel(1000n);
     await channel.connect(provider).closeChannel(
-      id2, 100n, await signVoucher(channel, client, id2, 100n));
+      id2, 100n, await signVoucher(channel, client, id2, 100n), 100n);
     await expect(channel.connect(client).topUp(id2, 100n))
       .to.be.revertedWithCustomError(channel, "ChannelNotOpen");
   });
@@ -485,7 +506,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const honest = cumulative; // 1000
     cumulative += ITEM;        // one voucher the provider never serves
     const stolen = await signVoucher(channel, client, id, cumulative);
-    await channel.connect(provider).closeChannel(id, cumulative, stolen);
+    await channel.connect(provider).closeChannel(id, cumulative, stolen, cumulative);
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
     expect((await channel.getChannel(id)).claimed - honest).to.equal(ITEM);
@@ -515,7 +536,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     }
     expect(cumulative).to.equal(4000n);
 
-    await channel.connect(provider).closeChannel(id, cumulative, latestSig);
+    await channel.connect(provider).closeChannel(id, cumulative, latestSig, cumulative);
     expect(await substrate.balanceOf(provider.address)).to.equal(netOf(4000n));
 
     await time.increase(CHALLENGE_WINDOW + 1);
@@ -537,7 +558,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     }
     // client vanishes here — no further vouchers exist.
 
-    await channel.connect(provider).closeChannel(id, cumulative, lastSig);
+    await channel.connect(provider).closeChannel(id, cumulative, lastSig, cumulative);
     expect(await substrate.balanceOf(provider.address)).to.equal(netOf(3000n));
 
     await time.increase(CHALLENGE_WINDOW + 1);
@@ -563,7 +584,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     cumulative += ITEM; // 1100
     const stolenSig = await signVoucher(channel, client, id, cumulative);
 
-    await channel.connect(provider).closeChannel(id, cumulative, stolenSig);
+    await channel.connect(provider).closeChannel(id, cumulative, stolenSig, cumulative);
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
 

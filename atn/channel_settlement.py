@@ -21,9 +21,8 @@ amount) is min(served, best voucher, deposit) minus ``claimed``. The sweep
 - settles a channel whose client has started a close (``startClose``)
   up to what was served, inside the window: the provider has one challenge
   window to collect, after which the client takes back everything not yet
-  paid. ``settle`` rather than ``closeChannel``: settle claims only what
-  was served, while closeChannel would claim the whole voucher, including
-  the part paid ahead, which is the buyer's.
+  paid. ``settle`` rather than ``closeChannel``: the client is already
+  closing, and settle leaves its close and deadline as they are.
 
 Nothing is sent for a channel with nothing new to pay (``settle`` would
 revert and burn gas): what has been paid is read from the channel

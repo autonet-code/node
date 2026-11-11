@@ -239,7 +239,7 @@ describe("Substrate — fees-only emission + REP-from-earnings (2026-07-10)", fu
         channelId: id,
         cumulativeAmount: cumulative,
       });
-      await channel.connect(recipient).closeChannel(id, cumulative, sig);
+      await channel.connect(recipient).closeChannel(id, cumulative, sig, cumulative);
 
       // The channel (as payer) called payForService(recipient, 3000) — the
       // recipient's earnings ledger reflects the post-fee net.

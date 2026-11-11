@@ -479,6 +479,7 @@ PAYMENT_CHANNEL_ABI = [
             {"internalType": "uint256", "name": "channelId",        "type": "uint256"},
             {"internalType": "uint256", "name": "cumulativeAmount", "type": "uint256"},
             {"internalType": "bytes",   "name": "signature",        "type": "bytes"},
+            {"internalType": "uint256", "name": "upTo",             "type": "uint256"},
         ],
         "name": "closeChannel",
         "outputs": [],
@@ -2407,12 +2408,16 @@ class ServiceMarketClient:
         channel_id: int,
         cumulative_amount: int,
         signature: str | bytes,
+        up_to: int | None = None,
     ) -> dict[str, Any]:
-        """``PaymentChannel.closeChannel(channelId, cumulativeAmount, signature)``.
+        """``PaymentChannel.closeChannel(channelId, cumulativeAmount,
+        signature, upTo)``.
 
         Submitted by the PROVIDER (msg.sender must be the channel provider).
-        Ends the channel: pays the provider what of min(cumulative, deposit)
-        ``settle`` has not paid yet, NET of the service fee; the client's
+        Ends the channel: pays the provider what of min(cumulative, deposit,
+        up_to) ``settle`` has not paid yet, NET of the service fee. ``up_to``
+        is what the provider has served (vouchers pay ahead); None claims the
+        whole voucher. The client's
         remainder is withdrawable at once (nothing more can be collected,
         so there is no window). ``signature`` is the client's voucher
         signature over (channelId, cumulativeAmount).
@@ -2428,7 +2433,8 @@ class ServiceMarketClient:
                    else bytes.fromhex(signature[2:] if signature.startswith("0x")
                                       else signature))
             func = channel.functions.closeChannel(
-                int(channel_id), int(cumulative_amount), sig)
+                int(channel_id), int(cumulative_amount), sig,
+                int(cumulative_amount if up_to is None else up_to))
             receipt, tx_hex = self._send_signed(
                 w3, account, func, chain_id, 200_000)
             if receipt.status == 1:

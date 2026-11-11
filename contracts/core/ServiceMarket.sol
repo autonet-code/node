@@ -182,8 +182,9 @@ contract ServiceRegistry {
 //      min(cumulative, deposit) minus what it already paid, and the channel
 //      stays as it was (Open stays Open), so the buyer's credit carries on.
 //      `claimed` is the cumulative paid to the provider so far (gross).
-//   4. closeChannel(channelId, cumulativeAmount, sig) — provider ends the
-//      channel with its best voucher: pays whatever settle has not paid yet,
+//   4. closeChannel(channelId, cumulativeAmount, sig, upTo) — provider ends
+//      the channel with its best voucher, up to upTo (what it served) as
+//      settle does: pays whatever settle has not paid yet,
 //      and the remainder is the client's at once. Or the client ends it
 //      (startClose), which opens a challenge window: the provider may still
 //      settle or close inside it.
@@ -444,21 +445,26 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         _payProvider(c, channelId, capped);
     }
 
-    /// @notice Provider closes the channel with its highest voucher. Pays the
-    ///         provider whatever of min(cumulativeAmount, deposit) settle has
-    ///         not paid yet, NET of the service fee (routed through
-    ///         payForService); deposit - claimed becomes the client's
-    ///         remainder, withdrawable at once: nothing more can be
-    ///         collected, so there is nothing to wait for.
+    /// @notice Provider closes the channel with its highest voucher, up to
+    ///         `upTo` as settle does: pays the provider whatever of
+    ///         min(cumulativeAmount, deposit, upTo) settle has not paid yet,
+    ///         NET of the service fee (routed through payForService); deposit
+    ///         - claimed becomes the client's remainder, withdrawable at once:
+    ///         nothing more can be collected, so there is nothing to wait
+    ///         for. The unserved rest of a voucher paid ahead goes back to
+    ///         the client.
     /// @param cumulativeAmount The voucher's cumulative total (gross).
     /// @param signature Client's EIP-712 signature over (channelId, cumulative).
+    /// @param upTo The cumulative total to be paid after this call, at most.
     function closeChannel(
         uint256 channelId,
         uint256 cumulativeAmount,
-        bytes calldata signature
+        bytes calldata signature,
+        uint256 upTo
     ) external nonReentrant {
         Channel storage c = channels[channelId];
         uint256 capped = _checkProviderVoucher(c, channelId, cumulativeAmount, signature);
+        if (upTo < capped) capped = upTo;
         c.status = Status.Closing;
         c.closesAt = block.timestamp;
         // A voucher at or below what settle already paid pays nothing more.

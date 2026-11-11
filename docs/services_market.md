@@ -100,7 +100,14 @@ the name of what is now a session.
    with is paid directly (one `payForService` transaction).
 7. **The contract pays out without closing.** `PaymentChannel.settle`
    cashes in the running total and leaves the channel open; `topUp` adds
-   to it. The provider's daemon settles automatically (a threshold, at
+   to it. Both `settle` and `closeChannel` take `upTo`, the most the
+   provider will have been paid after the call: its daemon sets it to what
+   it served, so the unserved rest of a voucher paid ahead stays the
+   buyer's and comes back when the channel closes. The contract cannot
+   check what was served, so `upTo` binds only honest providers; a
+   dishonest one can still cash a whole voucher, the one-voucher risk
+   reviews deal with. A provider's close refunds the buyer at once; a
+   buyer's close gives the provider the challenge window to collect. The provider's daemon settles automatically (a threshold, at
    least daily, and when the buyer starts closing, which keeps the buyer's
    refund deadline). Every payout emits `ChannelPaid`, so fees burn as the
    provider earns and the payment is on chain for reviews.

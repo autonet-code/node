@@ -140,7 +140,7 @@ async function main() {
       latestSig = await signVoucher(channel, client, id, cum);
       latestCum = cum;
     }
-    await channel.connect(provider).closeChannel(id, latestCum, latestSig);
+    await channel.connect(provider).closeChannel(id, latestCum, latestSig, latestCum);
     await warp(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
     table("A. Channel: honest relationship (4 items, deposit 5000)", [
@@ -166,7 +166,7 @@ async function main() {
     }
     const stolenCum = 200n; // one unsigned-for item taken
     const stolenSig = await signVoucher(channel, client, id, stolenCum);
-    await channel.connect(provider).closeChannel(id, stolenCum, stolenSig);
+    await channel.connect(provider).closeChannel(id, stolenCum, stolenSig, stolenCum);
     await warp(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
     const providerDelta = (await bal(substrate, provider.address)) - p0;
@@ -192,7 +192,7 @@ async function main() {
       lastSig = await signVoucher(channel, client, id, cum);
       lastCum = cum;
     }
-    await channel.connect(provider).closeChannel(id, lastCum, lastSig);
+    await channel.connect(provider).closeChannel(id, lastCum, lastSig, lastCum);
     await warp(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id); // permissionless refund trigger
     table("C. Channel: CLIENT ghosts mid-relationship", [
