@@ -18,7 +18,7 @@ includes only `atn*`, `nodes*`, `bridge`, `world_model*`).
 - `robots/`: three runs with simulated TurtleBot3s in Gazebo (2026-11-11):
   safety packs at the actuation boundary (11/11), the poll rail (9/9), and
   scene summaries with the automatic trigger on position claims (6/6). Setup,
-  results, limits and logs in `robots/README.md`; design in `docs/robots.md`.
+  results, limits and logs in `robots/README.md`; design in [the whitepaper](https://github.com/autonet-code/whitepaper).
 
 Rebuildable artifacts (world snapshots, artifact indexes) are excluded;
 regenerate with `phase8/build_worlds.py`. `llm_cache/` is the audit

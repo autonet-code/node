@@ -2,13 +2,13 @@
 
 Three experiments with simulated robots, run on 2026-11-11 (UTC) at commit
 `664cb00` of `autonet-code/node`. They test the two seams Autonet owns in a
-robot (`docs/robots.md`): the jurisdiction's safety packs, enforced where
+robot: the jurisdiction's safety packs, enforced where
 commands reach the motors, and the accountability rail, made of signed
 worklogs, polls, witnesses and the automatic trigger on position claims.
 All three pass: 11 of 11 stages, 9 of 9 and 6 of 6.
 
-The design and the reasoning behind it are in `docs/robots.md`. This folder
-holds what was run and what came out.
+The design is in [the whitepaper](https://github.com/autonet-code/whitepaper), under "Public Services".
+This folder holds what was run and what came out.
 
 ## Setup
 
@@ -114,7 +114,7 @@ a witness should have seen but found empty make a report.
 - **Judgment.** Reports are signed and gossiped, but nothing consumes them
   yet. Opening archives on a trigger, the shared perception tool,
   consolidation of many accounts into one, and judging that account against
-  the standards are designed in `docs/robots.md` and not built.
+  the standards are designed in the whitepaper and not built.
 - **The sponsor.** Its reachability is stood in for
   (`ATN_ROBOT_SPONSOR_PROBE=assume`); a live run with a separate sponsor
   daemon has not been done.
