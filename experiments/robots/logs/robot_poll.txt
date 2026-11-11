@@ -1,0 +1,21 @@
+[poll-e2e] stage 1: sim up
+[poll-e2e] stage 2: every filter loads its pack
+[poll-e2e] stage 3: continuous commitment
+[poll-e2e] stage 4: a full round
+[poll-e2e] waiting for round 5 to finish (~76s)
+[poll-e2e] stage 5: challenges recorded after the poll
+[poll-e2e] stage 6: aggregates
+[poll-e2e] stage 7: a dispute opens a countersigned window
+[poll-e2e] stage 8: thinning the scan stream
+[poll-e2e] stage 9: a silent robot and an absent poller
+
+=== robot poll E2E ===
+   1  sim up                                        PASS 3 robots, pose and scan streams
+   2  every filter loads its pack                   PASS 8f71713b128a
+   3  continuous commitment                         PASS r1 13 links, r2 15 links, r3 15 links
+   4  a full round                                  PASS round 5: 3 robots x 3 pollers, each answered by 3 worklogs
+   5  challenges recorded after the poll            PASS 27 answers, challenge found in every later worklog
+   6  aggregates                                    PASS 3 aggregates cover 27 receipts
+   7  a dispute opens a countersigned window        PASS 2 chunks over 3 links, tamper caught
+   8  thinning the scan stream                      PASS 15 scan chunks removed, 15 pose chunks verify
+   9  a silent robot and an absent poller           PASS 20 reports: r3 silent, the absent poller, r2 on a stale pack

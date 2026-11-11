@@ -1,0 +1,15 @@
+[scene-e2e] stage 1: sim up, scene samples flowing
+[poll-e2e] sync failed: docker exec autonet-fleet-e2e find: find: ‘/var/worklog’: No such file or directory
+[scene-e2e] stage 2: each robot sees its neighbours where they are
+[scene-e2e] stage 3: samples in the signed links
+[scene-e2e] stage 4: proximity witnesses
+[scene-e2e] stage 5: honest driving raises nothing
+[scene-e2e] stage 6: the lie is caught by the robot that could see
+
+=== robot scene E2E ===
+   1  sim up, scene samples flowing                 PASS r1 at (-2.00, -0.50), r2 at (-2.00, 0.50), r3 at (-0.50, -2.00)
+   2  each robot sees its neighbours where they are PASS r1 sees r2 0.08 m off; r2 sees r1 0.08 m off
+   3  samples in the signed links                   PASS 59 samples committed; every robot knows every position
+   4  proximity witnesses                           PASS r1 -> r2; r3 -> none (2.1 m and 2.9 m away)
+   5  honest driving raises nothing                 PASS r1 drove to x=-1.17 and back; 0 reports
+   6  the lie is caught by the robot that could see PASS r2 reported r1: 14 claimed positions it could see were empty; r3 out of range

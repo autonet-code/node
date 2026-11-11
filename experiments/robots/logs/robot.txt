@@ -1,0 +1,64 @@
+[robot-e2e] stage 1: sim up
+[robot-e2e] stage 2: daemon exports the pack, filter loads it
+[robot-e2e] stage 3: drive at an obstacle: slowed, then stopped
+[robot-e2e] stage 4: reversing away is allowed
+[robot-e2e] stage 5: tampered pack refused, motion stops
+[robot-e2e] stage 6: re-export restores motion
+[robot-e2e] stage 7: daemon heartbeat stale: stop
+[robot-e2e] stage 8: sponsor unreachable: stop
+[robot-e2e] stage 9: challenge
+[robot-e2e] stage 10: agent connector drives through the filter
+Installed 86 packages in 2.57s
+<uv cache>\site-packages\fastmcp\server\auth\providers\jwt.py:10: AuthlibDeprecationWarning: authlib.jose module is deprecated, please use joserfc instead.
+It will be compatible before version 2.0.0.
+  from authlib.jose import JsonWebKey, JsonWebToken
+<uv cache>\site-packages\authlib\integrations\httpx_client\assertion_client.py:5: AuthlibDeprecationWarning: The httpx module is deprecated; please use httpx2 instead.
+  from ._compat import httpx2
+
+
++-----------------------------------------------------------------------------+
+|                                                                             |
+|                                                                             |
+|                        \u2584\u2580\u2580 \u2584\u2580\u2588 \u2588\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2584\u2580\u2588 \u2588\u2580\u2580 \u2588\u2580\u2588                        |
+|                        \u2588\u2580  \u2588\u2580\u2588 \u2584\u2584\u2588  \u2588  \u2588 \u2580 \u2588 \u2588\u2584\u2584 \u2588\u2580\u2580                        |
+|                                                                             |
+|                                                                             |
+|                                                                             |
+|                               FastMCP 2.14.7                                |
+|                            https://gofastmcp.com                            |
+|                                                                             |
+|                    \U0001f5a5  Server:      ros-mcp-server                           |
+|                    \U0001f680 Deploy free: https://fastmcp.cloud                    |
+|                                                                             |
++-----------------------------------------------------------------------------+
++-----------------------------------------------------------------------------+
+|                          \u2728 FastMCP 3.0 is coming!                          |
+|      Pin `fastmcp < 3` in production, then upgrade when you're ready.       |
++-----------------------------------------------------------------------------+
++-----------------------------------------------------------------------------+
+|                         \U0001f389 Update available: 4.1.8                          |
+|                     Run: pip install --upgrade fastmcp                      |
++-----------------------------------------------------------------------------+
+
+
+[11/12/26 00:15:00] INFO     Starting MCP server                 server.py:2506
+                             'ros-mcp-server' with transport                   
+                             'stdio'                                           
+[WebSocket] Connected (5.0s timeout)
+[WebSocket] Closed
+[robot-e2e] stage 11: Registry standards: a missing pack stops the robot
+robot packs not exported: ['eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee: not in the tool store']
+robot stopped: required packs unavailable: ['eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee: not in the tool store']
+
+=== robot E2E ===
+   1  sim up                                        PASS front 0.93 m
+   2  daemon exports the pack, filter loads it      PASS 3f4c705e0453
+   3  drive at an obstacle: slowed, then stopped    PASS from 1.27 m to 0.46 m, peak 0.46 m/s, 0 brief stale-sensor stops
+   4  reversing away is allowed                     PASS front now 0.69 m
+   5  tampered pack refused, motion stops           PASS pack 3f4c705e0453: code digest mismatch
+   6  re-export restores motion                     PASS 
+   7  daemon heartbeat stale: stop                  PASS 
+   8  sponsor unreachable: stop                     PASS 
+   9  challenge                                     PASS 5 chunks committed, challenge recorded
+  10  agent connector drives through the filter     PASS 31 ros tools; forward 0.4 m/s for 6 s, closest 0.44 m, verdicts ['clip', 'pass']
+  11  Registry standards: a missing pack stops the robot PASS missing pack stops, met standards move
