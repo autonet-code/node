@@ -2412,9 +2412,10 @@ class ServiceMarketClient:
 
         Submitted by the PROVIDER (msg.sender must be the channel provider).
         Ends the channel: pays the provider what of min(cumulative, deposit)
-        ``settle`` has not paid yet, NET of the service fee, and opens the
-        challenge window. ``signature`` is the client's voucher signature
-        over (channelId, cumulativeAmount).
+        ``settle`` has not paid yet, NET of the service fee; the client's
+        remainder is withdrawable at once (nothing more can be collected,
+        so there is no window). ``signature`` is the client's voucher
+        signature over (channelId, cumulativeAmount).
         """
         try:
             from eth_account import Account
@@ -2541,8 +2542,9 @@ class ServiceMarketClient:
     ) -> dict[str, Any]:
         """``PaymentChannel.withdrawRemainder(channelId)``.
 
-        Permissionless (it's a timer): after the challenge window elapses,
-        refunds the client's remainder. Anyone may trigger it; funds only
+        Permissionless (it's a timer): refunds the client's remainder, at
+        once after the provider's close, after the challenge window after
+        the client's. Anyone may trigger it; funds only
         ever go to the client. Signed by whatever ``private_key`` is passed.
         """
         try:

@@ -764,7 +764,8 @@ factory + N deployments + growing audit surface. Instead:
   once; each request carries a signed voucher (cumulative_amount)
   covering that item's ask; the provider serves only voucher-covered
   requests and closes anytime to collect the cumulative; the remainder
-  refunds after a challenge window. Theft ceiling = ONE voucher, sized
+  refunds at once after the provider's close, and after a challenge
+  window (the provider's time to collect) after the client's. Theft ceiling = ONE voucher, sized
   by the client, worth less than the review history it burns. No
   arbitration, no fulfillment oracle, two txs for N requests. Metered
   hardware (GPU/sponsor-pipe inference) fits natively: the spec's
@@ -993,7 +994,8 @@ rules are moot: the channel's griefing analysis lives inline in
 `PaymentChannel` (`contracts/core/ServiceMarket.sol`). Remaining knobs:
 
 1. Channel challenge-window sizing: the settle-delay before a client's
-   remainder refund. Governed since 2026-10-16: the constructor sets the
+   remainder refund, after the client's close (a provider's close
+   collects and refunds at once, 2026-11-11). Governed since 2026-10-16: the constructor sets the
    initial value and the DAO timelock (the Substrate's governor) changes
    it with `setChallengeWindow`. Each channel records the window it
    opened with, so a change never moves an open channel's deadline.

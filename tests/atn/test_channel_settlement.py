@@ -4,7 +4,8 @@ rest stays the buyer's); an open one (it stays open) once its unpaid
 amount reaches the threshold, or once it has had unpaid value for the
 settle period since its last settle; nothing is sent when there is nothing
 new to pay; a channel whose client started a close is settled inside the
-window (so the client's refund keeps its deadline); a closed or settled one
+window (up to what was served, which closeChannel would not respect); a
+closed or settled one
 is forgotten, and so is one whose client-close window has passed (closing
 it would only revert)."""
 from __future__ import annotations

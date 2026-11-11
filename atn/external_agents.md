@@ -362,7 +362,9 @@ credits with that provider, if any). Name a service by `service_id`, or by
   `top_up_credits` (`provider_address`, `amount`) adds to it;
   `list_credits` shows each one's `deposit`, `used`, `paid_ahead` and
   `left`; `close_credits` (`provider_address`) starts the close, and what
-  you did not use comes back to you by itself after the challenge window.
+  you did not use comes back to you by itself after the challenge window
+  (the time the provider has to collect what it served). If the provider
+  closes them, the rest comes back at once.
   Nothing opens or tops up credits for you: when they run out, requests
   and sessions are refused until you top them up.
 - Your daemon signs vouchers that pay ahead by the provider's `voucher`

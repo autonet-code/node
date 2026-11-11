@@ -80,10 +80,9 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
 
     const newId = await openChannel(1000n);
     const t0 = BigInt(await time.latest());
-    await channel.connect(provider).closeChannel(
-      oldId, 0n, await signVoucher(channel, client, oldId, 0n));
-    await channel.connect(provider).closeChannel(
-      newId, 0n, await signVoucher(channel, client, newId, 0n));
+    // The window applies to a client's close (a provider's close needs none).
+    await channel.connect(client).startClose(oldId);
+    await channel.connect(client).startClose(newId);
     const oldCh = await channel.getChannel(oldId);
     const newCh = await channel.getChannel(newId);
     expect(oldCh.window).to.equal(BigInt(CHALLENGE_WINDOW));
@@ -97,7 +96,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await expect(Ch.deploy(ethers.ZeroAddress, CHALLENGE_WINDOW)).to.be.reverted;
   });
 
-  it("happy path: provider closes with voucher (net of fee), remainder refunds after window", async function () {
+  it("happy path: provider closes with voucher (net of fee), remainder refunds at once", async function () {
     const id = await openChannel(5000n);
     const cumulative = 3000n;
     const sig = await signVoucher(channel, client, id, cumulative);
@@ -126,12 +125,8 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     // Supply dropped by the burned half.
     expect(await substrate.atnTotalSupply()).to.equal(supplyBefore - burned(cumulative));
 
-    // remainder locked during the window
-    await expect(
-      channel.withdrawRemainder(id)
-    ).to.be.revertedWithCustomError(channel, "WindowNotElapsed");
-
-    await time.increase(CHALLENGE_WINDOW + 1);
+    // The provider's close collected everything it can: no window, the
+    // remainder is the client's at once.
     await expect(channel.withdrawRemainder(id))
       .to.emit(channel, "RemainderWithdrawn")
       .withArgs(id, client.address, 2000n);
@@ -153,6 +148,15 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       .to.emit(channel, "RemainderWithdrawn")
       .withArgs(id, client.address, 5000n);
     expect(await substrate.balanceOf(client.address)).to.equal(10_000n);
+  });
+
+  it("a provider's close inside the client's window releases the remainder at once", async function () {
+    const id = await openChannel(5000n);
+    await channel.connect(client).startClose(id);
+    await channel.connect(provider).closeChannel(id, 1200n, await signVoucher(channel, client, id, 1200n));
+    await expect(channel.withdrawRemainder(id))
+      .to.emit(channel, "RemainderWithdrawn").withArgs(id, client.address, 3800n);
+    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 1200n);
   });
 
   it("the provider can still settle inside the client's close window, not after", async function () {

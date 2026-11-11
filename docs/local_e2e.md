@@ -91,9 +91,10 @@ compile.
 8. **Payment channel**: B's agent buys C's service twice with
    `request_service` and no direct payment. One channel opens with a 1200
    ATN deposit, one voucher per request, and C keeps the best one (800 ATN).
-   C's settlement sweep (`settle_channels_once`) closes the idle channel
-   with it (C paid net of the fee). B's sweep sees the provider's close and,
-   after the challenge window, withdraws the 400 ATN remainder, fee-free.
+   C's settlement sweep (`settle_channels_once`) settles what it served
+   without closing (C paid net of the fee). B closes its credits, C's sweep
+   settles inside the window (nothing new), and after the challenge window
+   B's refund sweep withdraws the 400 ATN remainder, fee-free.
 9. **Teardown**: the WS listener, the daemons and the hardhat node this run
    started; the temp home is removed.
 

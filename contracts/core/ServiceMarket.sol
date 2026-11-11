@@ -20,8 +20,9 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 ///      provider EIP-712 vouchers over (channelId, cumulativeAmount)
 ///      off-chain per work item; the provider cashes in the latest
 ///      cumulative whenever it likes (settle) without ending the channel,
-///      and either side ends it (closeChannel / startClose), the remainder
-///      refunding to the client after a challenge window.
+///      and either side ends it. A provider's close (closeChannel) collects
+///      and refunds the remainder at once; a client's close (startClose)
+///      gives the provider one challenge window to collect first.
 ///
 /// Channel-only settlement is a ratified decision (services_market.md,
 /// 2026-07-04), not an interim state: the postpaid escrow was DELETED. An
@@ -182,11 +183,12 @@ contract ServiceRegistry {
 //      stays as it was (Open stays Open), so the buyer's credit carries on.
 //      `claimed` is the cumulative paid to the provider so far (gross).
 //   4. closeChannel(channelId, cumulativeAmount, sig) — provider ends the
-//      channel with its best voucher: pays whatever settle has not paid yet
-//      and opens a challenge window. Or the client ends it (startClose):
-//      the provider may still settle or close inside that window.
-//   5. after the challenge window, withdrawRemainder refunds deposit -
-//      claimed to the client.
+//      channel with its best voucher: pays whatever settle has not paid yet,
+//      and the remainder is the client's at once. Or the client ends it
+//      (startClose), which opens a challenge window: the provider may still
+//      settle or close inside it.
+//   5. withdrawRemainder refunds deposit - claimed to the client: at once
+//      after a provider's close, after the window after a client's close.
 //
 // ATN-only (ratified 2026-07-10). The deposit and every top-up are pulled
 // with substrate.transferFrom and every provider payout (settle, and close
@@ -227,8 +229,7 @@ contract ServiceRegistry {
 //   * Client vanishing after close: the challenge window is a timer, not a
 //     client action. Once it elapses ANYONE can trigger withdrawRemainder
 //     (refunds to the client). Provider is never blocked from its claimed
-//     funds — those transferred at each settle and at close, before the
-//     window.
+//     funds — those transferred at each settle and at close.
 //   * Client double-spend / not-served: since a voucher is only produced by
 //     the CLIENT and only AFTER the client accepts a work item, a provider
 //     that under-delivers simply gets no higher voucher — per-item
@@ -240,12 +241,13 @@ contract ServiceRegistry {
 //     the deposit (it opens a new channel instead), so the remainder it
 //     waits for never moves during the window.
 //
-// The challenge window is a settle-delay for the remainder refund
-// (giving an honest party time to act) rather than a fraud-proof court —
-// unidirectional channels have no "higher voucher exists" fraud for the
-// PAYER to prove (a higher voucher only helps the provider, who is the one
-// closing). We keep the window as the standard refund-delay primitive and as
-// the hook a future bidirectional upgrade would use.
+// The challenge window is a settle-delay for the remainder refund after a
+// client's close: it keeps the deposit in the channel long enough for the
+// provider to cash its latest voucher, which pays nothing once the deposit
+// is gone. It is not a fraud-proof court: unidirectional channels have no
+// "higher voucher exists" fraud for the PAYER to prove. A provider's close
+// needs no window: it collects in the same transaction and nothing can be
+// collected after it.
 
 contract PaymentChannel is ReentrancyGuard, EIP712 {
     using ECDSA for bytes32;
@@ -254,8 +256,11 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     ///         are pulled here and payouts route through its payForService.
     ISubstrate public immutable substrate;
 
-    /// @notice Seconds after close before the client's remainder can be
-    ///         withdrawn, for channels opened from now on. Governed: the
+    /// @notice Seconds after the client starts a close before its remainder
+    ///         can be withdrawn, for channels opened from now on: the time
+    ///         the provider has to collect its latest voucher. A provider's
+    ///         own close collects in the same transaction, so after it the
+    ///         remainder is withdrawable at once. Governed: the
     ///         Substrate's governor (the DAO timelock) sets it. Each channel
     ///         keeps the window it opened with, so a change never moves an
     ///         open channel's deadline.
@@ -443,7 +448,8 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     ///         provider whatever of min(cumulativeAmount, deposit) settle has
     ///         not paid yet, NET of the service fee (routed through
     ///         payForService); deposit - claimed becomes the client's
-    ///         withdrawable remainder after the challenge window.
+    ///         remainder, withdrawable at once: nothing more can be
+    ///         collected, so there is nothing to wait for.
     /// @param cumulativeAmount The voucher's cumulative total (gross).
     /// @param signature Client's EIP-712 signature over (channelId, cumulative).
     function closeChannel(
@@ -454,7 +460,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         Channel storage c = channels[channelId];
         uint256 capped = _checkProviderVoucher(c, channelId, cumulativeAmount, signature);
         c.status = Status.Closing;
-        c.closesAt = block.timestamp + c.window;
+        c.closesAt = block.timestamp;
         // A voucher at or below what settle already paid pays nothing more.
         if (capped > c.claimed) {
             _payProvider(c, channelId, capped);
@@ -495,7 +501,8 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         emit ChannelPaid(channelId, c.client, c.provider, pay, capped);
     }
 
-    /// @notice After the challenge window, refund the client's remainder.
+    /// @notice Refund the client's remainder: at once after a provider's
+    ///         close, after the challenge window after a client's close.
     ///         Permissionless trigger (it's a timer) but funds only ever go
     ///         to the client. A refund is not a service payment — no fee.
     function withdrawRemainder(uint256 channelId) external nonReentrant {

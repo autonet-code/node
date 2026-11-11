@@ -129,7 +129,8 @@ class ChannelBook:
 
     def retire(self, payer: str, provider: str) -> Optional[dict[str, Any]]:
         """Move the open channel to the closing list (its remainder is to be
-        withdrawn once the challenge window passes)."""
+        withdrawn: at once if the provider closed it, after the challenge
+        window if the buyer did)."""
         with self._lock:
             ch = self._data["open"].pop(self._key(payer, provider), None)
             if ch:
@@ -320,8 +321,9 @@ async def sweep_refunds(book: ChannelBook, smc: Any, key_for: Any,
       list.
     - A closing channel still Open on chain (our startClose failed or was
       never sent) gets its startClose sent again.
-    - A closing channel whose challenge window has passed has its
-      remainder withdrawn; one settled is forgotten."""
+    - A closing channel whose remainder is due (at once after the
+      provider's close, after the challenge window after the buyer's) has
+      it withdrawn; one settled is forgotten."""
     out: list[dict[str, Any]] = []
     for ch in book.all_open():
         state = await smc.get_channel(int(ch["channel_id"]))

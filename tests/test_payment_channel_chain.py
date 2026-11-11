@@ -119,6 +119,13 @@ def test_settle_top_up_close_and_the_payment_log(chain):
         _net(2 * ATN) + _net(4 * ATN) + _net(ATN)
     # No top-up after a close.
     assert _run(smc.top_up_channel(ck, cid, ATN))["success"] is False
+    # The provider's close collected all it can: the remainder (deposit 8 -
+    # claimed 7) is the client's at once, with no window to wait.
+    bal = sub.functions.balanceOf(chain["client"]).call()
+    wd = _run(smc.withdraw_remainder(ck, cid))
+    assert wd["success"], wd
+    assert sub.functions.balanceOf(chain["client"]).call() == bal + ATN
+    assert int(_run(smc.get_channel(cid))["status"]) == 3
 
     pays = _run(smc.channel_payments(0))
     assert [(p["channel_id"], p["amount"], p["paid_total"]) for p in pays] == [
