@@ -351,7 +351,6 @@ There is no daemon call site. The vault appears only in `scripts/s0_local_run.py
 | `scripts/deploy_economy.js` | Deploys only `ServiceRegistry`. PaymentChannel is "pending challengeWindow blessing" (`:6-8`, `:46`). Reads `substrate_address` from `deployments/<network>.json` and writes `<network>_economy.json`. |
 | `scripts/deploy_service_market.js` | Deploys `ServiceRegistry` and `PaymentChannel(SUBSTRATE_ADDR, CHALLENGE_WINDOW or 3600)` and prints JSON. Writes no file. |
 | `scripts/fund_smoke_wallets.js` | Tops up a second wallet and writes its record, private key included, to `$AUTONET_KEYS_DIR/<network>-smoke-wallet.json` (default `~/.autonet/keys`, dir 0700, file 0600 where the OS supports it), outside the repo. It no longer prints the key (`:19-24`, `:32-34`, `:81-101`). `scripts/testnet_chain_smoke.py` reads the same path (`:172-179`). |
-| `scripts/sim_service_market.js` | In-memory scenario narrative over Substrate, ServiceRegistry and PaymentChannel. |
 | `scripts/sync_contract_abis.py` | Copies compiled ABIs to `nodes/common/abi/<Name>.json`. Its list contains only `"Substrate"` (`:25`). |
 
 AnchorElection, ToolBond, RepClaim, the Vault and the DAO are deployed only by an external script (`trustless-contracts scripts/deploy-autonet-jurisdiction.js`, cited at `scripts/s0_local_run.py:5-8`, `:219-246`).
@@ -396,7 +395,7 @@ Defaults come from `atn/jurisdiction.py` (CHAIN_ID 127823, RPC, GOVERNOR_ADDRESS
 6. **Hardhat compiler pin comment is wrong.** The config says every non-test-DAO source is pinned to 0.8.20 (`hardhat.config.js:17-21`). `AnchorElection.sol` and `MockOptionGovernor.sol` are missing from the overrides list (`:24-34`), so with pragma `^0.8.20` Hardhat compiles them with the highest matching compiler, 0.8.24 cancun.
 7. **`sync_contract_abis.py` only syncs Substrate** (`:25`), but `AnchorElection.json` is packaged and loaded (`nodes/common/anchor_election.py:83`). The drift test covers Substrate only (`tests/test_contract_artifacts.py:26-58`).
 8. **`contract_artifacts._CONTRACT_SOURCES["ServiceMarket"]` points at a non-existent artifact.** It maps to `ServiceMarket.sol/ServiceMarket.json` (`nodes/common/contract_artifacts.py:36-44`), but that file defines `ServiceRegistry` and `PaymentChannel`, so no such artifact exists.
-9. **`sim_service_market.js` is broken.** It calls `substrate.registerAgent(...)` (`scripts/sim_service_market.js:110-112`), which no longer exists; `registerAgentBound` is the only path. It also passes 5 constructor args while the comment says "(treasury, vaultMinter, governor)" (`:89-93`).
+9. (Removed 2026-11-11: `sim_service_market.js` was broken and is deleted; the contract tests cover its scenarios.)
 10. **`package.json` deploy scripts reference a missing file.** They point at `scripts/deploy.js`, which does not exist.
 11. **Deployment records drift from the scripts that write them.**
     - `shadownet.json` has `rep_token`, `anchor_quorum_bps`, `genesis_signers` and `genesis_quorum`, which `deploy_substrate.js` never writes (`:84-95`). They belong to the REP-signature quorum anchor model that was removed (`Substrate.sol:194-199`, `epoch_anchorer.py:334-336`). The file also lacks anchorer and genesisRoot.
