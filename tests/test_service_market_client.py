@@ -394,3 +394,96 @@ def test_revert_reason_falls_back_to_the_node_message():
     from web3.exceptions import ContractLogicError
     exc = ContractLogicError("execution reverted: substrate=0")
     assert oc.revert_reason(exc) == "execution reverted: substrate=0"
+
+
+# ---------------------------------------------------------------------------
+# 5. settle / topUp ABI and the ChannelPaid log reader
+# ---------------------------------------------------------------------------
+
+def test_abi_carries_settle_top_up_and_their_events():
+    abi = {(e["type"], e["name"]): e for e in oc.PAYMENT_CHANNEL_ABI if "name" in e}
+    assert [i["type"] for i in abi[("function", "settle")]["inputs"]] == \
+        ["uint256", "uint256", "bytes", "uint256"]
+    assert [i["type"] for i in abi[("function", "topUp")]["inputs"]] == \
+        ["uint256", "uint256"]
+    paid = abi[("event", "ChannelPaid")]["inputs"]
+    assert [(i["name"], i["indexed"]) for i in paid] == [
+        ("channelId", True), ("client", True), ("provider", True),
+        ("amount", False), ("paidTotal", False)]
+    topped = abi[("event", "ChannelToppedUp")]["inputs"]
+    assert [(i["name"], i["indexed"]) for i in topped] == [
+        ("channelId", True), ("client", True), ("amount", False),
+        ("deposit", False)]
+
+
+def test_nothing_to_settle_is_named_in_the_revert_reason():
+    from web3.exceptions import ContractCustomError
+    selector = "0x" + keccak(text="NothingToSettle()")[:4].hex()
+    assert oc.revert_reason(ContractCustomError(selector, data=selector)) == \
+        "NothingToSettle"
+
+
+def _paid_log(channel_id, client, provider, amount, total, block):
+    topic = keccak(text="ChannelPaid(uint256,address,address,uint256,uint256)")
+    return {
+        "address": to_checksum_address(_CHANNEL_ADDR),
+        "topics": [topic, channel_id.to_bytes(32, "big"),
+                   bytes.fromhex("%064x" % int(client, 16)),
+                   bytes.fromhex("%064x" % int(provider, 16))],
+        "data": abi_encode(["uint256", "uint256"], [amount, total]),
+        "logIndex": 0, "transactionIndex": 0,
+        "transactionHash": b"\x00" * 32, "blockHash": b"\x00" * 32,
+        "blockNumber": block, "removed": False,
+    }
+
+
+class _LogsEth:
+    def __init__(self, logs, head, fail=False):
+        self.logs, self.block_number, self.fail = logs, head, fail
+        self.ranges = []
+
+    def contract(self, address=None, abi=None):
+        return Web3().eth.contract(address=address, abi=abi)
+
+    def get_logs(self, flt):
+        if self.fail:
+            raise ValueError("query returned more than 10000 results")
+        lo, hi = flt["fromBlock"], flt["toBlock"]
+        self.ranges.append((lo, hi))
+        assert flt["address"] == to_checksum_address(_CHANNEL_ADDR)
+        return [lg for lg in self.logs if lo <= lg["blockNumber"] <= hi]
+
+
+def _logs_client(eth):
+    smc = oc.ServiceMarketClient(cfg.RPBConfig(
+        rpc_url="http://x", payment_channel_address=_CHANNEL_ADDR,
+        chain_id=_CHAIN_ID))
+    smc._get_web3 = lambda: type("W3", (), {"eth": eth})()  # type: ignore[assignment]
+    return smc
+
+
+def test_channel_payments_reads_in_chunks_and_decodes():
+    client, provider = Account.create().address, Account.create().address
+    eth = _LogsEth([_paid_log(3, client, provider, 100, 100, 5),
+                    _paid_log(3, client, provider, 250, 350, 1500),
+                    _paid_log(9, client, provider, 7, 7, 2400)], head=2500)
+    out = _run(_logs_client(eth).channel_payments(0))
+    assert eth.ranges == [(0, 999), (1000, 1999), (2000, 2500)]
+    assert out == [
+        {"channel_id": 3, "client": client, "provider": provider,
+         "amount": 100, "paid_total": 100, "block": 5},
+        {"channel_id": 3, "client": client, "provider": provider,
+         "amount": 250, "paid_total": 350, "block": 1500},
+        {"channel_id": 9, "client": client, "provider": provider,
+         "amount": 7, "paid_total": 7, "block": 2400},
+    ]
+    # A pinned window reads only its own blocks.
+    eth.ranges.clear()
+    out = _run(_logs_client(eth).channel_payments(1000, 1999))
+    assert eth.ranges == [(1000, 1999)] and [p["block"] for p in out] == [1500]
+    assert _run(_logs_client(eth).channel_payments(10, 9)) == []
+
+
+def test_channel_payments_failed_read_is_none_not_empty():
+    eth = _LogsEth([], head=10, fail=True)
+    assert _run(_logs_client(eth).channel_payments(0)) is None

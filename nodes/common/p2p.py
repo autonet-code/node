@@ -669,7 +669,7 @@ class AutonetHost:
         # a missing or 0 value keeps the default (no limit, see
         # RELAY_CIRCUIT_*).
         self.relay_limits: Dict[str, int] = {}
-        self._service_stream_handler: Optional[Any] = None
+        self._service_session_handler: Optional[Any] = None
         self._peer_info_cache: Dict[str, Tuple[float, dict]] = {}
         self._peer_info_due: Dict[str, float] = {}
 
@@ -3070,7 +3070,7 @@ class AutonetHost:
         detail = "; ".join(errors) if errors else "no connected relay"
         raise ConnectionError(f"no path to {target[:16]} ({detail})")
 
-    async def _handle_service_stream(self, stream):
+    async def _handle_service_request_stream(self, stream):
         """Serve a service request addressed to us, or forward it one hop
         to the target if we are connected to it. Forwarding carries the
         bytes only: payment, payer signature and provider identity are
@@ -3121,7 +3121,7 @@ class AutonetHost:
             pass
 
     # =========================================================================
-    # Service streams (service_stream.py; Decision 2026-11-10 in
+    # Service sessions (service_session.py; Decision 2026-11-12 in
     # docs/services_market.md) over the mesh's connections: direct, hole
     # punched (DCUtR) or a circuit through a relay
     # =========================================================================
@@ -3268,57 +3268,54 @@ class AutonetHost:
             raise ConnectionError(f"the connection to {target[:16]} closed")
         return path, ""
 
-    def set_service_stream_handler(self, handler: Optional[Any]) -> None:
-        """Serve ``/autonet/service-stream/1.0.0`` with ``handler`` (a
-        ``service_stream.StreamHandler``, run in the host's trio loop).
-        None refuses every stream."""
-        self._service_stream_handler = handler
+    def set_service_session_handler(self, handler: Optional[Any]) -> None:
+        """Serve ``/autonet/service-session/1.0.0`` with ``handler`` (a
+        ``service_session.SessionHandler``, run in the host's trio loop).
+        None refuses every session."""
+        self._service_session_handler = handler
 
-    async def _handle_service_stream_open(self, stream):
-        from .service_stream import serve_incoming
+    async def _handle_service_session_open(self, stream):
+        from .service_session import serve_incoming
         try:
             peer = str(stream.muxed_conn.peer_id)
             path = "relayed" if self._conn_relayed(stream.muxed_conn) else "direct"
         except Exception:  # noqa: BLE001
             peer, path = "", ""
-        await serve_incoming(stream, self._service_stream_handler,
+        await serve_incoming(stream, self._service_session_handler,
                              path=path, peer=peer)
 
     @asynccontextmanager
-    async def service_stream(self, target: str, open_msg: dict, *,
-                             verify: Optional[Callable[[dict, str], bool]] = None,
-                             voucher_source: Optional[Callable[[int], Awaitable[Optional[dict]]]] = None,
-                             on_receipt: Optional[Callable[[str, Optional[bool]], Any]] = None,
-                             timeout: float = 60.0, direct_timeout: float = 10.0):
-        """Open a paid two-way stream to the provider ``target`` (its peer
-        id) and yield the accepted ``service_stream.ServiceStream``.
+    async def service_session(self, target: str, open_msg: dict, *,
+                              voucher_source: Optional[Callable[[int, int], Awaitable[Optional[dict]]]] = None,
+                              on_balance: Optional[Callable[[int, int], Any]] = None,
+                              timeout: float = 60.0, direct_timeout: float = 10.0):
+        """Open a session to the provider ``target`` (its peer id) and yield
+        the accepted ``service_session.ServiceSession``.
 
         The path is ``route_to``'s: an open connection, else the mesh
-        dialer (direct addresses, then the target's relay circuits).
-        ``open_msg`` is the signed opening (a ``service_request`` frame);
-        ``verify(reply, request_id)`` checks the provider's signature on
-        its replies and receipts, ``voucher_source(units)`` gives the next
-        voucher and ``on_receipt(request_id, charged)`` hears each one's
-        outcome (see service_stream.py). Raises ``ConnectionError`` when no
-        path reached the target (nothing was sent),
-        ``service_stream.StreamRefused`` when the provider refused it, and
+        dialer (direct addresses, then the target's relay circuits). The
+        transport authenticates ``target`` (the peer id the provider bound
+        on chain). ``voucher_source(consumed, cumulative)`` gives the next
+        voucher when the provider asks; ``on_balance(consumed, cumulative)``
+        hears its count (see service_session.py). Raises ``ConnectionError``
+        when no path reached the target (nothing was sent),
+        ``service_session.SessionRefused`` when the provider refused it, and
         ``TimeoutError`` when it was sent but not answered. Connections are
         the mesh's: nothing here opens or closes a circuit of its own."""
-        from .service_stream import SERVICE_STREAM_PROTOCOL, open_on
+        from .service_session import SERVICE_SESSION_PROTOCOL, open_on
         target = str(target)
         await self.route_to(target, direct_timeout)
         try:
             with trio.fail_after(15):
                 raw = await self._host.new_stream(self._pid(target),
-                                                  [SERVICE_STREAM_PROTOCOL])
+                                                  [SERVICE_SESSION_PROTOCOL])
         except Exception as e:
-            raise ConnectionError(f"could not open a stream to {target[:16]}: {e}") from e
+            raise ConnectionError(f"could not open a session to {target[:16]}: {e}") from e
         path = "relayed" if self._conn_relayed(raw.muxed_conn) else "direct"
-        async with open_on(raw, open_msg, verify=verify,
-                           voucher_source=voucher_source, on_receipt=on_receipt,
-                           timeout=timeout, path=path, peer=target,
-                           relay="") as stream:
-            yield stream
+        async with open_on(raw, open_msg, voucher_source=voucher_source,
+                           on_balance=on_balance, timeout=timeout, path=path,
+                           peer=target, relay="") as session:
+            yield session
 
     # =========================================================================
     # Batch catch-up (/autonet/batches/1.0.0), issue #41
@@ -3733,7 +3730,7 @@ class AutonetHost:
             REACH_PROTOCOL, self._handle_reach_stream
         )
         self._host.set_stream_handler(
-            SERVICE_PROTOCOL, self._handle_service_stream
+            SERVICE_PROTOCOL, self._handle_service_request_stream
         )
         self._host.set_stream_handler(
             BATCHES_PROTOCOL, self._handle_batches_stream
@@ -3744,15 +3741,15 @@ class AutonetHost:
         self._host.set_stream_handler(
             PEER_INFO_PROTOCOL, self._handle_peer_info_stream
         )
-        # Service streams (service_stream.py) ride the mesh's connections;
+        # Service sessions (service_session.py) ride the mesh's connections;
         # relayed ones are circuit relay v2 (_start_mesh_services).
         try:
-            from .service_stream import SERVICE_STREAM_PROTOCOL
+            from .service_session import SERVICE_SESSION_PROTOCOL
             self._host.set_stream_handler(
-                SERVICE_STREAM_PROTOCOL, self._handle_service_stream_open
+                SERVICE_SESSION_PROTOCOL, self._handle_service_session_open
             )
-        except Exception as e:  # noqa: BLE001 (streams off, the rest works)
-            self.logger.warning(f"service streams unavailable: {e}")
+        except Exception as e:  # noqa: BLE001 (sessions off, the rest works)
+            self.logger.warning(f"service sessions unavailable: {e}")
 
     # =========================================================================
     # Summary / Introspection

@@ -449,10 +449,11 @@ def _spec(name: str, description: str, params: list[str], ask: str,
             "properties": {p: {"type": "string"} for p in params},
             "required": params[:1],
         },
-        # The chain's ask is in ATN base units (the spec carries no price).
-        "ask": {"amount": str(ask_base_units(ask)), "unit": "per_item"},
-        # What one work item is (required, Decision 2026-11-10).
-        "unit": "one request",
+        # A request service priced per request in the provider's signed
+        # price list (ATN base units); vouchers pay ten requests ahead.
+        "mode": "request",
+        "price": ask_base_units(ask),
+        "voucher": 10 * ask_base_units(ask),
     }
     if agent:
         msg["agent_id"] = agent

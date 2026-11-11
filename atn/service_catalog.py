@@ -5,14 +5,17 @@ published and found the way tools are).
 Three sources feed it:
 
 - **The chain** (``ServiceRegistry``): the only reference for each
-  service's spec digest, price, active flag and payee (the provider that
-  registered it). The catalog follows it: the first sync enumerates every
+  service's spec digest, active flag and payee (the provider that
+  registered it), and its optional registry price. The catalog follows it: the first sync enumerates every
   entry, later syncs read the entries numbered past the last one known and
   the ``ServiceAskUpdated`` / ``ServiceRetired`` logs since the last block,
   in chunks of ``LOG_CHUNK`` blocks. One sync every ``SYNC_INTERVAL``.
 - **Gossip** (``/autonet/services/<jurisdiction>``): a provider's daemon
-  announces each of its specs whole (a spec has no code to fetch) when it
-  registers one and again every ``ANNOUNCE_INTERVAL``. Anyone can gossip,
+  announces each of its specs whole (a spec has no code to fetch) with its
+  signed price list (``atn/service_prices.py``) when it registers one, when
+  it changes the prices, and again every ``ANNOUNCE_INTERVAL``. A price list
+  is kept when the service's registered provider signed it and its
+  sequence number is newer than the one held. Anyone can gossip,
   so a spec is accepted only once the chain has an entry naming its
   digest: registering costs gas and needs a registered address. An
   announcement for an entry not yet synced waits (up to ``PENDING_CAP``).
@@ -28,9 +31,10 @@ of a public spec, at any price, and the catalog ignores it. An entry whose
 spec is not here yet is not listed until the spec arrives.
 
 Search is the tools' ranking (``atn/tool_search.py``): BM25 over the name,
-description and input-schema property names, fused with semantic
-similarity from the local search model; keyword only until the model is
-loaded. Order is relevance only; price and provider come back as metadata,
+description, settings, protocol and input-schema property names, fused
+with semantic similarity from the local search model; keyword only until
+the model is loaded. Order is relevance only; prices and provider come
+back as metadata,
 and so does ``rating``: the service's paid reviews as of the latest close
 (``rating_provider``, the close driver's lookup by provider and digest).
 
@@ -51,10 +55,13 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
+from .service_prices import signed_by_provider, validate_price_list
 from .service_spec import (
     is_service_spec,
     service_embedding_text,
+    session_protocol,
     signed_by_author,
+    spec_measures,
     validate_service_spec,
 )
 
@@ -68,16 +75,18 @@ MAX_SPEC_BYTES = 64 * 1024
 PENDING_CAP = 512
 RETRY_BASE = 60.0
 RETRY_CAP = 3600.0
-ANNOUNCEMENT_VERSION = 1
+ANNOUNCEMENT_VERSION = 2
 
 
 def service_keyword_tokens(spec: dict[str, Any]) -> list[str]:
     """A spec's keyword document: the tools' fields (name twice,
-    description, input-schema property names) plus its unit of work and
-    hardware, so "RTX 5090" or "per minute" match by keyword too."""
+    description, input-schema property names) plus its settings' values
+    and its protocol, so a model's name or "ssh" match by keyword too."""
     from .tool_search import keyword_tokens, tokenize
-    return (keyword_tokens(spec) + tokenize(str(spec.get("unit") or ""))
-            + tokenize(str(spec.get("hardware") or "")))
+    settings = spec.get("settings") if isinstance(spec.get("settings"), dict) else {}
+    return (keyword_tokens(spec)
+            + tokenize(" ".join(str(v) for _, v in sorted(settings.items())))
+            + tokenize(str(session_protocol(spec).get("id") or "")))
 
 
 def topic_for(jurisdiction_key: str) -> str:
@@ -99,17 +108,21 @@ def _norm(digest: Any) -> str:
 
 def _provider_reachable(provider: str) -> Optional[bool]:
     try:
-        from .service_streams import provider_reachable
+        from .service_sessions import provider_reachable
         return provider_reachable(str(provider or ""))
     except Exception:  # noqa: BLE001 (display only)
         return None
 
 
-def announcement(spec: dict[str, Any], service_id: int) -> bytes:
-    """The gossip message announcing one registered spec."""
-    return json.dumps({"v": ANNOUNCEMENT_VERSION,
-                       "service_id": int(service_id),
-                       "spec": spec}, sort_keys=True).encode("utf-8")
+def announcement(spec: dict[str, Any], service_id: int,
+                 price_list: Optional[dict[str, Any]] = None) -> bytes:
+    """The gossip message announcing one registered spec and its price
+    list."""
+    msg: dict[str, Any] = {"v": ANNOUNCEMENT_VERSION, "service_id": int(service_id),
+                           "spec": spec}
+    if price_list:
+        msg["prices"] = price_list
+    return json.dumps(msg, sort_keys=True).encode("utf-8")
 
 
 class ServiceCatalog:
@@ -122,6 +135,9 @@ class ServiceCatalog:
         self._lock = threading.RLock()
         self._entries: dict[int, dict[str, Any]] = {}
         self._specs: dict[str, dict[str, Any]] = {}
+        # digest -> the newest price list its provider signed.
+        self._prices: dict[str, dict[str, Any]] = {}
+        self._pending_prices: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
         self._pending: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
         self._last_block: Optional[int] = None
         self._fetch_lease: dict[str, tuple[int, float]] = {}
@@ -156,6 +172,61 @@ class ServiceCatalog:
     def spec(self, digest: str) -> Optional[dict[str, Any]]:
         with self._lock:
             return self._specs.get(_norm(digest))
+
+    def price_list(self, digest: str, provider: str = "") -> Optional[dict[str, Any]]:
+        """The newest price list the service's provider signed (under
+        ``provider`` when given), or None. This daemon's own services
+        answer from the store."""
+        d = _norm(digest)
+        store = getattr(self._runtime, "service_store", None)
+        rec = store.get(d) if store is not None else None
+        if rec is not None and rec.price_list:
+            return dict(rec.price_list)
+        with self._lock:
+            pl = self._prices.get(d)
+        if pl is None:
+            return None
+        if provider and str(pl.get("provider") or "").lower() != str(provider).lower():
+            return None
+        return dict(pl)
+
+    def note_prices(self, pl: Any) -> bool:
+        """Keep a gossiped price list: signed by the provider of a genuine
+        entry for its service, newer than the one held. One for a service
+        not known yet waits (bounded). Returns whether it was kept now."""
+        if not isinstance(pl, dict) or validate_price_list(pl):
+            return False
+        if not signed_by_provider(pl):
+            return False
+        d = _norm(pl.get("service"))
+        provider = str(pl.get("provider") or "")
+        entry = self.entry_for(d, provider)
+        # Pending lists wait per (service, signer), so a list someone else
+        # signed for the same service never displaces the provider's.
+        waiting = f"{d}:{provider.lower()}"
+        with self._lock:
+            if entry is None:
+                self._pending_prices[waiting] = pl
+                self._pending_prices.move_to_end(waiting)
+                while len(self._pending_prices) > PENDING_CAP:
+                    self._pending_prices.popitem(last=False)
+                return False
+            spec = self._specs.get(d)
+            if spec is not None and validate_price_list(pl, spec):
+                return False
+            held = self._prices.get(d)
+            if held is not None and int(held.get("seq") or 0) >= int(pl.get("seq") or 0):
+                return held == pl
+            self._prices[d] = pl
+            self._pending_prices.pop(waiting, None)
+            self._save_locked()
+        return True
+
+    def _adopt_pending_prices(self) -> None:
+        with self._lock:
+            waiting = list(self._pending_prices.values())
+        for pl in waiting:
+            self.note_prices(pl)
 
     def _own_digests(self) -> set:
         store = getattr(self._runtime, "service_store", None)
@@ -252,6 +323,7 @@ class ServiceCatalog:
             self._last_block = reached
             adopted = self._adopt_pending_locked()
             self._save_locked()
+        self._adopt_pending_prices()
         return {"entries": len(self._entries), "updated": updated,
                 "adopted_specs": adopted, "block": reached}
 
@@ -302,24 +374,36 @@ class ServiceCatalog:
             spec = msg.get("spec")
         except (ValueError, UnicodeDecodeError, AttributeError):
             return False
+        if isinstance(msg.get("prices"), dict) and spec is None:
+            return self.note_prices(msg["prices"])
         if not isinstance(spec, dict) or not is_service_spec(spec):
             return False
         if validate_service_spec(spec):
             return False
         digest = spec_digest(spec)
         with self._lock:
-            if digest in self._specs:
-                return True
-            if any(_norm(e.get("spec_digest")) == digest
-                   for e in self._entries.values()):
+            held = digest in self._specs
+        if held:
+            if isinstance(msg.get("prices"), dict):
+                self.note_prices(msg["prices"])
+            return True
+        with self._lock:
+            known = any(_norm(e.get("spec_digest")) == digest
+                        for e in self._entries.values())
+            if known:
                 self._keep_locked(digest, spec)
                 self._save_locked()
-                return True
-            self._pending[digest] = spec
-            self._pending.move_to_end(digest)
-            while len(self._pending) > PENDING_CAP:
-                self._pending.popitem(last=False)
-        return False
+            else:
+                self._pending[digest] = spec
+                self._pending.move_to_end(digest)
+                while len(self._pending) > PENDING_CAP:
+                    self._pending.popitem(last=False)
+        if isinstance(msg.get("prices"), dict):
+            self.note_prices(msg["prices"])
+        if known:
+            # A price list that arrived before its spec is kept now.
+            self._adopt_pending_prices()
+        return known
 
     def note_spec(self, digest: str, spec: Any) -> bool:
         """Keep a spec fetched by digest (verified here) when an entry
@@ -335,6 +419,7 @@ class ServiceCatalog:
                 return False
             self._keep_locked(d, spec)
             self._save_locked()
+        self._adopt_pending_prices()
         return True
 
     def due_fetches(self, limit: int = 32) -> list[str]:
@@ -380,7 +465,7 @@ class ServiceCatalog:
         out = []
         for rec in store.list(include_retired=False):
             if rec.service_id is not None:
-                out.append(announcement(rec.spec, rec.service_id))
+                out.append(announcement(rec.spec, rec.service_id, rec.price_list))
         return out
 
     # ------------------------------------------------------------------
@@ -446,28 +531,32 @@ class ServiceCatalog:
         row["rating"] = rating if isinstance(rating, dict) else None
         return row
 
-    @staticmethod
-    def _row(entry: dict[str, Any], specs: dict[str, dict[str, Any]],
+    def _row(self, entry: dict[str, Any], specs: dict[str, dict[str, Any]],
              own: set) -> dict[str, Any]:
         digest = _norm(entry.get("spec_digest"))
         spec = specs.get(digest) or {}
+        pl = self.price_list(digest, str(entry.get("provider") or "")) or {}
         return {
             "service_id": entry["service_id"],
             "provider": entry.get("provider", ""),
-            "ask": {"amount": str(entry.get("ask_amount") or 0), "unit": "per_item"},
-            "ask_amount": int(entry.get("ask_amount") or 0),
             "digest": digest,
             "active": bool(entry.get("active")),
             "name": str(spec.get("name") or "") or f"service {digest[:10]}",
             "description": str(spec.get("description") or ""),
-            # What one work item is (the meaning of the price) and, for a
-            # compute service, the hardware it runs on.
-            "unit": str(spec.get("unit") or ""),
-            "hardware": str(spec.get("hardware") or ""),
+            "mode": str(spec.get("mode") or ""),
+            "settings": spec.get("settings") if isinstance(spec.get("settings"), dict) else {},
+            # What it charges for (a request service: per request), and the
+            # provider's signed prices for them ({} until a list arrives).
+            "measures": spec_measures(spec),
+            "prices": dict(pl.get("prices") or {}),
+            "voucher": int(pl.get("voucher") or 0),
+            "price_list": pl or None,
+            # The optional price recorded in the registry (nothing enforces it).
+            "registry_price": int(entry.get("ask_amount") or 0) or None,
+            "protocol": session_protocol(spec) or None,
             "input_schema": spec.get("input_schema"),
             "output_schema": spec.get("output_schema"),
             "image_uri": str(spec.get("image_uri") or ""),
-            "inference": spec.get("inference") if isinstance(spec.get("inference"), dict) else {},
             "owned": digest in own,
             "known_spec": bool(spec),
             # Whether the provider's daemon can be dialled directly (its
@@ -496,6 +585,9 @@ class ServiceCatalog:
         for d, spec in (data.get("specs") or {}).items():
             if isinstance(spec, dict) and spec_digest(spec) == _norm(d):
                 self._specs[_norm(d)] = spec
+        for d, pl in (data.get("prices") or {}).items():
+            if isinstance(pl, dict) and not validate_price_list(pl) and signed_by_provider(pl):
+                self._prices[_norm(d)] = pl
         lb = data.get("last_block")
         self._last_block = int(lb) if isinstance(lb, int) else None
 
@@ -508,6 +600,7 @@ class ServiceCatalog:
             "last_block": self._last_block,
             "entries": [self._entries[k] for k in sorted(self._entries)],
             "specs": self._specs,
+            "prices": self._prices,
         }), encoding="utf-8")
         os.replace(tmp, self._path)
 

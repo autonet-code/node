@@ -144,10 +144,11 @@ def owner_challenge_text(action: str, nonce: str) -> str:
 # ``service_request`` is the only one: a paying counterparty on another machine
 # is by construction not the daemon's owner and holds no agent key in this
 # daemon's fleet, so there is no handshake it could ever pass. What authorizes
-# it is the PAYMENT — ``_validate_service_payment`` fetches the on-chain
-# ServicePayment receipt, checks recipient == the serving agent and amount >=
-# the ask, and consumes the request_id against a persisted replay set. That is a
-# strictly stronger credential than a session login: it costs ATN per call.
+# it is the PAYMENT: the buyer's credits with this provider (a payment
+# channel, its voucher verified on chain, the request signed by the channel's
+# client) or a direct on-chain payment (``_direct_gate``), with the request
+# id consumed against a persisted replay set. That is a strictly stronger
+# credential than a session login: it costs ATN per call.
 # See docs/services_market.md §3 ("authenticates the channel, validates
 # vouchers"). Nothing else is reachable from such a session.
 PAYMENT_AUTHORIZED_MESSAGES = frozenset({
@@ -1947,105 +1948,62 @@ class WebSocketBridge:
         # Provider-side rail: publish a monetizable remote API and serve
         # its requests. register/retire are OWNER surface (selling a tool is
         # the owner's call — same doctrine as tool grants). service_request
-        # is the PROVIDER-side entry: a paid client's work item, dispatched
-        # to the backing local tool. Payment/voucher validation is the
-        # contracts workstream's job — see _validate_service_payment.
+        # is the PROVIDER-side entry: a paid client's request, dispatched
+        # to the backing local tool once its payment checks out
+        # (_credit_gate, _direct_gate).
         if msg_type == "register_service":
-            name = msg.get("name", "")
-            description = msg.get("description", "")
-            input_schema = msg.get("input_schema") or {}
-            # The price goes on chain only (Decision 2026-11-10): the spec
-            # carries none. The app sends {"ask": {"amount"}}; agents send
-            # "ask_amount".
-            ask = msg.get("ask")
-            ask_raw = (ask.get("amount") if isinstance(ask, dict)
-                       else msg.get("ask_amount"))
-            try:
-                ask_amount = int(str(ask_raw if ask_raw is not None else "0")
-                                 or "0")
-            except (TypeError, ValueError):
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "ask.amount must be an integer (ATN base units)"}
-            if ask_amount < 0:
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "ask.amount must be non-negative"}
+            # The publish form (atn/service_publish.py, Decision 2026-11-12):
+            # how buyers use it, the backing tool, settings, prices, the
+            # voucher size and an optional registry price. Registered under
+            # the operator, which signs the spec and is paid.
+            from .service_publish import form_from, publish_service
             author = msg.get("agent_id") or "user"
-            # The Flutter client sends `tool_digest`; agent-side callers send
-            # `backing_tool`. Accept both — a service whose backing tool is
-            # empty can never be fulfilled (service_request dispatches to it),
-            # so silently dropping the key published dead listings.
-            backing_tool = (msg.get("backing_tool")
-                            or msg.get("tool_digest") or "")
-            # The other backing kind (decision 2026-07-26): sell cognition
-            # off this daemon's own provider stack. {provider, model,
-            # max_tokens_cap?, max_input_chars?}: the upstream provider and
-            # model are named, never inferred. The store refuses a block
-            # without them, one naming a provider this daemon does not
-            # know, and one alongside a backing_tool.
-            inference = msg.get("inference")
-            if not isinstance(inference, dict):
-                inference = None
-            if not name:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'name' field"}
-            # What one work item is, the meaning of the price (Decision
-            # 2026-11-10); hardware names what a compute service runs on.
-            unit = msg.get("unit")
-            if not isinstance(unit, str) or not unit.strip():
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "Missing 'unit' field: what one work item is "
-                                 "(e.g. 'one completion up to 4,000 output "
-                                 "tokens')"}
-            hardware = msg.get("hardware")
-            if hardware is not None and not isinstance(hardware, str):
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "'hardware' must be a text naming the hardware"}
-            if not input_schema:
-                # The app's Publish dialog names a backing, not a schema:
-                # the backing already defines what a buyer sends. Without
-                # this the spec validator refused every app-published
-                # service ("missing required field 'input_schema'").
-                input_schema = self._default_service_input_schema(
-                    backing_tool, inference)
             try:
-                result = self.runtime.service_store.register(
-                    name=name,
-                    description=description,
-                    input_schema=input_schema,
-                    author=author,
-                    unit=unit,
-                    hardware=hardware or "",
-                    backing_tool=backing_tool,
-                    output_schema=msg.get("output_schema"),
-                    endpoint_hint=msg.get("endpoint_hint", ""),
-                    # Display-plane only: a listing-card banner. Advisory
-                    # like endpoint_hint, so no validation beyond str
-                    # coercion — an unreachable URL degrades to the UI's
-                    # default colour banner.
-                    image_uri=str(msg.get("image_uri") or "").strip(),
-                    inference=inference,
-                    version_of=msg.get("version_of"),
-                    # A stream service's application protocol {id,
-                    # description} (Decision 2026-11-10).
-                    protocol=msg.get("protocol") if isinstance(
-                        msg.get("protocol"), dict) else None,
-                )
-            except (ValueError, RuntimeError) as exc:
+                form = form_from(msg)
+            except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
-            # Chain leg: without it the listing exists only in this
-            # daemon's store, so no other daemon's market can see it and no
-            # buyer can pay for it. Same half agent_tools._register_service
-            # already does; a failure here downgrades to local-only rather
-            # than discarding the persisted spec.
-            chain = await self._register_service_on_chain(
-                author, result["digest"], ask_amount)
-            return {"msg_id": msg_id, "ok": True,
-                    "result": {"digest": result["digest"],
-                               "spec": result["spec"],
-                               **chain}}
+            result = await publish_service(
+                self.runtime, author=author,
+                signing_key=self._service_signing_key(author), form=form,
+                offload=self._offload)
+            if result.get("error"):
+                return {"msg_id": msg_id, "ok": False, "error": result["error"]}
+            return {"msg_id": msg_id, "ok": True, "result": result}
+
+        if msg_type == "set_service_prices":
+            # A new price list (no new spec, no transaction).
+            digest = str(msg.get("digest") or "")
+            record = self.runtime.service_store.get(digest)
+            if record is None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Unknown service digest: {digest[:16]}"}
+            try:
+                from .service_publish import _amount
+                prices = msg.get("prices")
+                if prices is None and msg.get("price") is not None:
+                    prices = {"requests": msg["price"]}
+                if not isinstance(prices, dict):
+                    raise ValueError("'prices' must be {measure: amount}")
+                prices = {str(k): _amount(v, f"the price of {k}") for k, v in prices.items()}
+                voucher = (None if msg.get("voucher") is None
+                           else _amount(msg["voucher"], "voucher"))
+                price_list = self.runtime.service_store.set_prices(digest, prices, voucher)
+            except ValueError as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            return {"msg_id": msg_id, "ok": True, "result": {"price_list": price_list}}
+
+        if msg_type in ("open_credits", "top_up_credits", "close_credits",
+                        "list_credits"):
+            # The household's credits with service providers (the operator's
+            # payment channels): opened, topped up and closed by whoever
+            # holds them, never automatically (service_channels.py).
+            return {"msg_id": msg_id, **(await self._owner_credits(msg_type, msg))}
 
         if msg_type == "list_services":
             include_retired = bool(msg.get("include_retired", False))
             services = []
+            from .service_runner import runner_for
+            runner = runner_for(self.runtime)
             for record in self.runtime.service_store.list(
                     include_retired=include_retired):
                 s = record.spec
@@ -2054,42 +2012,38 @@ class WebSocketBridge:
                     "digest": record.digest,
                     "name": record.name,
                     "description": s.get("description", ""),
+                    "mode": record.mode,
+                    "settings": record.settings,
+                    "measures": record.measures,
+                    "protocol": record.protocol,
+                    "prices": record.prices,
+                    "voucher": record.voucher,
+                    "price_list": record.price_list,
                     "author": record.author,
                     "author_pubkey": s.get("author_pubkey", ""),
-                    # From the ServiceRegistry entry, the only reference for
-                    # them (Decision 2026-11-10): the provider is the address
-                    # paid, the one the gate verifies against.
+                    # From the ServiceRegistry entry: the provider is the
+                    # address paid; the registry price is optional.
                     "service_id": chain.get("service_id"),
                     "provider": chain.get("provider", ""),
-                    "ask": ({"amount": str(chain["ask_amount"]),
-                             "unit": "per_item"}
-                            if "ask_amount" in chain else None),
+                    "registry_price": chain.get("ask_amount"),
                     "active": chain.get("active"),
-                    "endpoint_hint": s.get("endpoint_hint", ""),
                     "image_uri": s.get("image_uri", ""),
-                    "unit": record.unit,
-                    "hardware": record.hardware,
                     "backing_tool": record.backing_tool,
-                    # {} for a tool-backed service; {provider, model,
-                    # max_tokens_cap, max_input_chars} when the daemon sells
-                    # its own inference.
-                    "inference": record.inference,
                     "retired": record.retired,
                     "version_of": s.get("version_of"),
                     "input_schema": s.get("input_schema", {}),
                     # The service store is daemon-local: everything it holds
-                    # was published from HERE, so ownership is a fact, not an
-                    # inference. The UI used to guess by resolving `author`
-                    # as an agent id, which never matched the "user" default
-                    # and hid Retire on the owner's own listings.
+                    # was published from here.
                     "owned": True,
                     "registered_ts": record.registered_ts,
+                    # The tool's failures, for the notifications to come.
+                    "errors": runner.errors(record.digest)[-10:],
                 })
             summary = self.runtime.service_store.summary()
             # Whether buyers can dial this daemon directly, with advice when
             # they cannot (Decision 2026-11-10, a stream between buyer and
             # seller: providers are encouraged to be reachable).
-            from .service_streams import own_reachability
+            from .service_sessions import own_reachability
             return {"msg_id": msg_id, "ok": True,
                     "result": {"services": services, "summary": summary,
                                "reachability": own_reachability()}}
@@ -2125,22 +2079,20 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": {"services": rows, "count": len(rows)}}
 
-        # The household's receipts of paid service requests, newest first,
-        # each with its review once one was sent (service reviews, Decision
-        # 2026-11-10). The app reviews one with `review_service` (the agent
-        # tool, which as the owner signs with the operator key).
-        if msg_type == "service_receipts":
-            from .service_receipts import receipts_for
-            store = receipts_for(self.runtime)
+        # The household's reviews of services, newest first (Decisions
+        # 2026-11-10 and 2026-11-12). The app reviews one with
+        # `review_service`, which as the owner signs with the operator key.
+        if msg_type == "service_reviews":
+            store = getattr(self.runtime, "service_reviews", None)
             if store is None:
-                return {"msg_id": msg_id, "ok": True, "result": {"receipts": []}}
+                return {"msg_id": msg_id, "ok": True, "result": {"reviews": []}}
             try:
                 limit = max(1, min(int(msg.get("limit") or 50), 500))
             except (TypeError, ValueError):
                 limit = 50
             rows = store.list(provider=str(msg.get("provider") or ""), limit=limit)
             return {"msg_id": msg_id, "ok": True,
-                    "result": {"receipts": rows, "count": len(rows)}}
+                    "result": {"reviews": rows, "count": len(rows)}}
 
         # Semantic search + clustering over service specs.
         #
@@ -4343,29 +4295,24 @@ class WebSocketBridge:
         listener is refused rather than served for free. Defaults False so
         an un-threaded caller gets the safe answer.
 
-        Wire frame: {spec_digest, request_id, args} → look up spec →
-        validate payment (seam) → dispatch to the backing local tool →
-        record the request in the provider's log → return the result.
+        Wire frame: {spec_digest, request_id, args, payment} → look up the
+        service → check the payment (``_credit_gate`` for the buyer's
+        credits, ``_direct_gate`` for a direct payment) → run the backing
+        tool with the service's settings → record the request in the
+        provider's log → return the result.
 
-        The backing implementation of a v1 service is a registered tool
-        the OWNER chose to sell, so dispatch goes through
-        ``runtime.tool_store.call`` with ``caller_id=None`` — the sale is
-        the owner's sanction, not a lineage-scoped agent call.
-
-        A service whose spec declares an ``inference`` block is served
-        instead by this daemon's OWN provider stack (decision 2026-07-26)
-        — no backing tool required or consulted. See
-        ``_serve_inference_request``.
+        The backing implementation of a service is a registered tool the
+        owner chose to sell, so dispatch goes through
+        ``runtime.tool_store.call`` with ``caller_id=None``: the sale is the
+        owner's sanction, not a lineage-scoped agent call.
 
         Every reply about one of this daemon's services is signed
-        (``receipt_sig``, ``service_client.sign_reply``) with the key that
+        (``reply_sig``, ``service_client.sign_reply``) with the key that
         registered the service, the address the buyer paid: the buyer takes
         nothing a relay or a wss impostor says as served.
 
-        Not served = not paid: a voucher the gate accepted is kept only when
-        the dispatch succeeds and released otherwise. Every reply says so in
-        ``charged`` (whether this request's payment was kept, signed with
-        the rest), which is how the buyer knows whether to count its voucher.
+        Not served = not paid: a request charged to the buyer's credits and
+        then not served has its charge taken back.
         """
         reply = await self._service_request_reply(msg, msg_id, local=local)
         return self._sign_service_reply(msg, reply)
@@ -4392,163 +4339,135 @@ class WebSocketBridge:
                         request_id[:18], exc)
             return reply
 
-    def _verified_payer(self, msg: dict[str, Any], record: Any,
-                        gate: dict[str, Any]) -> str:
-        """The address that paid for this request, as the payment gate
-        verified it, or "" when nothing was paid (a free service, the
-        no-chain dev degrade). The request's own ``client`` field is never
-        used: anyone can write any address there."""
-        if gate.get("payer"):
-            return str(gate["payer"])
-        try:
-            if int(gate.get("ask_amount") or 0) <= 0:
-                return ""
-        except (TypeError, ValueError):
-            return ""
-        # The gate passed a paid request only if its payer_signature
-        # recovers to the payer (the payment's sender, or the channel's
-        # client) under the service's provider address, the one
-        # `_chain_service` holds the registry entry to.
-        provider = self._service_provider_address(record.author)
-        sig = str(msg.get("payer_signature") or "").strip()
-        if not provider or not sig:
-            return ""
-        from .service_client import recover_request_signer
-        args = msg.get("args") if isinstance(msg.get("args"), dict) else {}
-        try:
-            return str(recover_request_signer(
-                sig, str(msg.get("request_id") or ""),
-                str(msg.get("spec_digest") or record.digest), args, provider))
-        except Exception:                                   # noqa: BLE001
-            return ""
-
     async def _service_request_reply(
         self, msg: dict[str, Any], msg_id: Any, *, local: bool = False
     ) -> dict[str, Any]:
         """The unsigned reply to a ``service_request`` (see
-        ``_handle_service_request``).
+        ``_handle_service_request``). Everything a request can be refused for
+        without its payment is checked first (unknown or retired service, a
+        session service, a missing backing tool), so a refused request costs
+        the buyer nothing."""
+        from .service_prices import request_price
+        from .service_spec import MODE_REQUEST
 
-        Everything a request can be refused for without its payment is
-        checked BEFORE the payment gate (unknown or retired service, no
-        backing, malformed or oversized inference input, an upstream model
-        provider this daemon cannot build), so a refused request leaves its
-        payment unspent: the buyer can send it again, fixed, under the same
-        request id. Attempts the gate refuses are counted on the provider's
-        log but not attributed to anyone."""
         spec_digest = msg.get("spec_digest", "")
         request_id = msg.get("request_id", "")
         args = msg.get("args")
         if args is None:
             args = {}
         if not spec_digest or not request_id:
-            return {"msg_id": msg_id, "ok": False, "charged": False,
+            return {"msg_id": msg_id, "ok": False,
                     "error": "Missing 'spec_digest' or 'request_id' field"}
-
         store = self.runtime.service_store
         record = store.get(spec_digest)
         if record is None:
-            return {"msg_id": msg_id, "ok": False, "charged": False,
+            return {"msg_id": msg_id, "ok": False,
                     "error": f"Unknown service digest: {spec_digest[:16]}"}
         if record.retired:
             store.count_refused(spec_digest)
-            return {"msg_id": msg_id, "ok": False, "charged": False,
-                    "error": "Service retired"}
+            return {"msg_id": msg_id, "ok": False, "error": "Service retired"}
+        if record.mode != MODE_REQUEST:
+            store.count_refused(spec_digest)
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "this is a session service: open a session to it"}
         if not isinstance(args, dict):
             store.count_refused(spec_digest)
-            return {"msg_id": msg_id, "ok": False, "charged": False,
-                    "error": "'args' must be an object"}
-
-        upstream: Any = None
-        tool_record: Any = None
-        if record.inference:
-            problem = self._inference_request_problem(record, args)
-            if problem is None:
-                upstream = self._inference_upstream(record)
-                if isinstance(upstream, str):
-                    problem = upstream
-            if problem is not None:
-                store.count_refused(spec_digest)
-                return {"msg_id": msg_id, "ok": False, "charged": False,
-                        "error": f"{problem}; the payment was not taken"}
-        else:
-            backing = record.backing_tool
-            if not backing:
-                store.count_refused(spec_digest)
-                return {"msg_id": msg_id, "ok": False, "charged": False,
-                        "error": "Service has no backing implementation"}
-            tool_record = self.runtime.tool_store.get(backing)
-            if tool_record is None:
-                tool_record = self.runtime.tool_store.resolve(backing)
-            if tool_record is None:
-                store.count_refused(spec_digest)
-                return {"msg_id": msg_id, "ok": False, "charged": False,
-                        "error": f"Backing tool {backing[:16]} not found"}
-
-        # Payment/voucher validation gate (Stage B — real on-chain verify).
-        gate = await self._validate_service_payment(msg, record, local=local)
-        amount = str(gate.get("ask_amount", ""))
-        if not gate.get("ok"):
+            return {"msg_id": msg_id, "ok": False, "error": "'args' must be an object"}
+        tool_record = self.runtime.tool_store.get(record.backing_tool) \
+            or self.runtime.tool_store.resolve(record.backing_tool)
+        if tool_record is None:
             store.count_refused(spec_digest)
-            return {"msg_id": msg_id, "ok": False, "charged": False,
-                    "error": f"Payment validation failed: "
-                             f"{gate.get('reason', 'unknown')}"}
-        payer = self._verified_payer(msg, record, gate)
-        reservation = gate.get("reservation")
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "the service's tool is not available on the provider"}
+
+        price = request_price(record.price_list)
+        payer, cid, direct = "", None, ""
+        if price > 0:
+            if msg.get("channel_id") is not None:
+                gate = await self._credit_gate(msg, record, need=price)
+                if not gate.get("ok"):
+                    store.count_refused(spec_digest)
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": f"Payment refused: {gate.get('reason', 'unknown')}",
+                            **({"credit": gate["credit"]} if gate.get("credit") else {})}
+                payer, cid = gate["payer"], gate["channel_id"]
+            elif msg.get("tx_hash"):
+                gate = await self._direct_gate(msg, record, price=price, local=local)
+                if not gate.get("ok"):
+                    store.count_refused(spec_digest)
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": f"Payment refused: {gate.get('reason', 'unknown')}"}
+                payer, direct = gate.get("payer", ""), gate["request_id"]
+            elif not await self._chain_configured():
+                if not local:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": "this daemon has no chain configuration, so it "
+                                     "cannot verify payment and will not serve paid "
+                                     "requests"}
+                log.warning("SERVICE PAYMENT SKIPPED (no chain, local listener): "
+                            "serving %s unpaid", record.name or record.digest[:16])
+            else:
+                store.count_refused(spec_digest)
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "no payment: send 'channel_id' (your credits with "
+                                 "this provider) or a direct payment's 'tx_hash'"}
+        if cid is not None:
+            store.begin_use(cid)
         try:
-            reply = await self._dispatch_service(
-                record, args, msg_id, request_id,
-                upstream=upstream, tool_record=tool_record)
+            reply = await self._dispatch_service(record, args, msg_id, request_id,
+                                                 tool_record=tool_record)
+        except Exception as exc:  # noqa: BLE001 (a failed tool is a failed request)
+            log.warning("service %s: the tool failed: %s",
+                        record.name or record.digest[:16], exc)
+            reply = {"msg_id": msg_id, "ok": False,
+                     "error": f"the service's tool failed: {exc}"}
         except BaseException:
-            # Not served (a crash in the backing, or the call was cancelled).
-            if reservation is not None:
-                store.release_channel_voucher(reservation)
+            if cid is not None:
+                store.refund(cid, price)
+                store.end_use(cid)
+            if direct:
+                self._settle_direct(direct, False)
             raise
         ok = bool(reply.get("ok"))
-        if reservation is not None:
-            if ok:
-                store.keep_channel_voucher(reservation)
-            else:
-                store.release_channel_voucher(reservation)
-        # The log records the price only for a payment kept.
-        proof = gate.get("proof")
-        charged = ok if proof == "voucher" else proof == "direct"
-        store.record_request(spec_digest, request_id, payer, ok=ok,
-                             amount=amount if charged else "0")
-        # A direct payment is on chain already, whatever the dispatch did.
-        reply["charged"] = charged
-        # The receipt names the payer the gate verified and what it was
-        # charged (signed with the rest, _sign_service_reply).
-        reply["payer"] = payer
-        reply["amount"] = amount if charged and amount.isdigit() else "0"
-        # A voucher's channel: the close counts a review of this request
-        # once that channel's settlement on chain covers it.
-        channel = "0"
-        if proof == "voucher":
-            try:
-                channel = str(int(msg.get("channel_id") or 0))
-            except (TypeError, ValueError):
-                channel = "0"
-        reply["channel_id"] = channel
+        if direct:
+            self._settle_direct(direct, ok)
+            if not ok:
+                reply["error"] = (str(reply.get("error") or "not served")
+                                  + "; your payment stays good for this request: "
+                                    "send it again with the same request_id")
+        if cid is not None:
+            if not ok:
+                store.refund(cid, price)
+            store.end_use(cid)
+            consumed, cumulative = store.balance(cid)
+            reply["credit"] = {"channel_id": int(cid), "consumed": consumed,
+                               "cumulative": cumulative}
+        # What the request cost the buyer: its charge when served (on credits,
+        # or the direct payment used up), nothing otherwise.
+        charged = price if ok and (cid is not None or bool(payer)) else 0
+        store.record_request(spec_digest, request_id, payer, ok=ok, amount=str(charged))
         return reply
 
     async def _dispatch_service(
         self, record: Any, args: dict[str, Any], msg_id: Any, request_id: str,
-        *, upstream: Any = None, tool_record: Any = None,
+        *, tool_record: Any = None,
     ) -> dict[str, Any]:
-        """Run one paid work item on its backing (checked before the
-        payment gate); the reply frame."""
-        # Inference-backed: the work item is a chat completion served off
-        # this daemon's provider stack. Payment already cleared; the gate
-        # is backing-agnostic on purpose.
-        if record.inference:
-            result = await self._serve_inference_request(
-                record, args, upstream)
-        else:
-            # Owner-sanctioned dispatch: selling a tool IS the owner's choice.
-            result = await self.runtime.tool_store.call(
-                tool_record, args, caller_id=None)
-        return {"msg_id": msg_id, "ok": "error" not in result,
-                "result": {"request_id": request_id, **result}}
+        """Run one paid request on the service's tool, with its settings
+        (``AUTONET_SERVICE_SETTINGS``); the reply frame: ``result`` is
+        ``{request_id, result}`` (the tool's output) when served, and a
+        failed run's error is the reply's ``error`` too."""
+        import json as _json
+        tool = tool_record or self.runtime.tool_store.get(record.backing_tool)
+        # Owner-sanctioned dispatch: selling a tool IS the owner's choice.
+        result = await self.runtime.tool_store.call(
+            tool, args, caller_id=None,
+            extra_env={"AUTONET_SERVICE_SETTINGS": _json.dumps(record.settings,
+                                                               sort_keys=True)})
+        reply = {"msg_id": msg_id, "ok": "error" not in result,
+                 "result": {"request_id": request_id, **result}}
+        if "error" in result:
+            reply["error"] = f"the service's tool failed: {result['error']}"
+        return reply
 
     # ------------------------------------------------------------------
     # Consumer side: the owner buys one work item (invoke_service)
@@ -4578,7 +4497,7 @@ class WebSocketBridge:
             would hit, carrying the real payment proof. The gate then
             verifies the payment we just made, so the owner buying from
             their own daemon exercises the production path rather than a
-            private shortcut. Works for tool- and inference-backed alike.
+            private shortcut.
           - **Foreign digest**: scan the on-chain registry for the
             digest's provider + ask, resolve their endpoint, pay, and
             call ``service_client.request_service`` cross-daemon. With no
@@ -4762,35 +4681,6 @@ class WebSocketBridge:
                         record.digest[:16], exc)
             return {"error": f"ServiceRegistry read failed: {exc}"}
 
-    # A buyer of an inference-backed service sends a chat request (see
-    # the inference fulfilment path: args {messages, max_tokens?}).
-    _INFERENCE_INPUT_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "messages": {"type": "array", "items": {"type": "object"}},
-            "max_tokens": {"type": "integer"},
-        },
-        "required": ["messages"],
-    }
-
-    def _default_service_input_schema(
-        self, backing_tool: str, inference: dict | None,
-    ) -> dict:
-        """The input schema a service inherits from its backing when the
-        caller names none: the backing tool's manifest schema, or the chat
-        request shape for an inference backing. ``{}`` when neither is
-        known (the spec validator then refuses, as before)."""
-        if inference is not None:
-            return dict(self._INFERENCE_INPUT_SCHEMA)
-        if backing_tool:
-            store = getattr(self.runtime, "tool_store", None)
-            record = store.get(backing_tool) if store is not None else None
-            schema = (record.manifest.get("input_schema")
-                      if record is not None else None)
-            if isinstance(schema, dict) and schema:
-                return dict(schema)
-        return {}
-
     async def _register_service_on_chain(
         self, author: str, digest: str, ask_amount: int,
     ) -> dict[str, Any]:
@@ -4962,29 +4852,26 @@ class WebSocketBridge:
         Pay first, then re-enter ``_handle_service_request`` with a real
         ``service_request`` frame. Nothing about the dispatch is special-
         cased for the owner: the payment gate runs, the request lands on
-        the provider log, and a tool- or inference-backing is chosen by
+        the provider log, and the backing tool is run by
         the same code a remote buyer drives.
         """
         from . import service_client
 
-        # Same price and payee the gate verifies against: the service's
-        # ServiceRegistry entry (Decision 2026-11-10). Without a registry
-        # (local dev) there is nothing to pay; the gate degrades the same.
+        # The payee is the service's ServiceRegistry entry; the price is the
+        # service's own price list. Without a registry (local dev) there is
+        # nothing to pay; the gate degrades the same.
+        from .service_prices import request_price
         chain = await self._chain_service(record)
         if chain.get("error") is None and not chain.get("active"):
             return {"msg_id": msg_id, "ok": False,
                     "error": f"Service {record.name or record.digest[:16]} is "
                              "retired on chain: nothing to buy."}
-        amount = int(chain.get("ask_amount") or 0)
+        if record.mode != "request":
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "this is a session service: open a session to it"}
+        amount = request_price(record.price_list)
         amount_raw = str(amount)
         recipient = str(chain.get("provider") or "")
-
-        if not record.inference and not record.backing_tool:
-            # Answer before spending: an unfulfillable listing must not
-            # take the buyer's money and then fail at dispatch.
-            return {"msg_id": msg_id, "ok": False,
-                    "error": f"Service {record.name or record.digest[:16]} has "
-                             "no backing implementation — nothing to buy."}
 
         if prepaid is not None:
             # The buyer already paid with their own wallet; the proof
@@ -5078,10 +4965,19 @@ class WebSocketBridge:
                              "nothing to buy."}
 
         provider_address = str(match.get("provider") or "")
-        try:
-            amount = int(str(match.get("ask_amount") or "0") or "0")
-        except (TypeError, ValueError):
-            amount = 0
+        from .service_prices import request_price, voucher_size
+        price_list = catalog.price_list(digest, provider_address)
+        spec = catalog.spec(digest) or {}
+        if spec.get("mode") == "session":
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "this is a session service: open a session to it"}
+        if price_list is None:
+            # Unpriced is not free: the provider would refuse an unpaid
+            # request to a priced service.
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"no price list is known yet for {digest[:16]}; try "
+                             "again once the catalog has it. Nothing was paid."}
+        amount = request_price(price_list)
 
         # Resolve the endpoint off the loop (blocking web3 read) and hand it
         # to request_service so it doesn't read the chain itself; the dial
@@ -5093,9 +4989,13 @@ class WebSocketBridge:
                     provider_address))
         except Exception as exc:                            # noqa: BLE001
             return {"msg_id": msg_id, "ok": False,
-                    "error": f"Could not resolve the provider's endpoint: {exc}",
-                    "result": {"request_id": request_id, "receipt": receipt}}
+                    "error": f"Could not resolve the provider's endpoint: {exc}; "
+                             "nothing was paid"}
 
+        book = getattr(self.runtime, "channel_book", None)
+        key, payer = self._buyer_key(), self._buyer_address()
+        credits = (book.get(payer, provider_address)
+                   if book is not None and payer else None)
         if prepaid is not None or amount <= 0:
             # The owner paid with its own wallet already (a direct
             # payment), or the service is free.
@@ -5108,38 +5008,44 @@ class WebSocketBridge:
             reply = await service_client.request_service(
                 config, provider_address, digest, args,
                 tx_hash=tx_hash, request_id=request_id,
-                client_address=self._buyer_address(),
-                endpoint=str(endpoint or ""),
-                payer_key=self._buyer_key(),
-            )
-        else:
-            # The household buys on its operator's channel to the provider
-            # (Decision 2026-11-10: no transaction per request; not served
-            # = not paid), the same path its agents and the `service`
-            # model provider use.
-            from .service_channels import request_on_channel
-            book = getattr(self.runtime, "channel_book", None)
-            if not smc.channel_available or book is None:
+                client_address=payer, endpoint=str(endpoint or ""),
+                payer_key=key)
+        elif credits is not None:
+            # The household's credits with this provider.
+            from .service_channels import request_on_credits
+            if not smc.channel_available:
                 return {"msg_id": msg_id, "ok": False,
-                        "error": "PaymentChannel not configured on this "
-                                 "daemon, so the purchase cannot be paid; "
-                                 "nothing was sent."}
-            key, payer = self._buyer_key(), self._buyer_address()
-            if not key or not payer:
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "no operator key is held, so the purchase "
-                                 "cannot be paid; nothing was sent."}
-            reply = await request_on_channel(
-                book, smc, config, key, payer, provider_address, digest,
-                args, amount, endpoint=str(endpoint or ""))
+                        "error": "PaymentChannel not configured on this daemon, so "
+                                 "the purchase cannot be paid; nothing was sent."}
+            reply = await request_on_credits(
+                book, smc, config, key, payer, provider_address, digest, args,
+                price=amount, voucher=voucher_size(price_list),
+                endpoint=str(endpoint or ""))
             if reply.get("error") and not reply.get("delivered"):
                 return {"msg_id": msg_id, "ok": False,
                         "error": f"Payment failed: {reply['error']}"}
             request_id = str(reply.get("request_id") or "")
             receipt = self._receipt(
-                paid=bool(reply.get("paid")), degraded=False, tx_hash=None,
-                amount=int(reply.get("paid") or 0), recipient=provider_address)
-            receipt["channel_id"] = reply.get("channel_id")
+                paid=bool(reply.get("ok")), degraded=False, tx_hash=None,
+                amount=amount if reply.get("ok") else 0, recipient=provider_address)
+            receipt["credits"] = reply.get("credits")
+        else:
+            # No credits with this provider: pay this one request directly.
+            request_id = service_client.new_request_id()
+            payment = await self._pay_for_invoke(
+                recipient=provider_address, amount=amount, request_id=request_id)
+            if payment.get("error"):
+                return {"msg_id": msg_id, "ok": False, "error": payment["error"]}
+            tx_hash = str(payment.get("tx_hash") or "")
+            request_id = str(payment.get("request_id") or request_id)
+            receipt = self._receipt(
+                paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
+                tx_hash=tx_hash or None, amount=amount, recipient=provider_address)
+            reply = await service_client.request_service(
+                config, provider_address, digest, args,
+                tx_hash=tx_hash, request_id=request_id,
+                client_address=payer, endpoint=str(endpoint or ""),
+                payer_key=key)
         return self._invoke_result(
             {"ok": bool(reply.get("ok")), "result": reply.get("result"),
              "error": reply.get("error")},
@@ -5173,368 +5079,255 @@ class WebSocketBridge:
             "output": output,
         }}
 
-    @staticmethod
-    def _inference_request_problem(record: Any,
-                                   args: dict[str, Any]) -> str | None:
-        """Why an inference work item cannot be served as sent, or None.
-        Checked before the payment gate."""
-        from .service_spec import inference_input_chars
-
-        messages = args.get("messages")
-        if not isinstance(messages, list) or not messages:
-            return ("inference service requires a non-empty 'messages' list "
-                    "in args")
-        system = args.get("system")
-        if system is not None and not isinstance(system, str):
-            return "'system' must be a string"
-        size = inference_input_chars(messages, system or "")
-        limit = record.max_input_chars
-        if size > limit:
-            return (f"request too large: its messages and system come to "
-                    f"{size} characters, and this service takes at most "
-                    f"{limit} (inference.max_input_chars)")
-        return None
-
-    def _inference_upstream(self, record: Any) -> Any:
-        """The model provider this service is served on: exactly the one
-        its spec names (``inference.provider``, with ``inference.model``),
-        built by the daemon's provider manager. Nothing is inferred from the
-        model's name and nothing falls back (no default provider, decision
-        2026-10-06). Returns the provider, or a string saying why it cannot
-        be built."""
-        block = record.inference
-        name = str(block.get("provider") or "").strip()
-        model = str(block.get("model") or "").strip()
-        if not name or not model:
-            return ("this service's spec names no upstream provider and model "
-                    "(inference.provider, inference.model)")
-        manager = getattr(self.runtime, "providers", None)
-        if manager is None:
-            return "this daemon has no provider stack wired"
-        from .models import AgentDefinition, AgentMode
-        defn = AgentDefinition(
-            id=f"service-{record.digest[:12]}", name="service",
-            mode=AgentMode.COGNITIVE, provider=name, cognitive_model=model,
-            tools=[])
+    async def _chain_configured(self) -> bool:
+        from .on_chain import OnChainService
         try:
-            provider = manager.resolve_provider_with_fallback(defn)
-        except Exception as exc:                            # noqa: BLE001
-            log.warning("inference service %s: provider %r unavailable: %s",
-                        record.digest[:16], name, exc)
-            return f"upstream provider {name!r} is not available here: {exc}"
-        if provider is None:
-            return f"upstream provider {name!r} is not available here"
-        return provider
+            return bool(OnChainService(self.runtime._config.rpb).available)
+        except Exception:  # noqa: BLE001
+            return False
 
-    async def _serve_inference_request(
-        self, record: Any, args: dict[str, Any], provider: Any = None,
-    ) -> dict[str, Any]:
-        """Serve a paid work item off this daemon's own provider stack.
+    async def _service_entry(self, record: Any) -> dict[str, Any]:
+        """``_chain_service`` cached for a minute: the gate needs the payee
+        and the active flag on every request, and they change rarely."""
+        import time as _time
+        cache = self.__dict__.setdefault("_service_entry_cache", {})
+        hit = cache.get(record.digest)
+        if hit is not None and _time.monotonic() - hit[0] < 60.0:
+            return hit[1]
+        entry = await self._chain_service(record)
+        if not entry.get("error"):
+            cache[record.digest] = (_time.monotonic(), entry)
+        return entry
 
-        Decision 2026-07-26 (docs/services_market.md): a service may
-        declare an inference backing instead of a backing tool. The work
-        item is ``{messages, max_tokens?, system?, temperature?}``; the
-        reply is ``{content, model, usage}``.
+    async def _service_payee(self, record: Any) -> str:
+        """The address paid for ``record``: its registry entry's provider,
+        else the address its author's services are registered under; ""
+        when neither is known."""
+        entry = await self._service_entry(record)
+        payee = "" if entry.get("error") else str(entry.get("provider") or "")
+        return payee or self._service_provider_address(record.author)
 
-        The upstream is the provider the spec names, with the model it
-        names (``_inference_upstream``); ``provider`` is that one, already
-        built before the payment gate ran. No budget metering: the ask is
-        the price, the token cap and the input bound are the ceiling.
-        """
-        problem = self._inference_request_problem(record, args)
-        if problem is not None:
-            return {"error": problem}
-        if provider is None:
-            provider = self._inference_upstream(record)
-            if isinstance(provider, str):
-                return {"error": provider}
-        messages = args.get("messages")
-
-        cap = record.max_tokens_cap
-        requested = args.get("max_tokens")
+    async def _accept_voucher(self, record: Any, channel_id: Any, cumulative: Any,
+                              signature: Any, *, payer: str = "") -> dict[str, Any]:
+        """Verify a voucher on chain (the channel is open, its provider is this
+        service's provider, the signature is its client's, the total within
+        its deposit, the client is ``payer`` when given) and hold it in the
+        credit ledger. ``{ok, client}`` or ``{ok: False, reason}``."""
+        from .on_chain import ServiceMarketClient
+        smc = ServiceMarketClient(self.runtime._config.rpb)
+        if not smc.channel_available:
+            return {"ok": False, "reason": "PaymentChannel not configured on this daemon"}
         try:
-            max_tokens = int(requested) if requested not in (None, "") else cap
+            cid, cum = int(channel_id), int(cumulative)
         except (TypeError, ValueError):
-            max_tokens = cap
-        # Clamp: the cap is what the ask was priced against, and a buyer
-        # asking for more than they paid for doesn't get it.
-        max_tokens = max(1, min(max_tokens, cap))
+            return {"ok": False, "reason": "channel_id and cumulative_amount must be integers"}
+        res = await self._offload(lambda: smc.verify_voucher(cid, cum, signature))
+        if not res.get("valid"):
+            return {"ok": False, "reason": res.get("reason", "invalid voucher")}
+        # Never credit a channel to someone else: without a known payee the
+        # channel's provider cannot be checked, so the voucher is refused.
+        provider = (await self._service_payee(record)).lower()
+        if not provider or str(res.get("provider") or "").lower() != provider:
+            return {"ok": False, "reason": "the channel's provider is not this service's provider"}
+        if res.get("exceeds_deposit"):
+            return {"ok": False, "reason": f"voucher total {cum} exceeds the channel "
+                                           f"deposit {res.get('deposit')}: top up"}
+        client = str(res.get("client") or "").lower()
+        if payer and client != payer.lower():
+            return {"ok": False, "reason": "the voucher is not from the channel's client"}
+        self.runtime.service_store.accept_voucher(
+            cid, cum, str(signature), client=client, provider=provider)
+        return {"ok": True, "client": client}
 
-        model = str(record.inference.get("model") or "").strip()
-        try:
-            temperature = float(args.get("temperature") or 0.0)
-        except (TypeError, ValueError):
-            temperature = 0.0
-        try:
-            resp = await provider.send(
-                messages=messages,
-                system=str(args.get("system") or ""),
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-        except Exception as exc:                            # noqa: BLE001
-            log.warning("inference service dispatch failed: %s", exc)
-            return {"error": f"inference failed: {exc}"}
-
-        usage = getattr(resp, "usage", None)
-        return {
-            "content": getattr(resp, "text", "") or "",
-            "model": getattr(resp, "model", "") or model,
-            "usage": {
-                "input_tokens": getattr(usage, "input_tokens", 0) if usage else 0,
-                "output_tokens": getattr(usage, "output_tokens", 0) if usage else 0,
-            },
-            "stop_reason": getattr(resp, "stop_reason", "") or "end_turn",
-            "max_tokens": max_tokens,
-        }
-
-    async def _validate_service_payment(
-        self, request: dict[str, Any], record: Any, *, local: bool = False
-    ) -> dict[str, Any]:
-        """Verify a service request's payment proof (Stage B).
-
-        The request must carry ONE of two proofs:
-
-          - Direct: ``{tx_hash, request_id}`` — a Substrate.payForService
-            transfer. We fetch that receipt, decode the ServicePayment event,
-            and check recipient == the serving agent's address and amount >=
-            the service ask. Replay is closed by a persisted seen-request-id
-            set (a request_id already served is rejected).
-
-          - Voucher: ``{channel_id, cumulative_amount, signature}`` — a
-            PaymentChannel voucher. We recover+verify the signature against
-            on-chain channel state (client + Open) and require the increment
-            (cumulative - last_seen) >= ask. The voucher is reserved (it
-            counts toward last_seen at once) and returned as
-            ``reservation``: the caller keeps it, to settle later via
-            close_channel, only when the request is served, and releases
-            it otherwise. The request id is consumed either way.
-
-        Config escape hatch: when the daemon has NO chain config, a request
-        that arrived on the LOCAL listener (the two-daemon dev demo) is
-        allowed with a LOUD warning. A request from the REMOTE listener is
-        REFUSED: `service_request` is dispatched pre-auth precisely because
-        the payment IS the credential, so degrading open there would turn a
-        transient registry outage into unlimited free work (including
-        inference off the owner's provider stack) for any stranger who
-        knows the digest. When chain IS configured, the gate is enforced
-        on both listeners.
-
-        Returns ``{ok: bool, reason: str}``; an accepted request also names
-        its ``proof`` ("direct", "voucher", "free" or "degraded").
-        """
-        from .on_chain import OnChainService, ServiceMarketClient
-
-        config = self.runtime._config.rpb
-        oc = OnChainService(config)
-        # --- Config escape hatch: no chain ----------------------------------
-        # Local listener: degrade loud-and-open (the dev demo).
-        # Remote listener: fail CLOSED — see the docstring.
-        if not oc.available:
-            if not local:
-                log.warning(
-                    "SERVICE PAYMENT GATE: no chain config "
-                    "(substrate_address/rpc_url unset) — REFUSING remote "
-                    "service request for %s; payment cannot be verified.",
-                    record.name or record.digest[:16])
-                return {"ok": False,
-                        "reason": "this daemon has no chain configuration, so "
-                                  "it cannot verify payment and will not serve "
-                                  "paid requests"}
-            log.warning(
-                "SERVICE PAYMENT GATE DEGRADED: no chain config "
-                "(substrate_address/rpc_url unset) — ALLOWING service request "
-                "for %s WITHOUT payment verification (local listener only).",
-                record.name or record.digest[:16])
-            return {"ok": True, "reason": "chain not configured (dev degrade)",
-                    "proof": "degraded"}
-
-        # The price, the active flag and the payee come from the service's
-        # ServiceRegistry entry, the only reference for them (Decision
-        # 2026-11-10): a price changed by updateServiceAsk applies at once,
-        # and a service retired on chain is refused.
-        chain = await self._chain_service(record)
-        if chain.get("error"):
-            return {"ok": False,
-                    "reason": f"cannot read this service's on-chain listing: "
-                              f"{chain['error']}"}
-        if not chain.get("active"):
-            return {"ok": False, "reason": "service retired on chain"}
-        recipient = str(chain.get("provider") or "")
-        ask_amount = int(chain.get("ask_amount") or 0)
-
-        # A free service needs no payment proof (payForService accepts zero,
-        # but a zero ask has nothing to pay; the client sends no proof).
-        if ask_amount <= 0:
-            return {"ok": True, "reason": "free service", "ask_amount": 0,
-                    "proof": "free"}
+    async def _credit_gate(self, request: dict[str, Any], record: Any, *,
+                           need: int) -> dict[str, Any]:
+        """A request (``need`` its price) or a session opening (``need`` 0)
+        paid from the buyer's credits with this provider: the service is
+        active on chain; the request id is new; ``payer_signature`` is the
+        channel client's over the request id, digest, args and provider; a
+        voucher sent with it is verified and held; and the credits, after
+        ``need`` is charged, are paid up. Returns ``{ok, payer, channel_id}``
+        or ``{ok: False, reason, credit?}`` (a refused request is charged
+        nothing)."""
+        from .service_client import recover_request_signer
 
         store = self.runtime.service_store
-        tx_hash = str(request.get("tx_hash") or "").strip()
-        request_id = str(request.get("request_id") or "").strip()
-        channel_id = request.get("channel_id")
-        signature = request.get("signature")
-        cumulative = request.get("cumulative_amount")
-
-        # --- Direct payForService path --------------------------------------
-        if tx_hash and request_id:
-            # One spelling for the replay key AND the on-chain match: the
-            # chain pads or cuts any hex to 32 bytes, so "R", "R0", "R00" all
-            # matched one payment while each counted as a new request id.
-            rid = request_id.lower().removeprefix("0x")
-            if len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid):
-                return {"ok": False,
-                        "reason": "request_id must be 32 bytes of hex (64 hex digits)"}
-            request_id = "0x" + rid
-            inflight = self.__dict__.setdefault("_payments_in_flight", set())
-            if store.has_served_request(request_id) or request_id in inflight:
-                return {"ok": False,
-                        "reason": f"request_id {request_id[:18]} already served "
-                                  "(replay)"}
-            if not recipient:
-                return {"ok": False,
-                        "reason": "service has no on-chain provider address "
-                                  "to verify payment against"}
-            # Only the payer may redeem its payment: the request must be
-            # signed by the key that paid (service_client.sign_request). A
-            # request id copied off the chain carries no such signature.
-            from .service_client import recover_request_signer
-            sig = str(request.get("payer_signature") or "").strip()
-            if not sig:
-                return {"ok": False,
-                        "reason": "unsigned request: a paid request must carry "
-                                  "the payer's signature (payer_signature)"}
-            try:
-                payer = recover_request_signer(
-                    sig, request_id,
-                    str(request.get("spec_digest") or record.digest),
-                    request.get("args") if isinstance(request.get("args"), dict)
-                    else {}, recipient)
-            except Exception:
-                return {"ok": False, "reason": "payer_signature is malformed"}
-            # Reserved while the chain is read, so two copies of one request
-            # sent at once cannot both pass the replay check.
-            inflight.add(request_id)
-            try:
-                # Off-loop: verify_service_payment is `async def` but
-                # synchronous inside (web3 HTTP receipt fetch + log decode).
-                # Awaited directly it occupies the event loop for the whole
-                # read, and a buyer's connection — plus every other client of
-                # this daemon — starves on the websocket keepalive and gets
-                # dropped mid-request. Same fix `invoke_service` and
-                # `owner_binding_status` already carry.
-                res = await self._offload(lambda: oc.verify_service_payment(
-                    request_id=request_id,
-                    recipient=recipient,
-                    min_amount=ask_amount,
-                    tx_hash=tx_hash,
-                    payer=payer,
-                ))
-                if not res.get("verified"):
-                    return {"ok": False, "reason": res.get("reason", "unverified")}
-                # A payment older than the replay horizon is refused, so the
-                # used-up request ids need only be kept that long.
-                from time import time as _now
-                paid_at = res.get("paid_at")
-                if (isinstance(paid_at, int) and paid_at > 0 and _now() - paid_at
-                        > store.REPLAY_HORIZON_S):
-                    return {"ok": False,
-                            "reason": "the payment is older than the provider's "
-                                      "replay horizon (30 days); pay again"}
-                # Consume the request_id AFTER a positive verify (replay guard).
-                store.mark_request_served(request_id)
-            finally:
-                inflight.discard(request_id)
-            return {"ok": True, "reason": "ok", "ask_amount": ask_amount,
-                    "proof": "direct"}
-
-        # --- Voucher (PaymentChannel) path ----------------------------------
-        if channel_id is not None and signature and cumulative is not None:
-            try:
-                cid = int(channel_id)
-                cum = int(cumulative)
-            except (TypeError, ValueError):
-                return {"ok": False,
-                        "reason": "channel_id and cumulative_amount must be integers"}
-            smc = ServiceMarketClient(config)
-            if not smc.channel_available:
-                return {"ok": False,
-                        "reason": "PaymentChannel not configured on this daemon"}
-            # The request id is single use here too: a voucher is released
-            # when its request fails, and a copy of that request sent later
-            # must not be served on it.
-            rid = store.normalize_request_id(request_id)
-            if not rid or not str(request.get("payer_signature") or "").strip():
-                return {"ok": False,
-                        "reason": "a voucher request must be signed by the "
-                                  "channel's client (payer_signature over "
-                                  "request_id and args)"}
-            if len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid):
-                return {"ok": False,
-                        "reason": "request_id must be 32 bytes of hex (64 hex digits)"}
-            # One voucher check per channel at a time: two vouchers raced
-            # through the cumulative check before either was recorded.
-            locks = self.__dict__.setdefault("_channel_locks", {})
+        entry = await self._service_entry(record)
+        if entry.get("error"):
+            return {"ok": False, "reason": f"cannot read this service's listing: "
+                                           f"{entry['error']}"}
+        if not entry.get("active"):
+            return {"ok": False, "reason": "service retired on chain"}
+        provider = str(entry.get("provider") or "")
+        rid = store.normalize_request_id(request.get("request_id"))
+        if len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid):
+            return {"ok": False, "reason": "request_id must be 32 bytes of hex"}
+        inflight = self.__dict__.setdefault("_payments_in_flight", set())
+        if store.has_served_request(rid) or rid in inflight:
+            return {"ok": False, "reason": f"request_id 0x{rid[:16]} already used (replay)"}
+        sig = str(request.get("payer_signature") or "").strip()
+        args = request.get("args") if isinstance(request.get("args"), dict) else {}
+        try:
+            payer = str(recover_request_signer(
+                sig, str(request.get("request_id")),
+                str(request.get("spec_digest") or record.digest), args, provider)).lower() \
+                if sig else ""
+        except Exception:  # noqa: BLE001
+            payer = ""
+        if not payer:
+            return {"ok": False, "reason": "a paid request must be signed by the "
+                                           "channel's client (payer_signature)"}
+        try:
+            cid = str(int(request.get("channel_id")))
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "channel_id must be an integer"}
+        locks = self.__dict__.setdefault("_channel_locks", {})
+        # The id is held while the gate runs, so the same request sent twice
+        # at once (a relay replaying it) is charged once.
+        inflight.add(rid)
+        try:
             async with locks.setdefault(cid, asyncio.Lock()):
-                if store.has_served_request(rid):
+                if request.get("cumulative_amount") is not None and request.get("signature"):
+                    res = await self._accept_voucher(
+                        record, cid, request.get("cumulative_amount"),
+                        request.get("signature"), payer=payer)
+                    if not res.get("ok"):
+                        return {"ok": False, "reason": res.get("reason")}
+                ledger = store.channel_ledger(cid)
+                if ledger is None:
+                    return {"ok": False, "reason": "voucher needed: no credits held for "
+                                                   "this channel yet",
+                            "credit": {"channel_id": int(cid), "consumed": 0,
+                                       "cumulative": 0}}
+                if str(ledger.get("client") or "").lower() != payer:
+                    return {"ok": False, "reason": "these credits are not the payer's"}
+                if str(ledger.get("provider") or "").lower() != provider.lower():
+                    return {"ok": False, "reason": "these credits are with another provider"}
+                if need > 0:
+                    store.consume(cid, need)
+                if not store.paid_up(cid):
+                    if need > 0:
+                        store.refund(cid, need)
+                    consumed, cumulative = store.balance(cid)
                     return {"ok": False,
-                            "reason": f"request_id 0x{rid[:16]} already used (replay)"}
-                # Off-loop for the same reason as the direct path above: the
-                # voucher check reads on-chain channel state synchronously.
-                res = await self._offload(
-                    lambda: smc.verify_voucher(cid, cum, signature))
-                if not res.get("valid"):
-                    return {"ok": False, "reason": res.get("reason", "invalid voucher")}
-                # The voucher pays for these args only: the channel's client
-                # signs the request (as on the direct path), so a relay that
-                # sees the voucher cannot spend it on a request of its own.
-                from .service_client import recover_request_signer
-                sig = str(request.get("payer_signature") or "").strip()
-                try:
-                    payer = recover_request_signer(
-                        sig, request_id,
-                        str(request.get("spec_digest") or record.digest),
-                        request.get("args") if isinstance(request.get("args"), dict)
-                        else {}, recipient) if sig and request_id else ""
-                except Exception:
-                    payer = ""
-                if not payer or payer.lower() != str(res.get("client") or "").lower():
-                    return {"ok": False,
-                            "reason": "a voucher request must be signed by the "
-                                      "channel's client (payer_signature over "
-                                      "request_id and args)"}
-                # The channel's provider must be the serving agent.
-                if recipient and str(res.get("provider", "")).lower() != recipient.lower():
-                    return {"ok": False,
-                            "reason": "voucher channel provider is not this service's "
-                                      "provider"}
-                # Settlement pays at most the deposit: a voucher above it is
-                # work the provider can never collect.
-                if res.get("exceeds_deposit"):
-                    return {"ok": False,
-                            "reason": f"voucher cumulative {cum} exceeds the channel "
-                                      f"deposit {res.get('deposit')}"}
-                last = store.last_channel_cumulative(cid)
-                if cum - last < ask_amount:
-                    return {"ok": False,
-                            "reason": f"voucher increment {cum - last} < ask "
-                                      f"{ask_amount}"}
-                # Accept, as a reservation: it counts at once (a copy sent
-                # meanwhile is refused), but _handle_service_request keeps it
-                # only if the request is served and otherwise releases it, so
-                # a buyer never pays for a failed request (atomic tasks).
-                reservation = store.reserve_channel_voucher(
-                    cid, cum, str(signature),
-                    provider=str(res.get("provider", "")),
-                    service_id=chain.get("service_id"), ask=ask_amount)
+                            "reason": f"voucher needed: {consumed} used of {cumulative} "
+                                      "paid ahead",
+                            "credit": {"channel_id": int(cid), "consumed": consumed,
+                                       "cumulative": cumulative}}
                 store.mark_request_served(rid)
-            return {"ok": True, "reason": "ok", "ask_amount": ask_amount,
-                    "proof": "voucher", "reservation": reservation}
+        finally:
+            inflight.discard(rid)
+        return {"ok": True, "payer": payer, "channel_id": cid}
 
-        return {"ok": False,
-                "reason": "no payment proof: provide {tx_hash, request_id} or "
-                          "{channel_id, cumulative_amount, signature}"}
+    async def _direct_gate(self, request: dict[str, Any], record: Any, *,
+                           price: int, local: bool = False) -> dict[str, Any]:
+        """A one-off request paid directly (``Substrate.payForService``): the
+        payment's receipt names this service's provider and covers ``price``,
+        it is younger than the replay horizon, its request id is new, and the
+        request is signed by the key that paid. ``{ok, payer}`` or
+        ``{ok: False, reason}``."""
+        from .on_chain import OnChainService
+        from .service_client import recover_request_signer
+
+        store = self.runtime.service_store
+        oc = OnChainService(self.runtime._config.rpb)
+        if not oc.available:
+            return {"ok": False, "reason": "this daemon has no chain configuration, "
+                                           "so it cannot verify payment"}
+        entry = await self._service_entry(record)
+        if entry.get("error"):
+            return {"ok": False, "reason": f"cannot read this service's listing: "
+                                           f"{entry['error']}"}
+        if not entry.get("active"):
+            return {"ok": False, "reason": "service retired on chain"}
+        recipient = str(entry.get("provider") or "")
+        tx_hash = str(request.get("tx_hash") or "").strip()
+        rid = str(request.get("request_id") or "").lower().removeprefix("0x")
+        if len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid):
+            return {"ok": False, "reason": "request_id must be 32 bytes of hex (64 hex digits)"}
+        request_id = "0x" + rid
+        inflight = self.__dict__.setdefault("_payments_in_flight", set())
+        if store.has_served_request(request_id) or rid in inflight:
+            return {"ok": False, "reason": f"request_id {request_id[:18]} already served (replay)"}
+        sig = str(request.get("payer_signature") or "").strip()
+        if not sig:
+            return {"ok": False, "reason": "unsigned request: a paid request must carry "
+                                           "the payer's signature (payer_signature)"}
+        try:
+            payer = recover_request_signer(
+                sig, request_id, str(request.get("spec_digest") or record.digest),
+                request.get("args") if isinstance(request.get("args"), dict) else {},
+                recipient)
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "reason": "payer_signature is malformed"}
+        inflight.add(rid)
+        try:
+            res = await self._offload(lambda: oc.verify_service_payment(
+                request_id=request_id, recipient=recipient, min_amount=int(price),
+                tx_hash=tx_hash, payer=payer))
+            if not res.get("verified"):
+                inflight.discard(rid)
+                return {"ok": False, "reason": res.get("reason", "unverified")}
+            from time import time as _now
+            paid_at = res.get("paid_at")
+            if (isinstance(paid_at, int) and paid_at > 0
+                    and _now() - paid_at > store.REPLAY_HORIZON_S):
+                inflight.discard(rid)
+                return {"ok": False, "reason": "the payment is older than the provider's "
+                                               "replay horizon (30 days); pay again"}
+        except BaseException:
+            inflight.discard(rid)
+            raise
+        # Held in flight until the request is answered: the request id is
+        # used up only when it is served (``_settle_direct``), so a request
+        # the tool fails can be sent again on the same payment.
+        return {"ok": True, "payer": str(payer).lower(), "request_id": request_id}
+
+    def _settle_direct(self, request_id: str, served: bool) -> None:
+        """A directly paid request was answered: used up when served, else
+        left unused so the buyer can send it again on the same payment (not
+        served = not paid)."""
+        rid = str(request_id).lower().removeprefix("0x")
+        if served:
+            self.runtime.service_store.mark_request_served("0x" + rid)
+        self.__dict__.setdefault("_payments_in_flight", set()).discard(rid)
+
+    async def _owner_credits(self, kind: str, msg: dict[str, Any]) -> dict[str, Any]:
+        """The owner surface's credits with providers, paid from the
+        operator (the household's buyer)."""
+        from .on_chain import ServiceMarketClient
+        from . import service_channels as sc
+        book = getattr(self.runtime, "channel_book", None)
+        smc = ServiceMarketClient(self.runtime._config.rpb)
+        key, payer = self._buyer_key(), self._buyer_address()
+        if book is None or not smc.channel_available:
+            return {"ok": False, "error": "PaymentChannel not configured on this daemon"}
+        if not key or not payer:
+            return {"ok": False, "error": "no operator key is held on this daemon"}
+        if kind == "list_credits":
+            rows = [{"provider": ch["provider"], **sc.credits_view(ch)}
+                    for ch in book.all_open() if str(ch.get("payer", "")).lower()
+                    == payer.lower()]
+            return {"ok": True, "result": {"credits": rows}}
+        provider = str(msg.get("provider_address") or msg.get("provider") or "").strip()
+        if not provider:
+            return {"ok": False, "error": "Missing 'provider_address'"}
+        try:
+            amount = int(str(msg.get("amount") or msg.get("deposit") or 0))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "amount must be ATN base units"}
+        if kind == "open_credits":
+            res = await self._offload(lambda: sc.open_credits(
+                book, smc, key, payer, provider, amount))
+        elif kind == "top_up_credits":
+            res = await self._offload(lambda: sc.top_up(
+                book, smc, key, payer, provider, amount))
+        else:
+            res = await self._offload(lambda: sc.close_credits(
+                book, smc, key, payer, provider))
+        if res.get("error"):
+            return {"ok": False, "error": res["error"], "result": res}
+        return {"ok": True, "result": res}
 
     async def _handle_register_on_chain(
         self,

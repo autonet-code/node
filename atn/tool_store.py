@@ -297,6 +297,7 @@ class ToolStore:
         tree_digest: str = "",
         source: dict[str, Any] | None = None,
         source_path: str = "",
+        session: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build, sign, store, and index a tool manifest. Returns
         ``{"digest", "manifest"}`` or raises ValueError on bad input.
@@ -322,7 +323,7 @@ class ToolStore:
         ``version_of`` must name a predecessor by the SAME author.
         """
         from nodes.common.library.tool_manifest import (
-            build_tool_manifest, normalize_novelty,
+            build_tool_manifest, normalize_novelty, normalize_session,
         )
 
         blobs = self._blob_store()
@@ -454,6 +455,8 @@ class ToolStore:
                     and (m.get("capabilities") or None) == (capabilities or None)
                     and m.get("version_of") == version_of
                     and (m.get("novelty") or None) == (novelty or None)
+                    and (m.get("session") or None) == (
+                        normalize_session(session) if session else None)
                     and m.get("input_schema") == input_schema):
                 if publish and not existing.published:
                     self.set_published(existing.digest, True)
@@ -489,6 +492,7 @@ class ToolStore:
             capabilities=capabilities,
             created_ts=int(time.time()),
             novelty=novelty,
+            session=session,
         )
         self._sign(author, manifest)
 
@@ -986,6 +990,7 @@ class ToolStore:
         caller_id: str | None = None,
         via: str = "",
         _depth: int = 0,
+        extra_env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Execute a registered tool. Scoping is the CALLER's job
         (``ToolRegistry.call_tool``) — this only dispatches.
@@ -1000,6 +1005,10 @@ class ToolStore:
         the secrets it declares (``_exec_spec``). Every execution path
         (agents, composite deps, service sales, evidence replay, core swaps)
         comes through here.
+
+        ``extra_env`` is set by the daemon itself, never by a tool: a
+        service passes its settings this way (``AUTONET_SERVICE_SETTINGS``,
+        atn/service_runner.py). Pinned tools only.
         """
         manifest = record.manifest
         if manifest.get("code_digest"):
@@ -1007,11 +1016,13 @@ class ToolStore:
             if deps:
                 # Interactive (composition) path — opt-in on declared deps.
                 result = await self._call_pinned_interactive(
-                    record, arguments, caller_id=caller_id, depth=_depth)
+                    record, arguments, caller_id=caller_id, depth=_depth,
+                    extra_env=extra_env)
             else:
                 # Sealed path — byte-for-byte legacy contract.
                 result = await self._call_pinned(
-                    record, arguments, caller_id=caller_id)
+                    record, arguments, caller_id=caller_id,
+                    extra_env=extra_env)
         elif manifest.get("connector_id"):
             result = await self._call_connector(record, arguments)
         else:
@@ -1020,6 +1031,67 @@ class ToolStore:
         self._record_receipt(record, arguments, caller_id,
                              ok="error" not in result, via=via)
         return result
+
+    async def start_server(
+        self, record: ToolRecord, *, extra_env: dict[str, str],
+        log_path: Path,
+    ) -> Any:
+        """Start a pinned tool as a long-running server, for a service that
+        buyers keep open (atn/service_runner.py): the same extracted code,
+        scrubbed environment and secret binding as ``call``, plus the
+        daemon's ``extra_env`` (the port to serve on, where to report usage,
+        the service's settings). stdout and stderr go to ``log_path``.
+
+        Returns ``(process, secret_session)``; stop it with ``stop_server``.
+        Raises ValueError when the tool has no code here."""
+        if not record.manifest.get("code_digest"):
+            raise ValueError(f"Tool {record.name!r} has no code to run as a server")
+        script, code_root = self._materialize_code(record)
+        session, services = self._tool_secret_session(record, None)
+        argv, env, cwd = self._exec_spec(record, script, services,
+                                         code_root=code_root,
+                                         extra_env=extra_env)
+        from . import contained_pids
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "ab")  # noqa: SIM115 - closed in stop_server
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdin=asyncio.subprocess.DEVNULL,
+                stdout=log_file, stderr=log_file, env=env, cwd=cwd)
+        except Exception:
+            log_file.close()
+            if session is not None:
+                session.release()
+            raise
+        contained_pids.register(proc.pid, f"{record.origin} service tool")
+        if session is not None:
+            session.bind(proc.pid)
+        proc._autonet_log = log_file  # type: ignore[attr-defined]
+        return proc, session
+
+    @staticmethod
+    async def stop_server(proc: Any, session: Any = None,
+                          grace_s: float = 5.0) -> None:
+        """Stop a server ``start_server`` started: terminate, then kill after
+        ``grace_s``. Releases its secret session and its log file."""
+        from . import contained_pids
+        try:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=grace_s)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+        except ProcessLookupError:
+            pass
+        finally:
+            contained_pids.unregister(proc.pid)
+            if session is not None:
+                session.release()
+            log_file = getattr(proc, "_autonet_log", None)
+            if log_file is not None:
+                log_file.close()
 
     def checkout(self, digest: str, dest: Path) -> dict[str, Any]:
         """Write a pinned tool's code into ``dest`` (new or empty), like a
@@ -1046,7 +1118,8 @@ class ToolStore:
                 return {"error": "tool code does not match its digest"}
             meta = {k: manifest[k] for k in (
                 "name", "description", "input_schema", "output_schema",
-                "capabilities", "dependencies", "novelty") if k in manifest}
+                "capabilities", "dependencies", "novelty", "session")
+                if k in manifest}
             meta["entrypoint"] = "main.py"
             files = {"main.py": raw,
                      tool_tree.MANIFEST_FILE: json.dumps(meta, indent=2).encode("utf-8")}
@@ -1107,6 +1180,7 @@ class ToolStore:
         self, record: ToolRecord, script: Path,
         secrets: frozenset[str] | None = None,
         code_root: Path | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[list[str], dict[str, str] | None, str | None]:
         """(argv, env, cwd) for a pinned tool subprocess.
 
@@ -1136,6 +1210,8 @@ class ToolStore:
         env = self._contained_env(caps, sandbox, secret_names)
         if code_root is not None:
             env["PYTHONPATH"] = str(code_root)
+        for name, value in (extra_env or {}).items():
+            env[str(name)] = str(value)
         cwd = str(sandbox) if record.origin == "adopted" else None
         return [sys.executable, str(script)], env, cwd
 
@@ -1204,7 +1280,9 @@ class ToolStore:
 
     async def _call_pinned(self, record: ToolRecord,
                            arguments: dict[str, Any],
-                           *, caller_id: str | None = None) -> dict[str, Any]:
+                           *, caller_id: str | None = None,
+                           extra_env: dict[str, str] | None = None,
+                           ) -> dict[str, Any]:
         """Run the pinned code blob as a subprocess: JSON args on stdin,
         JSON result on stdout. The blob is materialized to a cache file
         named by its digest, so what runs is exactly what was judged.
@@ -1219,7 +1297,8 @@ class ToolStore:
 
         session, services = self._tool_secret_session(record, caller_id)
         argv, env, cwd = self._exec_spec(record, script, services,
-                                         code_root=code_root)
+                                         code_root=code_root,
+                                         extra_env=extra_env)
         from . import contained_pids
         tracked_pid: int | None = None
         try:
@@ -1274,6 +1353,7 @@ class ToolStore:
         *,
         caller_id: str | None,
         depth: int,
+        extra_env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Composition sandbox (docs/tool_substrate.md — Composition).
 
@@ -1316,7 +1396,8 @@ class ToolStore:
         # dependency.
         session, services = self._tool_secret_session(record, caller_id)
         argv, env, cwd = self._exec_spec(record, script, services,
-                                         code_root=code_root)
+                                         code_root=code_root,
+                                         extra_env=extra_env)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,

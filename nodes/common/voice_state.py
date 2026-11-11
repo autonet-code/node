@@ -622,10 +622,11 @@ def read_tool_review_snapshot(
 
 
 # ---------------------------------------------------------------------------
-# Service snapshot (service reviews, Decision 2026-11-10): what a service
-# review needs from the chain to count, rebuilt from logs up to the SAME
-# snapshot block: the registered (provider, digest) pairs, the direct
-# payments, the closed payment channels, and the unscored axis default.
+# Service snapshot (service reviews, Decisions 2026-11-10 and 2026-11-12):
+# what a service review needs from the chain to count, rebuilt from logs up
+# to the SAME snapshot block: the registered (provider, digest) pairs, what
+# each payer paid each provider (Substrate ServicePayment, PaymentChannel
+# ChannelPaid), and the unscored axis default.
 # ---------------------------------------------------------------------------
 
 _SERVICE_EVENTS_ABI = {
@@ -636,12 +637,9 @@ _SERVICE_EVENTS_ABI = {
         ("payer", "address", True), ("recipient", "address", True),
         ("amount", "uint256", False), ("requestId", "bytes32", True)])],
     "channel": [
-        _ev("ChannelOpened", [("channelId", "uint256", True), ("client", "address", True),
-                              ("provider", "address", True), ("deposit", "uint256", False)]),
-        _ev("ChannelClosed", [("channelId", "uint256", True),
-                              ("paidToProvider", "uint256", False),
-                              ("remainderToClient", "uint256", False),
-                              ("closesAt", "uint256", False)])],
+        _ev("ChannelPaid", [("channelId", "uint256", True), ("client", "address", True),
+                            ("provider", "address", True), ("amount", "uint256", False),
+                            ("paidTotal", "uint256", False)])],
 }
 UNSCORED_AXIS_KEY = "jurisdiction.{jurisdiction}.unscored_axis_bps"
 
@@ -679,8 +677,7 @@ def read_service_snapshot(
         registered=logs(service_registry_address, "registry", "ServiceRegistered"),
         payments=(logs(substrate_address, "substrate", "ServicePayment")
                   if service_registry_address else []),
-        opened=logs(payment_channel_address, "channel", "ChannelOpened"),
-        closed=logs(payment_channel_address, "channel", "ChannelClosed"),
+        payouts=logs(payment_channel_address, "channel", "ChannelPaid"),
         unscored_bps=writes.get(UNSCORED_AXIS_KEY.format(jurisdiction=jurisdiction_id)),
         channel_address=payment_channel_address)
 
@@ -1422,7 +1419,7 @@ def read_voice_state(
     review_snapshot, service_snapshot} as of the previous epoch's anchor.
 
     ``service_snapshot`` (service reviews, Decision 2026-11-10): the
-    registered services, direct payments, closed channels and the unscored
+    registered services, direct payments, channel payouts and the unscored
     axis default as of the SAME snapshot block (``read_service_snapshot``);
     empty at genesis, so no service review counts before the first anchor.
 

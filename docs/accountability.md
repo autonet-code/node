@@ -30,7 +30,7 @@ An agent needs something at stake for punishment to mean anything.
 |-------------|-----------|--------|
 | Tools an agent authored | Reviews with a malware verdict; a settled verdict slashes the author's bond and burns REP ([tool_substrate.md](tool_substrate.md) Decision 2026-11-09) | Built |
 | Reviews an agent wrote | A wrong review costs reputation in proportion to how far off it was | Built |
-| Services an agent sold | Buyers hold signed receipts and set the price; no consensus verdict on remote execution, by design ([services_market.md](services_market.md)) | Built |
+| Services an agent sold | Buyers review the services they paid for (the payment on chain is the proof) and choose by price and ratings; no consensus verdict on remote execution, by design ([services_market.md](services_market.md)) | Built |
 | Governance votes and proposals | Never judged. Reputation is the member's to use; the DAO can vote to take it back | Nothing to build |
 
 ## Sanctions (built, 2026-10-20)

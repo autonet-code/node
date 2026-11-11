@@ -1,26 +1,16 @@
 # Services market: decentralized monetizable APIs
 
-Status: BUILT, beta on testnet. BUILT: the on-chain registry (register /
-update ask / retire), direct `payForService` settlement, the provider-side
-payment gate, the `service` consumer provider type, and receipt-gated
-reviews rated in the epoch-close (§4, Decision 2026-11-10 "service reviews
-in the epoch-close"). The voucher-per-call client flow is BUILT for agents'
-`request_service` (2026-10-28, #45: `atn/service_channels.py`, one channel
-per payer and provider; a voucher counts once the provider's signed reply
-says it kept the payment, or when the outcome is unknown; refunds swept
-after the window; the provider closes to collect, Decision 2026-11-10);
-the `service` inference provider pays the same way since 2026-11-10
-(Decision "the unit of work; metered on channels"); only the owner's
-`invoke_service` still pays each item up front with `payForService`.
-`ServiceRegistry` + `PaymentChannel`
-(`contracts/core/ServiceMarket.sol`) are deployed on the Autonet
-jurisdiction (Etherlink Shadownet; addresses in `registry.json` under
-`service_registry` / `payment_channel`) and exercised end to end by
-`scripts/local_e2e_tool_economy.py`. Ratified in discussion 2026-07-04,
-ATN-only settlement ratified 2026-07-10. Companion to
-`docs/tool_substrate.md` (which holds the Tools/Services line: tools =
-local, known, minted commons; services = remote counterparties,
-market-priced). This doc specifies the market rail.
+Status: BUILT on the `services-redesign` branch (Decision 2026-11-12
+below, which supersedes the parts of the earlier decisions it names).
+`ServiceRegistry` + `PaymentChannel` (`contracts/core/ServiceMarket.sol`)
+are the chain half; the daemon half is `atn/service_spec.py`,
+`atn/service_prices.py`, `atn/service_store.py`, `atn/service_publish.py`,
+`atn/service_catalog.py`, `atn/service_channels.py`,
+`atn/service_sessions.py` with `nodes/common/service_session.py`,
+`atn/service_runner.py`, `atn/channel_settlement.py` and the reviews in
+`nodes/common/service_reviews.py`. Companion to `docs/tool_substrate.md`
+(tools = local, known, minted commons; services = remote counterparties,
+market-priced).
 
 A Service is a remote API published by an agent (ultimately by its
 human benefactor): general-purpose, priced per work item, settled in
@@ -40,15 +30,100 @@ mint, NO decay math. The trust basis is purely behavioral:
 
 - identity: signed by the agent's 0x key (chain-verified)
 - payment: atomic; not served = not paid
-- track record: reviews signed by people who PAID (receipts with
-  skin in the game; success rate + volume + dispute rate displayed,
-  priced by buyers, not by consensus)
+- track record: reviews by people who PAID the provider on chain (skin in
+  the game; displayed, priced by buyers, not by consensus)
 
 Master-disable / fingerprinting is fleet hygiene for honest daemons,
 not a defense against dishonest ones. The defense is that lying has a
-wallet attached and receipts are forever.
+wallet attached and payments are on chain for good.
+
+## Decision (2026-11-12): a service is a tool sold by request or by session
+
+Ratified with the owner in discussion 2026-11-12, over a mockup of the
+registration form. Supersedes:
+the inference backing (Decision 2026-07-26), the unit of work as free
+text and the on-chain price (Decisions 2026-11-10 "the unit of work" and
+"the chain is the only reference for price"), the receipts as the proof
+behind reviews (Decision 2026-11-10 "service reviews"), and "stream" as
+the name of what is now a session.
+
+1. **Every service is backed by a tool** registered on the provider's
+   daemon. It can stay unpublished, so its code never leaves the machine.
+   The service spec is a separate document from the tool's manifest: it
+   says how the tool is sold, not what it is, so a changed listing never
+   changes the tool's digest, and one tool can back several services. In
+   a codebase the specs live in `autonet-services/<name>.json`, which the
+   tool's snapshot always leaves out.
+2. **Two ways to use a service** (`mode`). `request`: each request gets
+   one reply; the tool runs once per request; priced per request.
+   `session`: the buyer keeps a two-way connection open and speaks the
+   protocol the tool serves; the tool's manifest declares it in a
+   `session` block (the protocol's name, version and published
+   specification pinned by sha256, a cap on sessions at once, one process
+   shared by all sessions or one per session, and which token counts it
+   reports). A session is priced per measure: seconds open, gigabytes
+   transferred, input tokens, output tokens, each per a quantity the spec
+   names. What a buyer sends is the tool's input schema (a request
+   service) or the protocol's specification (a session service).
+3. **Quality, not quantity, makes a different service.** A different model
+   is another service, set apart by `settings` (public in the spec,
+   passed to the tool as `AUTONET_SERVICE_SETTINGS`). How much a buyer
+   gets is the voucher size, which the provider sets.
+4. **Prices are off chain.** The provider signs a price list per service
+   (`atn/service_prices.py`) and gossips it with the spec; search shows
+   it. A new list replaces the old by sequence number: no transaction, no
+   new spec. A session holds the prices quoted when it opened. The
+   registry's `askAmount` stays as an optional price nothing enforces:
+   buyers make up their own minds. Input and output tokens are priced
+   separately because the mix varies too much between uses for one
+   average price.
+5. **The daemon serves without cognition.** Once a service is published
+   its daemon runs the tool (`atn/service_runner.py`: the port in
+   `AUTONET_SERVICE_PORT`, usage posted to `AUTONET_USAGE_URL`), restarts
+   it when it dies, refuses buyers before payment when it is down or full,
+   and serves anyone whose payment checks out. The service lives in the
+   daemon (network, payments, cut-off); the tool only does the work. A
+   tool priced in tokens reports each connection's counts after each
+   reply, and the daemon cuts the connection when the credits do not cover
+   them; at most one reply overshoots, which the provider prices in.
+   Failures are recorded for later notifications to the Agent or owner;
+   nothing notifies yet. Search shows no liveness: a refused buyer pays
+   nothing and tries the next provider.
+6. **Credits per provider.** A buyer's credits with a provider are one
+   payment channel for all its services, like API credits. The Agent
+   opens them with a deposit and tops them up itself (`open_credits`,
+   `top_up_credits`); nothing does either automatically. Vouchers pay
+   ahead by the provider's voucher size, so a buyer never has more than
+   one voucher at risk; the provider serves while what it served stays
+   within the running total, and a request it refuses or fails costs
+   nothing. A one-off request to a provider the buyer holds no credits
+   with is paid directly (one `payForService` transaction).
+7. **The contract pays out without closing.** `PaymentChannel.settle`
+   cashes in the running total and leaves the channel open; `topUp` adds
+   to it. The provider's daemon settles automatically (a threshold, at
+   least daily, and when the buyer starts closing, which keeps the buyer's
+   refund deadline). Every payout emits `ChannelPaid`, so fees burn as the
+   provider earns and the payment is on chain for reviews.
+8. **Reviews need a payment to the provider, not a receipt.** A review
+   names its service; it counts once the reviewer has paid that provider
+   on chain (a direct payment, or a payout from its channel), whichever of
+   the provider's services it used. Nothing proves the reviewer used that
+   service rather than another of the provider's, but it costs a real
+   payment to that provider either way. The signed receipts are gone;
+   replies stay signed by the provider (`reply_sig`) so a relay cannot
+   make one up.
+9. **Removed:** the inference backing (an LLM service is a session to a
+   tool speaking an OpenAI-compatible protocol, or a request service),
+   "model provider", the per-reply token cap, the hardware field, the
+   free-text unit, the endpoint hint, the `pay_for_service` and
+   `close_service_channel` commands and the buyer-side quote check (a
+   dishonest provider can overcount instead; the buyer notices what it
+   pays against what it gets, and reviews).
 
 ## Decision (2026-11-10): service reviews in the epoch-close
+
+(The receipts below are superseded by Decision 2026-11-12, item 8: a
+review counts once its reviewer has paid the provider on chain.)
 
 A buyer rates a service it paid for, and other buyers read the rating
 before they buy. Decided by the owner; built in
@@ -173,6 +248,9 @@ before they buy. Decided by the owner; built in
 
 ## Decision (2026-11-10): a stream between buyer and seller
 
+(Renamed a session and re-based on credits by Decision 2026-11-12: the
+tool behind the service names the protocol, and the daemon runs it.)
+
 A service call was one request and one reply. Services also need a two-way
 stream between the buyer's and the seller's daemons: inference streaming,
 a video call, anything. Decided by the owner:
@@ -263,6 +341,9 @@ a video call, anything. Decided by the owner:
 
 ## Decision (2026-11-10): the unit of work; metered on channels
 
+(Superseded by Decision 2026-11-12, items 2 to 4 and 6: measures with
+quantities, prices in a signed list, credits per provider.)
+
 Decided by the owner.
 
 - **Holding ATN is the household's credit** in the jurisdiction's service
@@ -306,11 +387,15 @@ Decided by the owner.
   adds nothing are refused; a failed call costs nothing through the
   provider or through the agent tool on the same channel; the seller
   collects once the deposit no longer covers the price; the buyer takes
-  the remainder back) and `scripts/local_e2e_cross_daemon_inference.py` (a
+  the remainder back) and `scripts/local_e2e_cross_daemon_inference.py` (retired 2026-11-12; a
   real agent turn paid with a voucher from the child's wallet, both books
   equal, the provider's kept voucher collected on chain net of the fee).
 
 ## Decision (2026-11-10): not served = not paid, signed replies, providers collect
+
+(Receipts and the voucher per request are superseded by Decision
+2026-11-12: vouchers pay ahead, a failed request's charge is taken back,
+providers settle without closing.)
 
 An audit of the whole rail (2026-11-10) found the payment and delivery
 paths broke the principles above in ways each piece hid. Fixed:
@@ -375,7 +460,7 @@ paths broke the principles above in ways each piece hid. Fixed:
   pool (16).
 - Proven by `scripts/local_e2e_service_provider.py` (a failed dispatch is
   not charged, the provider's own close, the buyer's refund) and
-  `scripts/local_e2e_cross_daemon_inference.py` (a paid turn accepted
+  `scripts/local_e2e_cross_daemon_inference.py` (retired 2026-11-12; a paid turn accepted
   through the provider's signed reply).
 
 ## Decision (2026-11-10): services are published and found the way tools are
@@ -416,6 +501,10 @@ for them (the indexer's `services` mirror is unused).
   catalog and read it fresh from the chain.
 
 ## Decision (2026-11-10): the chain is the only reference for price, status and payee
+
+(The price is superseded by Decision 2026-11-12, item 4: the chain keeps
+status and payee; prices are the provider's signed list, with an optional
+unenforced registry price.)
 
 A service's price, whether it is active and the address paid are read
 from its `ServiceRegistry` entry and nowhere else. The spec carries none
@@ -460,6 +549,9 @@ does not re-validate). The `receipt.token` wire key is KEPT and pinned to
 the constant `"ATN"` so the Flutter Services page parses unchanged.
 
 ## Decision (2026-07-26): LLM inference as a marketplace service
+
+(Superseded by Decision 2026-11-12, item 9: no inference backing; an LLM
+service is a tool sold by session or by request.)
 
 Ratified in discussion 2026-07-26. Inference joins the marketplace as an
 ordinary service, and a service can back an agent's PROVIDER, closing
@@ -625,21 +717,30 @@ sha256-addressed JSON, same rail as tool manifests:
 ```json
 {
   "kind": "service_spec",
-  "name": "transcribe_audio",
-  "description": "Speech-to-text, per audio minute.",
-  "input_schema": { ... },          // work-item request shape
-  "output_schema": { ... },
+  "name": "llama_70b_chat",
+  "description": "Chat completions from Llama 3.1 70B Instruct.",
+  "mode": "session",                          // or "request"
+  "settings": {"model": "llama3.1:70b-instruct-q4_K_M"},
+  "measures": [{"measure": "input_tokens", "quantity": 1000000},
+               {"measure": "output_tokens", "quantity": 1000000}],
+  "protocol": {"id": "openai-chat/1", "spec": "<sha256>",
+               "spec_url": "https://..."},   // copied from the tool's manifest
+  "input_schema": { ... },                    // the opening arguments, or a request's
   "author": "<agent-id>",
-  "unit": "one transcribed audio minute",  // required: what one work item is (the price is on chain)
-  "hardware": "one RTX 5090, 32 GB",       // optional: what a compute service runs on
-  "author_pubkey": "0x...",         // the spec's signer; the payee is the registry entry's provider
-  "author_sig": "...",              // over canonical bytes, sig excluded
-  "endpoint_hint": "wss://...",     // mutable presence lives on-chain, this is advisory
-  "image_uri": "https://...jpg",    // display-plane only: listing-card banner, advisory, not embedded
-  "protocol": {"id": "openai-chat/1", "description": "..."},  // optional: a stream service (Decision 2026-11-10)
+  "author_pubkey": "0x...",                   // the spec's signer and payee
+  "author_sig": "...",
+  "image_uri": "https://...jpg",
   "version_of": null,
   "created_ts": 0
 }
+```
+
+The price list beside it (signed by the provider, gossiped with the spec):
+
+```json
+{"kind": "service_prices", "service": "<spec digest>", "provider": "0x...",
+ "prices": {"input_tokens": 100000, "output_tokens": 400000},
+ "voucher": 500000, "seq": 3, "ts": 0, "sig": "..."}
 ```
 
 ### 2. Chain: ONE registry, not per-service contracts

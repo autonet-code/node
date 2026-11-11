@@ -1,73 +1,73 @@
-01:15:40 mesh-gw-a: nat up on eth0 (public 172.31.0.2, LAN 10.31.1.2)
-01:15:48 mesh-gw-b: nat up on eth0 (public 172.31.0.3, LAN 10.31.2.2)
-01:15:53 relay 12D3KooWMfcadq21GLQ5... on 172.31.0.10 (tcp 4002, ws 4001)
-01:15:54 nat-a1: nat on mesh-lan-a 10.31.1.11 via 10.31.1.2
-01:15:55 nat-a2: nat on mesh-lan-a 10.31.1.12 via 10.31.1.2
-01:15:55 nat-b1: nat on mesh-lan-b 10.31.2.11 via 10.31.2.2
-01:15:56 nat-b2: nat on mesh-lan-b 10.31.2.12 via 10.31.2.2
-01:15:57 pub-p: public on mesh-pub 172.31.0.20
-01:15:57 proxied-h: proxied on mesh-lan-p 10.31.3.11
-01:16:02 PASS isolation: pub-p -> 10.31.1.11:4002 blocked TimeoutError
-01:16:06 PASS isolation: pub-p -> 10.31.2.11:4002 blocked TimeoutError
-01:16:10 PASS isolation: nat-a1 -> 10.31.2.11:4002 blocked TimeoutError
-01:16:10 PASS isolation: proxied-h -> 172.31.0.10:4002 blocked OSError
-01:16:11 PASS isolation: proxied-h -> 172.31.0.20:4002 blocked OSError
-01:16:11 PASS isolation: nat-a1 -> relay 172.31.0.10:4002 through its NAT open
-01:16:11 (a) waiting for the mesh: direct links, NAT'd to NAT'd by hole punching
-01:16:48   nat-a1 [tcp+ws, dht server/6, reservations 1]: nat-a2=direct@10.31.1.12:56878+direct@10.31.1.12:44346  nat-b1=relayed@172.31.0.10:4002+direct@172.31.0.3:4002  nat-b2=relayed@172.31.0.10:4002+direct@172.31.0.3:4012  pub-p=relayed@172.31.0.10:4002+direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=relayed@172.31.0.10:4002
-01:16:48   nat-a2 [tcp+ws, dht server/6, reservations 1]: nat-a1=direct@10.31.1.11:4002+direct@10.31.1.11:4001  nat-b1=relayed@172.31.0.10:4002+direct@172.31.0.3:4002  nat-b2=relayed@172.31.0.10:4002+direct@172.31.0.3:4012  pub-p=relayed@172.31.0.10:4002+direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=relayed@172.31.0.10:4002
-01:16:48   nat-b1 [tcp+ws, dht server/6, reservations 1]: nat-a1=relayed@172.31.0.10:4002+direct@172.31.0.2:4002  nat-a2=relayed@172.31.0.10:4002+direct@172.31.0.2:4012  nat-b2=direct@10.31.2.12:33236+direct@10.31.2.12:46990  pub-p=relayed@172.31.0.10:4002+direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=relayed@172.31.0.10:4002
-01:16:48   nat-b2 [tcp+ws, dht server/6, reservations 1]: nat-a1=relayed@172.31.0.10:4002+direct@172.31.0.2:4002  nat-a2=relayed@172.31.0.10:4002+direct@172.31.0.2:4012  nat-b1=direct@10.31.2.11:4002+direct@10.31.2.11:4001  pub-p=relayed@172.31.0.10:4002+direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=relayed@172.31.0.10:4002
-01:16:48   pub-p [tcp+ws, dht server/6, reservations 1]: nat-a1=relayed@172.31.0.10:4002+direct@172.31.0.2:4002+direct@172.31.0.2:32838  nat-a2=relayed@172.31.0.10:4002+direct@172.31.0.2:42220+direct@172.31.0.2:54652  nat-b1=relayed@172.31.0.10:4002+direct@172.31.0.3:60710+direct@172.31.0.3:56876  nat-b2=relayed@172.31.0.10:4002+direct@172.31.0.3:54176+direct@172.31.0.3:46274  proxied-h=relayed@172.31.0.10:4002
-01:16:48   proxied-h [ws, dht server/6, reservations 1]: nat-a1=relayed@10.31.3.2:3128  nat-a2=relayed@10.31.3.2:3128  nat-b1=relayed@10.31.3.2:3128  nat-b2=relayed@10.31.3.2:3128  pub-p=relayed@10.31.3.2:3128
-01:16:48 PASS (a) nat-a1 <-> nat-a2 direct, same LAN: direct@10.31.1.12:56878, direct@10.31.1.12:44346
-01:16:48 PASS (a) nat-a1 <-> nat-b1 direct, across NATs (172.31.0.2 <-> 172.31.0.3): relayed@172.31.0.10:4002, direct@172.31.0.3:4002
-01:16:48 PASS (a) nat-a1 <-> nat-b2 direct, across NATs (172.31.0.2 <-> 172.31.0.3): relayed@172.31.0.10:4002, direct@172.31.0.3:4012
-01:16:48 PASS (a) nat-a2 <-> nat-b1 direct, across NATs (172.31.0.2 <-> 172.31.0.3): relayed@172.31.0.10:4002, direct@172.31.0.3:4002
-01:16:48 PASS (a) nat-a2 <-> nat-b2 direct, across NATs (172.31.0.2 <-> 172.31.0.3): relayed@172.31.0.10:4002, direct@172.31.0.3:4012
-01:16:48 PASS (a) nat-b1 <-> nat-b2 direct, same LAN: direct@10.31.2.12:33236, direct@10.31.2.12:46990
-01:16:48 PASS (a) no link between the LANs uses a private address: none
-01:16:48 PASS (a) nat-a1 <-> pub-p direct: relayed@172.31.0.10:4002, direct@172.31.0.20:4002, direct@172.31.0.20:4001
-01:16:48 PASS (a) nat-a2 <-> pub-p direct: relayed@172.31.0.10:4002, direct@172.31.0.20:4002, direct@172.31.0.20:4001
-01:16:48 PASS (a) nat-b1 <-> pub-p direct: relayed@172.31.0.10:4002, direct@172.31.0.20:4002, direct@172.31.0.20:4001
-01:16:48 PASS (a) nat-b2 <-> pub-p direct: relayed@172.31.0.10:4002, direct@172.31.0.20:4002, direct@172.31.0.20:4001
-01:16:48 PASS (a) proxied-h reaches daemons through relay circuits: nat-a1=relayed, nat-a2=relayed, nat-b1=relayed, nat-b2=relayed, pub-p=relayed
-01:16:48 (f) service streams: hole-punched NAT'd to NAT'd, and through a relay circuit
-01:16:49 PASS (f) nat-a1 -> nat-b1 stream, 2 MiB each way, path direct, remote ['172.31.0.10', '172.31.0.3'], 0.0s 
-01:16:50 PASS (f) nat-a1 -> proxied-h stream through the relay, 8 MiB each way, path relayed, 0.6s 
-01:16:50 (b) nat-b1 publishes a tool: provide manifest + code, then gossip the registration
-01:16:50   nat-b1 manifest f89da38647d2c468 code 71610399de196191 provider records placed: 2
-01:16:52 PASS (b) nat-a1 found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['relayed', 'direct'] in [0.0, 0.0] s
-01:16:52 PASS (b) nat-a2 found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['relayed', 'direct'] in [0.0, 0.0] s
-01:16:52 PASS (b) nat-b2 found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['direct', 'direct'] in [0.0, 0.0] s
-01:16:52 PASS (b) pub-p found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['relayed', 'direct', 'direct'] in [0.0, 0.0] s
-01:16:52 PASS (d) proxied-h found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['relayed'] in [0.1, 0.0] s
-01:16:52 (d) the proxied daemon publishes a tool and gossips; it can only leave through the relay
-01:16:53   proxied-h provider records placed: 2
-01:16:56 PASS (d) nat-a1 fetched proxied-h's tool via the DHT over ['relayed']
-01:16:56 PASS (d) nat-a2 fetched proxied-h's tool via the DHT over ['relayed']
-01:16:56 PASS (d) nat-b1 fetched proxied-h's tool via the DHT over ['relayed']
-01:16:56 PASS (d) nat-b2 fetched proxied-h's tool via the DHT over ['relayed']
-01:16:56 PASS (d) pub-p fetched proxied-h's tool via the DHT over ['relayed']
-01:17:04 PASS (d) proxied-h received nat-a1's gossip
-01:17:04   proxy allowed ['172.31.0.10:4001'], denied ['10.31.1.11:4001', '10.31.1.12:4011', '10.31.2.11:4001', '10.31.2.12:4011', '172.31.0.20:4001']
-01:17:04 (c) stopping the relay: every daemon's links to the others must hold
-01:18:21   nat-a1 [tcp+ws, dht server/5, reservations 0]: nat-a2=direct@10.31.1.12:56878+direct@10.31.1.12:44346  nat-b1=direct@172.31.0.3:4002  nat-b2=direct@172.31.0.3:4012  pub-p=direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=none
-01:18:21   nat-a2 [tcp+ws, dht server/5, reservations 0]: nat-a1=direct@10.31.1.11:4002+direct@10.31.1.11:4001  nat-b1=direct@172.31.0.3:4002  nat-b2=direct@172.31.0.3:4012  pub-p=direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=none
-01:18:21   nat-b1 [tcp+ws, dht server/5, reservations 0]: nat-a1=direct@172.31.0.2:4002  nat-a2=direct@172.31.0.2:4012  nat-b2=direct@10.31.2.12:33236+direct@10.31.2.12:46990  pub-p=direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=none
-01:18:21   nat-b2 [tcp+ws, dht server/5, reservations 0]: nat-a1=direct@172.31.0.2:4002  nat-a2=direct@172.31.0.2:4012  nat-b1=direct@10.31.2.11:4002+direct@10.31.2.11:4001  pub-p=direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=none
-01:18:21   pub-p [tcp+ws, dht server/4, reservations 0]: nat-a1=direct@172.31.0.2:4002+direct@172.31.0.2:32838  nat-a2=direct@172.31.0.2:42220+direct@172.31.0.2:54652  nat-b1=direct@172.31.0.3:60710+direct@172.31.0.3:56876  nat-b2=direct@172.31.0.3:54176+direct@172.31.0.3:46274  proxied-h=none
-01:18:21   proxied-h [ws, dht client/0, reservations 0]: nat-a1=none  nat-a2=none  nat-b1=none  nat-b2=none  pub-p=none
-01:18:23 PASS (c) nat-a2 received nat-a1's gossip with the relay down
-01:18:23 PASS (c) nat-b1 received nat-a1's gossip with the relay down
-01:18:23 PASS (c) nat-b2 received nat-a1's gossip with the relay down
-01:18:23 PASS (c) pub-p received nat-a1's gossip with the relay down
-01:18:24   proxied-h received it: False (expected False: the relay is its only way in)
-01:18:44   nat-a2 published tool-a2-no-relay, provider records placed: 0
-01:18:46 PASS (c) nat-b1 found tool-a2-no-relay in the DHT and fetched it over ['direct']
-01:18:46 PASS (c) nat-b2 found tool-a2-no-relay in the DHT and fetched it over ['direct']
-01:18:46 PASS (c) pub-p found tool-a2-no-relay in the DHT and fetched it over ['direct', 'direct']
-01:18:46 PASS (c) nat-a1 found tool-a2-no-relay in the DHT and fetched it over ['direct', 'direct']
-01:18:46 (e) restarting nat-b1 with its only seed (the relay) down
-01:18:51 PASS (e) nat-b1 rejoined through its peer cache (6 cached): connected to ['pub-p', 'nat-b2']
-01:18:56 40/40 checks passed in 3.4 min; logs in D:\autonet_mesh\run-20261111-011529
+16:49:24 mesh-gw-a: nat up on eth0 (public 172.31.0.2, LAN 10.31.1.2)
+16:49:33 mesh-gw-b: nat up on eth0 (public 172.31.0.3, LAN 10.31.2.2)
+16:49:37 relay 12D3KooWJYtZVqcLnsXq... on 172.31.0.10 (tcp 4002, ws 4001)
+16:49:38 nat-a1: nat on mesh-lan-a 10.31.1.11 via 10.31.1.2
+16:49:39 nat-a2: nat on mesh-lan-a 10.31.1.12 via 10.31.1.2
+16:49:39 nat-b1: nat on mesh-lan-b 10.31.2.11 via 10.31.2.2
+16:49:40 nat-b2: nat on mesh-lan-b 10.31.2.12 via 10.31.2.2
+16:49:41 pub-p: public on mesh-pub 172.31.0.20
+16:49:41 proxied-h: proxied on mesh-lan-p 10.31.3.11
+16:49:45 PASS isolation: pub-p -> 10.31.1.11:4002 blocked TimeoutError
+16:49:49 PASS isolation: pub-p -> 10.31.2.11:4002 blocked TimeoutError
+16:49:53 PASS isolation: nat-a1 -> 10.31.2.11:4002 blocked TimeoutError
+16:49:54 PASS isolation: proxied-h -> 172.31.0.10:4002 blocked OSError
+16:49:54 PASS isolation: proxied-h -> 172.31.0.20:4002 blocked OSError
+16:49:54 PASS isolation: nat-a1 -> relay 172.31.0.10:4002 through its NAT open
+16:49:54 (a) waiting for the mesh: direct links, NAT'd to NAT'd by hole punching
+16:50:32   nat-a1 [tcp+ws, dht server/6, reservations 1]: nat-a2=direct@10.31.1.12:36968+direct@10.31.1.12:34614  nat-b1=relayed@172.31.0.10:4002+direct@172.31.0.3:4002  nat-b2=relayed@172.31.0.10:4002+direct@172.31.0.3:4012  pub-p=relayed@172.31.0.10:4002+direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=relayed@172.31.0.10:4002
+16:50:32   nat-a2 [tcp+ws, dht server/6, reservations 1]: nat-a1=direct@10.31.1.11:4002+direct@10.31.1.11:4001  nat-b1=relayed@172.31.0.10:4002+direct@172.31.0.3:4002  nat-b2=relayed@172.31.0.10:4002+direct@172.31.0.3:4012  pub-p=relayed@172.31.0.10:4002+direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=relayed@172.31.0.10:4002
+16:50:32   nat-b1 [tcp+ws, dht server/6, reservations 1]: nat-a1=relayed@172.31.0.10:4002+direct@172.31.0.2:4002  nat-a2=relayed@172.31.0.10:4002+direct@172.31.0.2:4012  nat-b2=direct@10.31.2.12:45960+direct@10.31.2.12:50362  pub-p=relayed@172.31.0.10:4002+direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=relayed@172.31.0.10:4002
+16:50:32   nat-b2 [tcp+ws, dht server/6, reservations 1]: nat-a1=relayed@172.31.0.10:4002+direct@172.31.0.2:4002  nat-a2=relayed@172.31.0.10:4002+direct@172.31.0.2:4012  nat-b1=direct@10.31.2.11:4002+direct@10.31.2.11:4001  pub-p=relayed@172.31.0.10:4002+direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=relayed@172.31.0.10:4002
+16:50:32   pub-p [tcp+ws, dht server/6, reservations 1]: nat-a1=relayed@172.31.0.10:4002+direct@172.31.0.2:51016+direct@172.31.0.2:59662  nat-a2=relayed@172.31.0.10:4002+direct@172.31.0.2:4012+direct@172.31.0.2:50180  nat-b1=relayed@172.31.0.10:4002+direct@172.31.0.3:59632+direct@172.31.0.3:35952  nat-b2=relayed@172.31.0.10:4002+direct@172.31.0.3:46168+direct@172.31.0.3:57132  proxied-h=relayed@172.31.0.10:4002
+16:50:32   proxied-h [ws, dht server/6, reservations 1]: nat-a1=relayed@10.31.3.2:3128  nat-a2=relayed@10.31.3.2:3128  nat-b1=relayed@10.31.3.2:3128  nat-b2=relayed@10.31.3.2:3128  pub-p=relayed@10.31.3.2:3128
+16:50:32 PASS (a) nat-a1 <-> nat-a2 direct, same LAN: direct@10.31.1.12:36968, direct@10.31.1.12:34614
+16:50:32 PASS (a) nat-a1 <-> nat-b1 direct, across NATs (172.31.0.2 <-> 172.31.0.3): relayed@172.31.0.10:4002, direct@172.31.0.3:4002
+16:50:32 PASS (a) nat-a1 <-> nat-b2 direct, across NATs (172.31.0.2 <-> 172.31.0.3): relayed@172.31.0.10:4002, direct@172.31.0.3:4012
+16:50:32 PASS (a) nat-a2 <-> nat-b1 direct, across NATs (172.31.0.2 <-> 172.31.0.3): relayed@172.31.0.10:4002, direct@172.31.0.3:4002
+16:50:32 PASS (a) nat-a2 <-> nat-b2 direct, across NATs (172.31.0.2 <-> 172.31.0.3): relayed@172.31.0.10:4002, direct@172.31.0.3:4012
+16:50:32 PASS (a) nat-b1 <-> nat-b2 direct, same LAN: direct@10.31.2.12:45960, direct@10.31.2.12:50362
+16:50:32 PASS (a) no link between the LANs uses a private address: none
+16:50:32 PASS (a) nat-a1 <-> pub-p direct: relayed@172.31.0.10:4002, direct@172.31.0.20:4002, direct@172.31.0.20:4001
+16:50:32 PASS (a) nat-a2 <-> pub-p direct: relayed@172.31.0.10:4002, direct@172.31.0.20:4002, direct@172.31.0.20:4001
+16:50:32 PASS (a) nat-b1 <-> pub-p direct: relayed@172.31.0.10:4002, direct@172.31.0.20:4002, direct@172.31.0.20:4001
+16:50:32 PASS (a) nat-b2 <-> pub-p direct: relayed@172.31.0.10:4002, direct@172.31.0.20:4002, direct@172.31.0.20:4001
+16:50:32 PASS (a) proxied-h reaches daemons through relay circuits: nat-a1=relayed, nat-a2=relayed, nat-b1=relayed, nat-b2=relayed, pub-p=relayed
+16:50:32 (f) service sessions: hole-punched NAT'd to NAT'd, and through a relay circuit
+16:50:32 PASS (f) nat-a1 -> nat-b1 session, 2 MiB each way, path direct, remote ['172.31.0.10', '172.31.0.3'], 0.0s 
+16:50:34 PASS (f) nat-a1 -> proxied-h session through the relay, 8 MiB each way, path relayed, 1.1s 
+16:50:34 (b) nat-b1 publishes a tool: provide manifest + code, then gossip the registration
+16:50:34   nat-b1 manifest 5b8038bb5938e167 code c583b564016ee68c provider records placed: 2
+16:50:37 PASS (b) nat-a1 found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['relayed', 'direct'] in [0.0, 0.0] s
+16:50:37 PASS (b) nat-a2 found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['relayed', 'direct'] in [0.0, 0.0] s
+16:50:37 PASS (b) nat-b2 found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['direct', 'direct'] in [0.0, 0.0] s
+16:50:37 PASS (b) pub-p found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['relayed', 'direct', 'direct'] in [0.0, 0.0] s
+16:50:37 PASS (d) proxied-h found tool-b1 via the DHT and fetched it: providers found in the DHT: 1 (nat-b1 among them: True); fetched over ['relayed'] in [0.1, 0.0] s
+16:50:37 (d) the proxied daemon publishes a tool and gossips; it can only leave through the relay
+16:50:38   proxied-h provider records placed: 2
+16:50:48 PASS (d) nat-a1 fetched proxied-h's tool via the DHT over ['relayed']
+16:50:48 PASS (d) nat-a2 fetched proxied-h's tool via the DHT over ['relayed']
+16:50:48 PASS (d) nat-b1 fetched proxied-h's tool via the DHT over ['relayed']
+16:50:48 PASS (d) nat-b2 fetched proxied-h's tool via the DHT over ['relayed']
+16:50:48 PASS (d) pub-p fetched proxied-h's tool via the DHT over ['relayed']
+16:50:56 PASS (d) proxied-h received nat-a1's gossip
+16:50:56   proxy allowed ['172.31.0.10:4001'], denied ['10.31.1.11:4001', '10.31.1.12:4011', '10.31.2.11:4001', '10.31.2.12:4011', '172.31.0.20:4001']
+16:50:56 (c) stopping the relay: every daemon's links to the others must hold
+16:52:13   nat-a1 [tcp+ws, dht server/5, reservations 0]: nat-a2=direct@10.31.1.12:36968+direct@10.31.1.12:34614  nat-b1=direct@172.31.0.3:4002  nat-b2=direct@172.31.0.3:4012  pub-p=direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=none
+16:52:13   nat-a2 [tcp+ws, dht server/5, reservations 0]: nat-a1=direct@10.31.1.11:4002+direct@10.31.1.11:4001  nat-b1=direct@172.31.0.3:4002  nat-b2=direct@172.31.0.3:4012  pub-p=direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=none
+16:52:13   nat-b1 [tcp+ws, dht server/5, reservations 0]: nat-a1=direct@172.31.0.2:4002  nat-a2=direct@172.31.0.2:4012  nat-b2=direct@10.31.2.12:45960+direct@10.31.2.12:50362  pub-p=direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=none
+16:52:13   nat-b2 [tcp+ws, dht server/5, reservations 0]: nat-a1=direct@172.31.0.2:4002  nat-a2=direct@172.31.0.2:4012  nat-b1=direct@10.31.2.11:4002+direct@10.31.2.11:4001  pub-p=direct@172.31.0.20:4002+direct@172.31.0.20:4001  proxied-h=none
+16:52:13   pub-p [tcp+ws, dht server/5, reservations 0]: nat-a1=direct@172.31.0.2:51016+direct@172.31.0.2:59662  nat-a2=direct@172.31.0.2:4012+direct@172.31.0.2:50180  nat-b1=direct@172.31.0.3:59632+direct@172.31.0.3:35952  nat-b2=direct@172.31.0.3:46168+direct@172.31.0.3:57132  proxied-h=none
+16:52:13   proxied-h [ws, dht client/0, reservations 0]: nat-a1=none  nat-a2=none  nat-b1=none  nat-b2=none  pub-p=none
+16:52:15 PASS (c) nat-a2 received nat-a1's gossip with the relay down
+16:52:15 PASS (c) nat-b1 received nat-a1's gossip with the relay down
+16:52:15 PASS (c) nat-b2 received nat-a1's gossip with the relay down
+16:52:16 PASS (c) pub-p received nat-a1's gossip with the relay down
+16:52:16   proxied-h received it: False (expected False: the relay is its only way in)
+16:52:35   nat-a2 published tool-a2-no-relay, provider records placed: 0
+16:52:37 PASS (c) nat-b1 found tool-a2-no-relay in the DHT and fetched it over ['direct']
+16:52:37 PASS (c) nat-b2 found tool-a2-no-relay in the DHT and fetched it over ['direct']
+16:52:37 PASS (c) pub-p found tool-a2-no-relay in the DHT and fetched it over ['direct', 'direct']
+16:52:37 PASS (c) nat-a1 found tool-a2-no-relay in the DHT and fetched it over ['direct', 'direct']
+16:52:37 (e) restarting nat-b1 with its only seed (the relay) down
+16:52:43 PASS (e) nat-b1 rejoined through its peer cache (6 cached): connected to ['pub-p', 'nat-b2']
+16:52:47 40/40 checks passed in 3.5 min; logs in D:\autonet_mesh\run-20261111-164914

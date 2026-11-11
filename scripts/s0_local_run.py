@@ -725,15 +725,21 @@ class Activity:
             return ss[1]
         return ss[0]
 
-    def report_mint(self) -> None:
+    def report_mint(self) -> bool:
         """What the review mint did: claims against the cumulative pool,
-        and the bounty paid out per round."""
+        and the bounty paid out per round. False when the run burned no
+        fees (the payments that fund the pool all failed)."""
         w3 = self.w3
+        burned = True
         try:
             minted = int(self.sub.functions.networkMintTotal().call())
             pool = int(self.sub.functions.mintPoolTotal().call())
             log(f"MINT: claimed {minted / 1e6:.6f} ATN of a cumulative pool of "
                 f"{pool / 1e6:.6f}")
+            if pool == 0:
+                burned = False
+                log("FAIL: no service fee was burned during the run, so the pool "
+                    "stayed empty: the payments failed (see pay_for_service above)")
             for i in range(int(self.sub.functions.anchorCount().call())):
                 a = self.sub.functions.getAnchor(i).call()
                 own, got = int(a[11]), int(a[12])   # mintPool, minted
@@ -753,6 +759,7 @@ class Activity:
                 f"ATN paid, {'?' if left is None else left / 1e6} ATN left")
         except Exception as exc:  # noqa: BLE001
             log(f"BOUNTY: read failed: {exc}")
+        return burned
 
     def add_bounty(self) -> None:
         """h1's owner puts a bounty on h1's first published tool (ToolBond
@@ -944,12 +951,18 @@ class Activity:
                 str(q.get("reviewer") or "").lower())
 
     async def pay(self, h: Household, amount: int, rng) -> None:
+        """A direct payment for a service (Substrate.payForService), sent by
+        the household's operator through the agent API's send_transaction:
+        the fee it burns is the volume that ends an epoch."""
         ss = self.sessions(h)
         if not ss:
             return
         to = rng.choice([o for o in self.hs if o is not h])
-        await self.call(ss[0], {"type": "pay_for_service",
-                                "recipient": to.agent_address, "amount": int(amount)},
+        rid = "0x" + os.urandom(32).hex()
+        data = self.sub.encode_abi("payForService", args=[
+            self.w3.to_checksum_address(to.agent_address), int(amount), rid])
+        await self.call(ss[0], {"type": "send_transaction", "to": self.sub.address,
+                                "data": data, "note": "s0 fee volume"},
                         "pay_for_service", to=to.name, amount=int(amount))
 
     # One query per household, worded so that only meaning (not shared
@@ -1500,7 +1513,7 @@ async def amain() -> int:
         # payments going so epochs keep closing at the floor, until its
         # close is anchored and claimed.
         await drain(act)
-        act.report_mint()
+        burned = act.report_mint()
         act.report_verdicts()
         await act.report_evidence()
         act.report_batches()
@@ -1512,7 +1525,7 @@ async def amain() -> int:
             log("S0_KEEP=1: leaving everything running; Ctrl+C to stop")
             while True:
                 await asyncio.sleep(3600)
-        return 0
+        return 0 if burned else 1
     except Exception:
         log(traceback.format_exc())
         return 1

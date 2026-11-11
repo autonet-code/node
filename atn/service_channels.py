@@ -1,35 +1,34 @@
-"""Buyer side of the payment channel (docs/services_market.md, settlement:
-"the prepaid payment channel, ONLY"; issue #45).
+"""The buyer's credits with service providers (docs/services_market.md,
+Decision 2026-11-12).
 
-A buyer used to pay each request up front with ``payForService`` and then
-send it, so a provider that was offline, or a request that never arrived,
-kept the money with nothing served. With a channel the buyer escrows a
-deposit once per provider and sends each request with a signed voucher for
-its running total; the provider can collect only what vouchers cover, so the
-most a buyer can lose to a provider who takes a voucher and does not serve is
-one request's ask. The rest of the deposit comes back when the channel is
-closed (``startClose``, then ``withdrawRemainder`` after the challenge
-window), or when the provider closes it itself.
+A buyer's credits with one provider are a payment channel: the Agent opens
+them with a deposit (``open_credits``) and tops them up itself
+(``top_up``); nothing here opens, closes or tops up on its own. The same
+credits pay for every service of that provider, requests and sessions
+alike.
 
-The channel is the household's prepaid balance with one provider, and the
-buyer pays as usage accrues (Decision 2026-11-10, the unit of work; metered
-on channels): each voucher signs the running total for the work items
-consumed, one ask per unit (``voucher_for(..., units=N)``), so neither side
-risks more than one step. A request/reply service is one unit per request.
-Every buyer on the daemon goes through here: the ``request_service`` agent
-tool and the ``service`` model provider (``atn/providers/service.py``) share
-the book and the per-channel lock (``channel_lock``).
+Vouchers pay ahead. Each one raises the channel's running total by the
+provider's voucher size (its price list), never past the deposit; the
+provider serves while what it has served stays within the running total,
+and asks for the next voucher when it runs low. So the most a buyer has at
+risk is one voucher. The provider reports its count (``consumed``,
+``cumulative``) on every reply and session, and the book keeps it, so the
+buyer's daemon knows when the next voucher is due.
 
-``ChannelBook`` keeps, per (payer, provider), the open channel, its deposit
-and the cumulative signed so far, in ``<data_dir>/service_channels.json``.
-A voucher is written down as pending before its request is sent
-(``reserve``), then counted (``commit``) when the provider served it, or when
-the request may have reached the provider and no answer says otherwise
-(``settle_voucher``), and dropped (``release``) when the provider says it
-kept nothing. A pending voucher found at start counts: the daemon stopped
-while the request was out, so the provider may hold it. The book is never
-behind the provider, or every later voucher would be refused as adding
-nothing.
+When the credits are spent (the deposit cannot cover another voucher),
+requests and sessions are refused with an error the Agent sees; it tops up
+or closes. Closing (``close_credits``) starts the channel's close; the
+remainder comes back after the challenge window (``sweep_refunds``).
+
+A request to a provider the buyer holds no credits with is paid directly
+instead (one ``payForService`` transaction), unless the Agent opens credits
+with it.
+
+``ChannelBook`` keeps, per (payer, provider), the open channel, its
+deposit, the running total signed so far and the provider's last reported
+count, in ``<data_dir>/service_channels.json``. A voucher is counted as
+soon as it is signed: the provider may hold it, and a book behind the
+provider would have every later voucher refused as adding nothing.
 """
 
 from __future__ import annotations
@@ -43,10 +42,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
-
-# A new channel escrows this many requests' worth of the ask, unless the
-# caller names a deposit. Escrow, not spend: the unused part is refunded.
-DEFAULT_DEPOSIT_REQUESTS = 10
 
 OPEN, CLOSING, SETTLED, CLIENT_CLOSING = 1, 2, 3, 4
 
@@ -63,15 +58,6 @@ class ChannelBook:
                     self._data.update(loaded)
             except (OSError, ValueError):
                 log.warning("service channels: %s unreadable, starting empty", self.path)
-        # A voucher still pending was out when the daemon stopped: the
-        # provider may have served it and kept it, so it counts.
-        folded = False
-        for ch in self._data["open"].values():
-            if ch.get("pending") is not None:
-                ch["cumulative"] = max(int(ch["cumulative"]), int(ch.pop("pending")))
-                folded = True
-        if folded:
-            self._save()
 
     @staticmethod
     def _key(payer: str, provider: str) -> str:
@@ -92,8 +78,8 @@ class ChannelBook:
         with self._lock:
             self._data["open"][self._key(payer, provider)] = {
                 "channel_id": int(channel_id), "deposit": int(deposit),
-                "cumulative": 0, "payer": payer, "provider": provider,
-                "opened": time.time()}
+                "cumulative": 0, "consumed": 0, "payer": payer,
+                "provider": provider, "opened": time.time()}
             self._save()
 
     def _open_entry(self, payer: str, provider: str, channel_id: int):
@@ -102,27 +88,43 @@ class ChannelBook:
             return ch
         return None
 
-    def reserve(self, payer: str, provider: str, channel_id: int, cumulative: int) -> None:
-        """Write the voucher down before its request goes out."""
+    def set_deposit(self, payer: str, provider: str, channel_id: int,
+                    deposit: int) -> bool:
+        """Record the open channel's deposit after a top-up. Returns whether
+        the open channel to ``provider`` is ``channel_id`` (else nothing is
+        changed)."""
         with self._lock:
             ch = self._open_entry(payer, provider, channel_id)
-            if ch is not None:
-                ch["pending"] = int(cumulative)
-                self._save()
+            if ch is None:
+                return False
+            ch["deposit"] = int(deposit)
+            self._save()
+            return True
 
-    def commit(self, payer: str, provider: str, channel_id: int, cumulative: int) -> None:
+    def set_signed(self, payer: str, provider: str, channel_id: int, cumulative: int) -> None:
+        """A voucher for ``cumulative`` was signed (it counts at once)."""
         with self._lock:
             ch = self._open_entry(payer, provider, channel_id)
             if ch is not None:
                 ch["cumulative"] = max(int(ch["cumulative"]), int(cumulative))
-                ch.pop("pending", None)
                 self._save()
 
-    def release(self, payer: str, provider: str, channel_id: int) -> None:
-        """The provider kept nothing for the pending voucher: drop it."""
+    def note_balance(self, payer: str, provider: str, channel_id: int,
+                     consumed: int, cumulative: int) -> None:
+        """The provider's count for the channel, from a reply or a session.
+        The book's running total never drops below what the provider holds."""
         with self._lock:
             ch = self._open_entry(payer, provider, channel_id)
-            if ch is not None and ch.pop("pending", None) is not None:
+            if ch is None:
+                return
+            changed = False
+            if int(consumed) != int(ch.get("consumed") or 0):
+                ch["consumed"] = max(0, int(consumed))
+                changed = True
+            if int(cumulative) > int(ch["cumulative"]):
+                ch["cumulative"] = int(cumulative)
+                changed = True
+            if changed:
                 self._save()
 
     def retire(self, payer: str, provider: str) -> Optional[dict[str, Any]]:
@@ -131,8 +133,6 @@ class ChannelBook:
         with self._lock:
             ch = self._data["open"].pop(self._key(payer, provider), None)
             if ch:
-                if ch.get("pending") is not None:
-                    ch["cumulative"] = max(int(ch["cumulative"]), int(ch.pop("pending")))
                 self._data["closing"][str(ch["channel_id"])] = ch
                 self._save()
             return ch
@@ -156,8 +156,7 @@ _BOOKS_LOCK = threading.Lock()
 
 
 def book_at(path: Path) -> ChannelBook:
-    """The one ChannelBook for ``path`` in this process (the agent tools and
-    the service inference provider share it)."""
+    """The one ChannelBook for ``path`` in this process."""
     key = str(Path(path).resolve())
     with _BOOKS_LOCK:
         if key not in _BOOKS:
@@ -166,12 +165,8 @@ def book_at(path: Path) -> ChannelBook:
 
 
 def channel_lock(book: ChannelBook, payer: str, provider: str) -> asyncio.Lock:
-    """The lock that serializes vouchers on one (payer, provider) channel.
-
-    Held from ``voucher_for`` until the voucher is settled: two requests
-    signing at once would sign the same running total. One per book, so the
-    agent tools and the ``service`` model provider, which share the book,
-    share the lock."""
+    """The lock that serializes signing on one (payer, provider) channel:
+    two vouchers signed at once would sign the same running total."""
     key = (str(payer or "").lower(), str(provider or "").lower())
     with _BOOKS_LOCK:
         locks = book.__dict__.setdefault("_async_locks", {})
@@ -181,130 +176,135 @@ def channel_lock(book: ChannelBook, payer: str, provider: str) -> asyncio.Lock:
         return lock
 
 
-async def voucher_for(book: ChannelBook, smc: Any, payer_key: str, payer: str,
-                      provider: str, ask: int, deposit: int = 0, *,
-                      units: int = 1) -> dict[str, Any]:
-    """The voucher for ``units`` work items of ``ask`` each to ``provider``
-    (Decision 2026-11-10, metered on channels): the running total grows by
-    ``units`` x ``ask`` in one signature. A request/reply service is one
-    unit per request; a stream signs for each step's units as they accrue,
-    so neither side risks more than what one step covers.
+def credits_view(ch: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """What the Agent sees of its credits with one provider (base units)."""
+    if not ch:
+        return {}
+    deposit, cumulative = int(ch.get("deposit") or 0), int(ch.get("cumulative") or 0)
+    consumed = int(ch.get("consumed") or 0)
+    return {"channel_id": int(ch["channel_id"]), "deposit": deposit,
+            "used": consumed, "paid_ahead": max(0, cumulative - consumed),
+            "left": max(0, deposit - consumed)}
 
-    Opens (or replaces) the channel when the open one cannot cover that
-    amount or is no longer open on chain (the provider closed it); a new
-    channel escrows ``deposit`` when it covers the amount, else
-    ``DEFAULT_DEPOSIT_REQUESTS`` asks (or the amount, if larger). Returns
-    ``{channel_id, cumulative_amount, signature}`` (not yet counted: call
-    ``book.reserve`` before sending and ``settle_voucher`` after), or
-    ``{"error": ...}``."""
-    ask = int(ask)
-    units = int(units)
-    if units < 1:
-        return {"error": "a voucher pays for at least one work item"}
-    amount = ask * units
+
+async def open_credits(book: ChannelBook, smc: Any, payer_key: str, payer: str,
+                       provider: str, deposit: int) -> dict[str, Any]:
+    """Open credits with ``provider``: a payment channel escrowing
+    ``deposit`` (ATN base units). One per provider: with credits already
+    open, top them up instead."""
+    if int(deposit or 0) <= 0:
+        return {"error": "credits need a deposit above 0 (ATN base units)"}
     ch = book.get(payer, provider)
     if ch is not None:
         state = await smc.get_channel(int(ch["channel_id"]))
-        if state is not None and int(state.get("status", 0)) != OPEN:
-            # Closed on chain (by the provider, or a close of ours that
-            # landed): the refund sweep takes the remainder back.
-            log.info("service channels: channel %s to %s is no longer open "
-                     "(status %s); opening a new one", ch["channel_id"],
-                     provider[:10], state.get("status"))
-            book.retire(payer, provider)
-            ch = None
-    if ch is None or int(ch["cumulative"]) + amount > int(ch["deposit"]):
-        if ch is not None:
-            # Spent: close it so its remainder comes back, then open anew.
-            # A failed close is sent again by the refund sweep.
-            res = await smc.start_close(payer_key, int(ch["channel_id"]))
-            if not res.get("success"):
-                log.warning("service channels: closing spent channel %s failed: %s",
-                            ch["channel_id"], res.get("error"))
-            book.retire(payer, provider)
-        want = (int(deposit) if int(deposit or 0) >= amount
-                else max(ask * DEFAULT_DEPOSIT_REQUESTS, amount))
-        opened = await smc.open_channel(payer_key, provider, want)
-        if not opened.get("success") or opened.get("channel_id") is None:
-            return {"error": f"could not open a payment channel to {provider[:10]}: "
-                             f"{opened.get('error') or 'no channel id in the receipt'}"}
-        book.set_open(payer, provider, int(opened["channel_id"]), want)
-        ch = book.get(payer, provider)
-    cumulative = int(ch["cumulative"]) + amount
-    signature = smc.sign_voucher(payer_key, int(ch["channel_id"]), cumulative)
-    return {"channel_id": int(ch["channel_id"]), "cumulative_amount": cumulative,
+        if state is None or int(state.get("status", 0)) == OPEN:
+            return {"error": "credits with this provider are already open: top them "
+                             "up instead", "credits": credits_view(ch)}
+        # The provider closed them: new credits replace them, and the old
+        # channel's remainder comes back through sweep_refunds.
+        book.retire(payer, provider)
+    opened = await smc.open_channel(payer_key, provider, int(deposit))
+    if not opened.get("success") or opened.get("channel_id") is None:
+        return {"error": f"could not open credits with {provider[:10]}: "
+                         f"{opened.get('error') or 'no channel id in the receipt'}"}
+    book.set_open(payer, provider, int(opened["channel_id"]), int(deposit))
+    return {"ok": True, "tx_hash": opened.get("tx_hash"),
+            "credits": credits_view(book.get(payer, provider))}
+
+
+async def next_voucher(book: ChannelBook, smc: Any, payer_key: str, payer: str,
+                       provider: str, *, need: int, voucher: int,
+                       consumed: Optional[int] = None) -> dict[str, Any]:
+    """The next voucher on the payer's credits with ``provider``: the
+    running total raised to cover ``need`` more than the provider has
+    served, by at least ``voucher`` (the provider's voucher size), never
+    past the deposit. Call under ``channel_lock``. Returns ``{channel_id,
+    cumulative_amount, signature}`` (already counted) or ``{"error"}``."""
+    ch = book.get(payer, provider)
+    if ch is None:
+        return {"error": "no credits with this provider: open credits first"}
+    state = await smc.get_channel(int(ch["channel_id"]))
+    if state is not None and int(state.get("status", 0)) != OPEN:
+        book.retire(payer, provider)
+        return {"error": "your credits with this provider are closed (the provider "
+                         "or a close of yours ended them): open new credits"}
+    if consumed is not None:
+        book.note_balance(payer, provider, int(ch["channel_id"]), int(consumed),
+                          int(ch["cumulative"]))
+        ch = book.get(payer, provider) or ch
+    deposit, cumulative = int(ch["deposit"]), int(ch["cumulative"])
+    used = int(ch.get("consumed") or 0)
+    target = max(cumulative, used + int(need), max(cumulative, used) + int(voucher or 0))
+    target = min(target, deposit)
+    if target <= cumulative or target - used < int(need):
+        return {"error": f"your credits with this provider are spent ({used} of a "
+                         f"{deposit} deposit used): top them up",
+                "credits": credits_view(ch)}
+    signature = smc.sign_voucher(payer_key, int(ch["channel_id"]), target)
+    book.set_signed(payer, provider, int(ch["channel_id"]), target)
+    return {"channel_id": int(ch["channel_id"]), "cumulative_amount": target,
             "signature": signature}
 
 
-def settle_voucher(book: ChannelBook, payer: str, provider: str,
-                   voucher: dict[str, Any], reply: dict[str, Any]) -> bool:
-    """Count or drop a reserved voucher once its request is answered.
-    Returns whether it counts (the buyer paid for that request).
-
-    Counts when the provider served it (it says ``charged``), or when the
-    request may have reached the provider and no answer from the provider
-    says otherwise (a timeout, a broken stream, an error from a relay):
-    the provider may have served it and kept the voucher, and a book behind
-    the provider would have every later voucher refused. Dropped when the
-    request never left, or the provider answered that it kept nothing (a
-    refused or failed request is not paid)."""
-    cid = int(voucher["channel_id"])
-    charged = reply.get("charged")
-    counts = bool(reply.get("delivered")) and (
-        charged if isinstance(charged, bool) else True)
-    if counts:
-        book.commit(payer, provider, cid, int(voucher["cumulative_amount"]))
-    else:
-        book.release(payer, provider, cid)
-    return counts
+def _needs_voucher(reply: dict[str, Any]) -> bool:
+    err = str(reply.get("error") or "")
+    return "voucher needed" in err
 
 
-async def request_on_channel(book: ChannelBook, smc: Any, config: Any,
+async def request_on_credits(book: ChannelBook, smc: Any, config: Any,
                              payer_key: str, payer: str, provider: str,
-                             spec_digest: str, args: dict[str, Any], ask: int,
-                             *, deposit: int = 0, units: int = 1,
+                             spec_digest: str, args: dict[str, Any], *,
+                             price: int, voucher: int,
                              **request_kwargs: Any) -> dict[str, Any]:
-    """Send one paid request on the payer's channel to ``provider``: a
-    voucher for ``units`` x ``ask`` reserved before it goes out, counted or
-    dropped by the provider's answer (``settle_voucher``). The reply gains
-    ``paid`` (what this request cost) and ``channel_id``; a voucher that
-    could not be made comes back as ``{"error", "delivered": False}``.
-    The reply carries the ``request_id`` it was sent under."""
+    """Send one request paid from the payer's credits with ``provider``.
+    A voucher goes with it when the credits the provider holds do not
+    cover ``price``; if the provider's count says otherwise, it asks, and
+    the request is sent once more with one. The reply gains ``credits``
+    (the book's view) and the ``request_id`` it was sent under."""
     from . import service_client
 
-    async with channel_lock(book, payer, provider):
-        voucher = await voucher_for(book, smc, payer_key, payer, provider,
-                                    ask, deposit, units=units)
-        if voucher.get("error"):
-            return {"error": voucher["error"], "delivered": False}
-        book.reserve(payer, provider, voucher["channel_id"],
-                     voucher["cumulative_amount"])
+    ch = book.get(payer, provider)
+    if ch is None:
+        return {"error": "no credits with this provider", "delivered": False}
+    cid = int(ch["channel_id"])
+    reply: dict[str, Any] = {}
+    for attempt in range(2):
+        fields: dict[str, Any] = {}
+        async with channel_lock(book, payer, provider):
+            ch = book.get(payer, provider) or ch
+            held = int(ch["cumulative"]) - int(ch.get("consumed") or 0)
+            if attempt or held < int(price):
+                fields = await next_voucher(book, smc, payer_key, payer, provider,
+                                            need=int(price), voucher=int(voucher))
+                if fields.get("error"):
+                    return {**fields, "delivered": False}
         request_id = service_client.new_request_id()
-        try:
-            reply = await service_client.request_service(
-                config, provider, spec_digest, args,
-                request_id=request_id,
-                client_address=payer, payer_key=payer_key, voucher=voucher,
-                **request_kwargs)
-        except BaseException:
-            # Unknown whether it left: count it (never behind the provider).
-            book.commit(payer, provider, voucher["channel_id"],
-                        voucher["cumulative_amount"])
-            raise
-        paid = settle_voucher(book, payer, provider, voucher, reply)
-        reply["paid"] = int(ask) * int(units) if paid else 0
-        reply["channel_id"] = voucher["channel_id"]
-        reply.setdefault("request_id", request_id)
-        return reply
+        reply = await service_client.request_service(
+            config, provider, spec_digest, args, request_id=request_id,
+            client_address=payer, payer_key=payer_key,
+            voucher=fields or None, channel_id=None if fields else cid,
+            **request_kwargs)
+        credit = reply.get("credit") if isinstance(reply.get("credit"), dict) else None
+        if credit is not None:
+            try:
+                book.note_balance(payer, provider, cid, int(credit.get("consumed") or 0),
+                                  int(credit.get("cumulative") or 0))
+            except (TypeError, ValueError):
+                pass
+        if not (_needs_voucher(reply) and not fields):
+            break
+    reply.setdefault("request_id", request_id)
+    reply["credits"] = credits_view(book.get(payer, provider))
+    return reply
 
 
-async def close_channel(book: ChannelBook, smc: Any, payer_key: str, payer: str,
+async def close_credits(book: ChannelBook, smc: Any, payer_key: str, payer: str,
                         provider: str) -> dict[str, Any]:
-    """Start closing the open channel to ``provider``; its remainder is
+    """Start closing the credits with ``provider``; the remainder is
     withdrawn by ``sweep_refunds`` after the challenge window."""
     ch = book.get(payer, provider)
     if ch is None:
-        return {"error": "no open channel to that provider"}
+        return {"error": "no credits with that provider"}
     res = await smc.start_close(payer_key, int(ch["channel_id"]))
     if not res.get("success"):
         return {"error": f"startClose failed: {res.get('error')}"}
@@ -356,4 +356,38 @@ async def sweep_refunds(book: ChannelBook, smc: Any, key_for: Any,
         out.append({"channel_id": cid, "action": "withdrew" if res.get("success") else "failed",
                     "error": res.get("error")})
     return out
+
+
+async def top_up(book: ChannelBook, smc: Any, payer_key: str, payer: str,
+                 provider: str, amount: int) -> dict[str, Any]:
+    """Add ``amount`` ATN to the payer's open channel with ``provider`` (its
+    credit with that provider, across all of the provider's services):
+    ``topUp`` on chain (an ``approve`` first when the allowance falls
+    short), then the book's deposit. Only an Open channel takes a top-up;
+    a closing one is refused before anything is sent.
+
+    Returns ``{ok, channel_id, deposit, tx_hash}`` or ``{"error": ...}``."""
+    amount = int(amount)
+    if amount <= 0:
+        return {"error": "a top-up adds a positive amount"}
+    ch = book.get(payer, provider)
+    if ch is None:
+        return {"error": "no credits with that provider: open credits first"}
+    cid = int(ch["channel_id"])
+    state = await smc.get_channel(cid)
+    if state is not None and int(state.get("status", 0)) != OPEN:
+        book.retire(payer, provider)
+        return {"error": f"your credits with this provider (channel {cid}) are "
+                         f"closed (status {state.get('status')}): open new credits"}
+    res = await smc.top_up_channel(payer_key, cid, amount)
+    if not res.get("success"):
+        return {"error": f"topUp failed: {res.get('error')}"}
+    deposit = res.get("deposit")
+    if deposit is None:
+        base = state.get("deposit") if state is not None else ch["deposit"]
+        deposit = int(str(base or "0")) + amount
+    book.set_deposit(payer, provider, cid, int(deposit))
+    return {"ok": True, "channel_id": cid, "deposit": int(deposit),
+            "tx_hash": res.get("tx_hash"),
+            "credits": credits_view(book.get(payer, provider))}
 

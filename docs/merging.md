@@ -38,7 +38,8 @@ branch. Everything else is temporary.
    |--------------|--------|
    | Tool store, mint, close, reviews | `scripts/local_e2e_tool_economy.py`, `scripts/local_e2e_tool_security.py` |
    | Jurisdiction resolution, switching, charter | `scripts/local_e2e_jurisdiction_switch.py` |
-   | Services market, inference across daemons | `scripts/local_e2e_cross_daemon_inference.py` |
+   | Services market: requests, credits, reviews | `scripts/local_e2e_service_provider.py` |
+   | Services market: sessions, p2p transport | `scripts/mesh_nat_harness.py` (phase F) |
    | Robot side, packs, worklog | `scripts/local_e2e_robot.py` |
 
 10. **Secrets and generated files** are never committed.

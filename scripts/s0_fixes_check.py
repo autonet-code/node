@@ -10,9 +10,10 @@ epochs keep closing:
   #46 adoption waits for a code holder: h1 publishes a fresh tool, h2
       proposes it, h1 stops, h2's owner approves (expect approved_pending),
       h1 comes back, the adoption completes in the background.
-  #45 services by channel voucher: h3 sells a tool-backed service, h4 finds
-      it (spec present) and requests it twice (one channel, cumulative
-      2 asks), then requests it while h3 is stopped (cumulative unchanged).
+  #45 services on credits: h3 sells a tool-backed request service, h4 finds
+      it (spec and price list present), opens credits with h3 and requests
+      it twice (one channel, two prices used), then requests it while h3 is
+      stopped (not delivered, nothing more used).
   #41 batch catch-up: h3 stays down about a minute mid-epoch, comes back,
       and its next closes must match the other daemons' closes (same epoch
       id, root and per-sender batch set) after catching up missed batches.
@@ -327,10 +328,10 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
     backing = next(d for d, m in act.published.items()
                    if m["author"] == provider.name and m["name"] == "slugify_text")
     reg = await provider.client.ok({"type": "register_service", "agent_id": provider.agent_id,
-                                    "name": "slugify", "description": "Turn a text into a url slug.",
-                                    "input_schema": s0.TEXT_SCHEMA, "backing_tool": backing,
-                                    "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
-                                    "unit": "one slugified text"})
+                                    "mode": "request", "name": "slugify",
+                                    "description": "Turn a text into a url slug.",
+                                    "backing_tool": backing, "price": SERVICE_ASK,
+                                    "voucher": SERVICE_ASK})
     spec_digest = reg.get("digest")
     ev["register"] = {"digest": spec_digest, "on_chain": reg.get("on_chain"),
                       "service_id": reg.get("service_id"), "reason": reg.get("reason")}
@@ -357,6 +358,10 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
             return {}
         return next(iter((data.get("open") or {}).values()), {})
 
+    opened = await buyer.client.call({"type": "open_credits", "caller_id": buyer.agent_id,
+                                      "provider_address": provider.agent_address,
+                                      "deposit": 10 * SERVICE_ASK}, timeout=240)
+    ev["open_credits"] = opened
     replies = []
     for text in ("Hello Channel World", "second request on the same channel"):
         r = await buyer.client.call({"type": "request_service", "caller_id": buyer.agent_id,
@@ -365,15 +370,15 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
                                     timeout=240)
         res = r.get("result") or {}
         replies.append({"ok": r.get("ok"), "error": r.get("error") or res.get("error"),
-                        "result": res.get("result"), "paid": res.get("paid"),
-                        "channel_id": res.get("channel_id"), "transport": res.get("transport"),
+                        "result": res.get("result"), "credits": res.get("credits"),
+                        "transport": res.get("transport"),
                         "delivered": res.get("delivered"), "book": book()})
     ev["requests"] = replies
-    cid = replies[0].get("channel_id")
+    cid = (replies[0].get("credits") or {}).get("channel_id")
     chain = await mc.get_channel(int(cid)) if cid is not None else None
     ev["channel_on_chain"] = chain
-    voucher_ok = (all(x["ok"] and not x["error"] and x["paid"] == SERVICE_ASK for x in replies)
-                  and replies[0]["channel_id"] == replies[1]["channel_id"]
+    voucher_ok = (all(x["ok"] and not x["error"] for x in replies)
+                  and replies[1]["book"].get("consumed") == 2 * SERVICE_ASK
                   and replies[1]["book"].get("cumulative") == 2 * SERVICE_ASK
                   and chain is not None and int(chain["deposit"]) == 10 * SERVICE_ASK
                   and chain["provider"].lower() == provider.agent_address.lower())
@@ -383,16 +388,17 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
 
     await provider.stop()
     log(f"#45: provider {provider.name} stopped; requesting again")
-    before = book().get("cumulative")
+    before = book().get("consumed")
     r = await buyer.client.call({"type": "request_service", "caller_id": buyer.agent_id,
                                  "provider_address": provider.agent_address,
                                  "spec_digest": spec_digest, "payload": {"text": "nobody home"}},
                                 timeout=300)
     res = r.get("result") or {}
-    after = book().get("cumulative")
+    after = book().get("consumed")
     ev["stopped_provider_request"] = {"ok": r.get("ok"), "error": r.get("error") or res.get("error"),
-                                      "paid": res.get("paid"), "delivered": res.get("delivered"),
-                                      "cumulative_before": before, "cumulative_after": after}
+                                      "delivered": res.get("delivered"),
+                                      "used_before": before, "used_after": after}
+    # Nothing more used; the voucher signed for it is at most one paid ahead.
     stopped_ok = before == after == 2 * SERVICE_ASK and not res.get("delivered")
     rep.set("#45 service channel", spec_ok and voucher_ok and stopped_ok,
             spec_ok=spec_ok, voucher_ok=voucher_ok, stopped_ok=stopped_ok, **ev)

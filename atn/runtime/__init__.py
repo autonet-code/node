@@ -474,15 +474,13 @@ class Runtime:
         # The buyer's payment channels, one per (payer agent, provider) (#45).
         from ..service_channels import book_at
         self.channel_book = book_at(self._config.data_dir / "service_channels.json")
-        # The buyer's receipts of authentic replies, and its reviews of paid
-        # requests (Decision 2026-11-10); malware evidence goes to the tool
-        # store's blobs, which peers can fetch.
-        from ..service_receipts import ReceiptStore
-        from .. import service_client as _service_client
-        self.service_receipts = ReceiptStore(
-            self._config.data_dir / "services" / "receipts",
+        # The household's reviews of services (Decisions 2026-11-10 and
+        # 2026-11-12); malware evidence goes to the tool store's blobs, which
+        # peers can fetch.
+        from ..service_review_store import ReviewStore
+        self.service_reviews = ReviewStore(
+            self._config.data_dir / "services" / "reviews",
             evidence_blobs=self.tool_store._blob_store)
-        _service_client.set_receipt_sink(self._config.rpb, self.service_receipts.record)
 
         # Tool registry
         from ..tool_registry import ToolRegistry
@@ -706,12 +704,16 @@ class Runtime:
         return None
 
     async def settle_channels_once(self) -> dict[str, Any]:
-        """One payment-channel sweep, both sides: as a provider, close the
-        channels due (atn/channel_settlement.py); as a buyer, take back what
-        closed channels did not pay (atn/service_channels.sweep_refunds).
+        """One payment-channel sweep, both sides: as a provider, collect what
+        the channels owe (settle, or close a channel its client is closing;
+        atn/channel_settlement.py); as a buyer, take back what closed
+        channels did not pay (atn/service_channels.sweep_refunds).
         Returns what was done, and ``interval``, the seconds until the next
         sweep (a quarter of the challenge window, in [30 s, 300 s])."""
-        from ..channel_settlement import DEFAULT_IDLE_CLOSE_S, settle_channels
+        from ..channel_settlement import (
+            DEFAULT_SETTLE_MIN, DEFAULT_SETTLE_PERIOD_S, SettlementLog,
+            settle_channels,
+        )
         from ..on_chain import ServiceMarketClient
         from ..service_channels import sweep_refunds
 
@@ -737,9 +739,15 @@ class Runtime:
             return {"interval": interval}
         out: dict[str, Any] = {"interval": interval}
         if selling:
-            idle = getattr(rpb, "channel_idle_close_s", DEFAULT_IDLE_CLOSE_S)
+            ledger = getattr(self, "_channel_settlements", None)
+            if ledger is None:
+                ledger = self._channel_settlements = SettlementLog(
+                    self._config.data_dir / "services" / "channel_settlements.json")
+            period = getattr(rpb, "channel_idle_close_s", DEFAULT_SETTLE_PERIOD_S)
+            minimum = getattr(rpb, "channel_settle_min", DEFAULT_SETTLE_MIN)
             out["settled"] = await settle_channels(
-                store, smc, self._channel_key_for, idle_close_s=float(idle))
+                store, smc, self._channel_key_for, settle_min=int(minimum),
+                settle_period_s=float(period), ledger=ledger)
         if buying:
             out["refunds"] = await sweep_refunds(book, smc, self._channel_key_for)
         return out
@@ -800,9 +808,10 @@ class Runtime:
             self._connector_reaper = asyncio.create_task(
                 self._reap_connectors_loop())
 
-        # Payment-channel settlement: as a provider, collect (a client's
-        # close, a spent deposit, an idle channel; atn/channel_settlement.py);
-        # as a buyer, take back what closed channels did not pay.
+        # Payment-channel settlement: as a provider, collect (settle once
+        # enough is unpaid or a day has passed, close when the client is
+        # closing; atn/channel_settlement.py); as a buyer, take back what
+        # closed channels did not pay.
         self._channel_settler = asyncio.create_task(self._settle_channels_loop())
 
         # Approved adoptions still waiting for a code holder to come online

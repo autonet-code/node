@@ -486,6 +486,28 @@ PAYMENT_CHANNEL_ABI = [
         "type": "function",
     },
     {
+        "inputs": [
+            {"internalType": "uint256", "name": "channelId",        "type": "uint256"},
+            {"internalType": "uint256", "name": "cumulativeAmount", "type": "uint256"},
+            {"internalType": "bytes",   "name": "signature",        "type": "bytes"},
+            {"internalType": "uint256", "name": "upTo",             "type": "uint256"},
+        ],
+        "name": "settle",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "channelId", "type": "uint256"},
+            {"internalType": "uint256", "name": "amount",    "type": "uint256"},
+        ],
+        "name": "topUp",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
         "inputs": [{"internalType": "uint256", "name": "channelId", "type": "uint256"}],
         "name": "startClose",
         "outputs": [],
@@ -564,7 +586,36 @@ PAYMENT_CHANNEL_ABI = [
         "name": "ChannelOpened",
         "type": "event",
     },
+    # Every payout to the provider (settle, and a close that pays
+    # something): amount paid now (gross) and the cumulative paid so far.
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "uint256", "name": "channelId", "type": "uint256"},
+            {"indexed": True,  "internalType": "address", "name": "client",    "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "provider",  "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "amount",    "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "paidTotal", "type": "uint256"},
+        ],
+        "name": "ChannelPaid",
+        "type": "event",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "uint256", "name": "channelId", "type": "uint256"},
+            {"indexed": True,  "internalType": "address", "name": "client",    "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "amount",    "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "deposit",   "type": "uint256"},
+        ],
+        "name": "ChannelToppedUp",
+        "type": "event",
+    },
 ]
+
+# eth_getLogs spans are read in chunks of this many blocks (public RPCs cap
+# the range), as the service catalog does.
+CHANNEL_LOG_CHUNK = 1000
 
 
 # Minimal ATN (Substrate ERC20 surface) ABI for approve() — the PaymentChannel
@@ -1732,7 +1783,7 @@ _SERVICE_MARKET_ERRORS = (
     "ZeroDeposit()", "ChannelNotOpen()", "ChannelNotClosing()",
     "NotProvider()", "NotClient()", "BadVoucherSignature()",
     "WindowNotElapsed()", "DepositTransferFailed()", "NotGovernor()",
-    "ZeroWindow()",
+    "ZeroWindow()", "NothingToSettle()",
 )
 _error_names: dict[str, str] = {}
 
@@ -2172,6 +2223,75 @@ class ServiceMarketClient:
             log.exception("Failed to open channel on chain")
             return {"success": False, "error": str(e)}
 
+    async def top_up_channel(
+        self,
+        client_key: str,
+        channel_id: int,
+        amount: int,
+        auto_approve: bool = True,
+    ) -> dict[str, Any]:
+        """``PaymentChannel.topUp(channelId, amount)``, by the CLIENT, while
+        the channel is Open: adds ``amount`` ATN to its deposit (the buyer's
+        credit with that provider). topUp pulls with
+        ``substrate.transferFrom``, so, as in :meth:`open_channel`, an
+        ``approve`` for the amount is sent first when the allowance falls
+        short (``auto_approve``).
+
+        Returns ``{success, tx_hash, deposit, approve_tx_hash}``; ``deposit``
+        is the new deposit, decoded from the ChannelToppedUp event (None if
+        it couldn't be decoded)."""
+        try:
+            from eth_account import Account
+            from web3 import Web3
+
+            w3 = self._get_web3()
+            channel = self._channel_contract(w3)
+            account = Account.from_key(client_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+
+            approve_tx_hash = None
+            if auto_approve:
+                atn = self._atn_contract(w3)
+                channel_addr = Web3.to_checksum_address(
+                    self._payment_channel_address())
+                try:
+                    current = int(atn.functions.allowance(
+                        account.address, channel_addr).call())
+                except Exception:
+                    current = 0
+                if current < int(amount):
+                    ap = await self.approve_channel_deposit(client_key, int(amount))
+                    if not ap.get("success"):
+                        return {"success": False,
+                                "error": f"approve failed: {ap.get('error')}"}
+                    approve_tx_hash = ap.get("tx_hash")
+
+            func = channel.functions.topUp(int(channel_id), int(amount))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 150_000)
+            if receipt.status != 1:
+                return {"success": False, "error": "Transaction reverted",
+                        "tx_hash": tx_hex, "approve_tx_hash": approve_tx_hash}
+            deposit = None
+            try:
+                from web3.logs import DISCARD
+                evs = channel.events.ChannelToppedUp().process_receipt(
+                    receipt, errors=DISCARD)
+                if evs:
+                    deposit = int(evs[0]["args"]["deposit"])
+            except Exception:
+                log.debug("top_up_channel: event decode failed", exc_info=True)
+            return {"success": True, "tx_hash": tx_hex, "deposit": deposit,
+                    "approve_tx_hash": approve_tx_hash}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to top up channel on chain")
+            return {"success": False, "error": str(e)}
+
     def sign_voucher(
         self,
         private_key: str,
@@ -2291,9 +2411,10 @@ class ServiceMarketClient:
         """``PaymentChannel.closeChannel(channelId, cumulativeAmount, signature)``.
 
         Submitted by the PROVIDER (msg.sender must be the channel provider).
-        Pays the provider min(cumulative, deposit) NET of the service fee and
-        opens the challenge window. ``signature`` is the client's voucher
-        signature over (channelId, cumulativeAmount).
+        Ends the channel: pays the provider what of min(cumulative, deposit)
+        ``settle`` has not paid yet, NET of the service fee, and opens the
+        challenge window. ``signature`` is the client's voucher signature
+        over (channelId, cumulativeAmount).
         """
         try:
             from eth_account import Account
@@ -2320,6 +2441,66 @@ class ServiceMarketClient:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
             log.exception("Failed to close channel on chain")
+            return {"success": False, "error": str(e)}
+
+    async def settle_channel(
+        self,
+        provider_key: str,
+        channel_id: int,
+        cumulative_amount: int,
+        signature: str | bytes,
+        up_to: int | None = None,
+    ) -> dict[str, Any]:
+        """``PaymentChannel.settle(channelId, cumulativeAmount, signature,
+        upTo)``.
+
+        Submitted by the PROVIDER while the channel is Open (or inside the
+        window of a close the client started): cashes in the voucher without
+        ending the channel, paying min(cumulative, deposit, up_to) minus what
+        was already paid, NET of the service fee. ``up_to`` is what the
+        provider has served (vouchers pay ahead); None claims the whole
+        voucher. A call that adds nothing reverts (NothingToSettle).
+
+        Returns ``{success, tx_hash, paid, paid_total}``: the gross amount
+        paid now and the channel's cumulative paid, decoded from the
+        ChannelPaid event (None if it couldn't be decoded)."""
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            channel = self._channel_contract(w3)
+            account = Account.from_key(provider_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            sig = (signature if isinstance(signature, bytes)
+                   else bytes.fromhex(signature[2:] if signature.startswith("0x")
+                                      else signature))
+            func = channel.functions.settle(
+                int(channel_id), int(cumulative_amount), sig,
+                int(cumulative_amount if up_to is None else up_to))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 200_000)
+            if receipt.status != 1:
+                return {"success": False, "error": "Transaction reverted",
+                        "tx_hash": tx_hex}
+            paid = paid_total = None
+            try:
+                from web3.logs import DISCARD
+                evs = channel.events.ChannelPaid().process_receipt(
+                    receipt, errors=DISCARD)
+                if evs:
+                    paid = int(evs[0]["args"]["amount"])
+                    paid_total = int(evs[0]["args"]["paidTotal"])
+            except Exception:
+                log.debug("settle_channel: event decode failed", exc_info=True)
+            return {"success": True, "tx_hash": tx_hex, "paid": paid,
+                    "paid_total": paid_total}
+        except WouldRevert as e:
+            return {"success": False, "error": f"not sent, it would revert: {e}",
+                    "reverted": True}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to settle channel on chain")
             return {"success": False, "error": str(e)}
 
     async def start_close(
@@ -2393,7 +2574,8 @@ class ServiceMarketClient:
         Returns None if the channel doesn't exist (status == 0 / None) or on
         a read failure. Fields: ``{channel_id, client, provider, deposit,
         claimed, closes_at, status, window}`` (status: 0 None, 1 Open, 2 Closing,
-        3 Settled).
+        3 Settled, 4 ClientClosing; ``claimed``: the cumulative paid to the
+        provider so far, gross).
         """
         try:
             w3 = self._get_web3()
@@ -2415,6 +2597,52 @@ class ServiceMarketClient:
             }
         except Exception as e:
             log.debug("get_channel(%s) failed: %s", channel_id, e)
+            return None
+
+    async def channel_payments(
+        self, from_block: int, to_block: int | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """Every ``ChannelPaid`` log of the PaymentChannel in blocks
+        ``from_block..to_block`` (``to_block`` None: the head), oldest
+        first, read in chunks of ``CHANNEL_LOG_CHUNK`` blocks. Each is
+        ``{channel_id, client, provider, amount, paid_total, block}``
+        (amounts gross, in base units).
+
+        Returns None when the logs cannot be read, so a caller that must
+        agree with peers (the close) can tell a failed read from no
+        payments."""
+        try:
+            from web3 import Web3
+
+            w3 = self._get_web3()
+            channel = self._channel_contract(w3)
+            last = int(w3.eth.block_number) if to_block is None else int(to_block)
+            topic = "0x" + Web3.keccak(
+                text="ChannelPaid(uint256,address,address,uint256,uint256)"
+            ).hex().removeprefix("0x")
+            event = channel.events.ChannelPaid()
+            out: list[dict[str, Any]] = []
+            block = max(0, int(from_block))
+            while block <= last:
+                end = min(last, block + CHANNEL_LOG_CHUNK - 1)
+                logs = w3.eth.get_logs({"address": channel.address,
+                                        "fromBlock": block, "toBlock": end,
+                                        "topics": [topic]})
+                for lg in logs:
+                    args = event.process_log(lg)["args"]
+                    out.append({
+                        "channel_id": int(args["channelId"]),
+                        "client": Web3.to_checksum_address(args["client"]),
+                        "provider": Web3.to_checksum_address(args["provider"]),
+                        "amount": int(args["amount"]),
+                        "paid_total": int(args["paidTotal"]),
+                        "block": int(lg["blockNumber"]),
+                    })
+                block = end + 1
+            return out
+        except Exception as e:  # noqa: BLE001
+            log.debug("channel_payments(%s..%s) failed: %s",
+                      from_block, to_block, e)
             return None
 
 

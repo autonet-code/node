@@ -21,8 +21,9 @@ operator. The DAEMON code paths drive every step:
      with the four fields); each daemon's ``ReviewDriver`` commits, reveals
      after the anchor, finalizes and claims on ToolBond; the reviewing
      households clear the conclusion gate;
-  5. B buys a service C sells (``pay_for_service`` + ``request_service``):
-     the payment's fee is burned, which is what funds the next pool;
+  5. B buys a service C sells (``request_service`` with no credits: one
+     direct payment): the payment's fee is burned, which is what funds the
+     next pool;
   6. ``read_voice_state`` pinned to the anchor after the burn feeds
      ``federated_epoch_close``: the tool concludes and is paid once from its
      reviews (40% to the reviewers by accuracy, the author side by
@@ -32,9 +33,9 @@ operator. The DAEMON code paths drive every step:
      (``claimFor``) and shows ToolBond the conclusion;
   7. the same driver step claims each household's REP 1:1 on its tool-pool
      earnings (``AutonetRepClaim.claim``, ``agentMintTotal``);
-  8. B buys C's service again through a payment channel: two vouchers, C's
-     settlement sweep closes the channel with the best one, B's refund
-     sweep withdraws the rest after the challenge window;
+  8. B opens credits with C and buys C's service twice on them (vouchers
+     pay ahead); C's sweep settles what it served without closing; B closes,
+     C settles inside the window, and B's refund sweep withdraws the rest;
   9. teardown.
 
 The jurisdiction contracts are NOT vendored: they are copied at run time
@@ -159,7 +160,7 @@ STAGES = [
     (5, "service fees burned (B buys C's service through payForService)"),
     (6, "close: the tool concludes and is paid; anchor; operators claimFor their owners"),
     (7, "REP claimed 1:1 on tool-pool earnings (AutonetRepClaim)"),
-    (8, "payment channel: vouchers, provider closes with its best, buyer withdraws the rest"),
+    (8, "credits: vouchers pay ahead, the provider settles what it served, the buyer closes and withdraws the rest"),
     (9, "teardown"),
 ]
 
@@ -861,18 +862,26 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         ws_c = WebSocketBridge(rt_c, host="127.0.0.1", port=port_c)
         await ws_c.start()
         listed = await ws_c._handle_message({
-            "type": "register_service", "msg_id": "svc-1", "name": "word-count",
-            "description": "Word counts on C's machine.", "input_schema": WORDS_SCHEMA,
-            "backing_tool": reg["digest"], "ask": {"amount": str(SERVICE_ASK)},
-            "unit": "one word count of a text"},
-            owner_session())
+            "type": "register_service", "msg_id": "svc-1", "mode": "request",
+            "name": "word-count", "description": "Word counts on C's machine.",
+            "backing_tool": reg["digest"], "price": SERVICE_ASK,
+            "voucher": SERVICE_ASK}, owner_session())
         if not listed.get("ok") or not listed["result"].get("on_chain"):
             raise RuntimeError(f"register_service: {listed}")
         service_id = int(listed["result"]["service_id"])
         entry = svc_registry.functions.getService(service_id).call()
-        check(entry[0] == op["C"] and entry[2] == SERVICE_ASK,
-              f"service #{service_id} on ServiceRegistry: provider operator C, "
-              f"ask {SERVICE_ASK // ATN} ATN")
+        check(entry[0] == op["C"] and entry[2] == 0,
+              f"service #{service_id} on ServiceRegistry: provider operator C, no "
+              f"registry price (the price list says {SERVICE_ASK // ATN} ATN)")
+        # B's catalog takes the spec and C's signed price list (what C's
+        # daemon gossips on the services topic).
+        from atn import service_catalog as sc
+        record_c = rt_c.service_store.get(listed["result"]["digest"])
+        catalog_b = sc.catalog_for(rt_b)
+        await asyncio.to_thread(catalog_b.sync_chain)
+        check(catalog_b.accept_announcement(sc.announcement(
+            record_c.spec, service_id, record_c.price_list)),
+              "B's catalog holds C's spec and price list")
         ep = await OnChainService(rt_c._config.autonet).update_endpoint(
             op_key["C"], f"ws://127.0.0.1:{port_c}")
         check(ep.get("success") and substrate.functions.getAgentEndpoint(op["C"]).call()
@@ -881,14 +890,11 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         # B's agent pays directly and sends the request with the proof.
         before = {"b": atn_of(op["B"]), "c": atn_of(op["C"]), "t": atn_of(treasury)}
         burned0 = substrate.functions.burnedSinceAnchor().call()
-        paid = await execute_tool("pay_for_service", {
-            "recipient": op["C"], "amount": SERVICE_ASK}, rt_b, caller_id=AGENT["B"])
-        if not paid.get("tx_hash") or not paid.get("request_id"):
-            raise RuntimeError(f"pay_for_service: {paid}")
+        # No credits with C: request_service pays this one request directly.
         reply = await execute_tool("request_service", {
-            "service_id": service_id, "payload": {"text": "one turn of the loop"},
-            "tx_hash": paid["tx_hash"], "request_id": paid["request_id"]},
+            "service_id": service_id, "payload": {"text": "one turn of the loop"}},
             rt_b, caller_id=AGENT["B"])
+        check(bool(reply.get("paid_directly")), "paid with one direct payment")
         check(reply.get("ok") and '"words": 5' in json.dumps(reply),
               f"C serves B's paid request over {reply.get('transport', '?')} "
               f"({json.dumps(reply.get('result'))[:80]})")
@@ -1082,48 +1088,54 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         from atn.on_chain import ServiceMarketClient
         from atn.service_channels import sweep_refunds
         before = {"b": atn_of(op["B"]), "c": atn_of(op["C"])}
+        opened = await execute_tool("open_credits", {
+            "provider_address": op["C"], "deposit": 3 * SERVICE_ASK},
+            rt_b, caller_id=AGENT["B"])
+        if not opened.get("ok"):
+            raise RuntimeError(f"open_credits: {opened}")
+        cid = int(opened["credits"]["channel_id"])
         replies = []
-        for text in ("a channel request", "and a second one here"):
+        for text in ("a credits request", "and a second one here"):
             replies.append(await execute_tool("request_service", {
-                "service_id": service_id, "deposit": 3 * SERVICE_ASK,
-                "payload": {"text": text}}, rt_b, caller_id=AGENT["B"]))
-        check(all(r.get("ok") and r.get("paid") == SERVICE_ASK for r in replies)
-              and replies[0]["channel_id"] == replies[1]["channel_id"],
-              "two requests served on one channel, one voucher each")
-        cid = int(replies[0]["channel_id"])
+                "service_id": service_id, "payload": {"text": text}},
+                rt_b, caller_id=AGENT["B"]))
+        check(all(r.get("ok") for r in replies)
+              and replies[1]["credits"]["used"] == 2 * SERVICE_ASK,
+              "two requests served on B's credits with C, one price each")
         ch = channel.functions.getChannel(cid).call()
         check(ch[0] == op["B"] and ch[1] == op["C"] and ch[2] == 3 * SERVICE_ASK
               and ch[5] == 1, f"channel {cid} open: operator B to operator C, "
                               f"{3 * SERVICE_ASK // ATN} ATN escrowed")
         kept = rt_c.service_store.get_channel_voucher(cid) or {}
-        check(int(kept.get("cumulative", 0)) == 2 * SERVICE_ASK,
-              "C keeps the best voucher: cumulative 2 x the ask")
+        check(int(kept.get("cumulative", 0)) == 2 * SERVICE_ASK
+              and int(kept.get("consumed", 0)) == 2 * SERVICE_ASK,
+              "C holds B's voucher for 2 x the price, all of it served")
         check(before["b"] - atn_of(op["B"]) == 3 * SERVICE_ASK,
               "B's deposit left its operator, nothing else")
-        # C's settlement sweep closes the channel once it is idle.
-        rt_c._config.autonet.channel_idle_close_s = 1
-        await asyncio.sleep(1.5)
+        # C's sweep settles what it served once it reaches the threshold,
+        # and the channel stays open.
+        rt_c._config.autonet.channel_settle_min = 1
         out = await rt_c.settle_channels_once()
         settled = out.get("settled") or []
-        check(settled and settled[0].get("ok") and settled[0].get("reason") == "idle",
-              f"C's sweep closes the channel with its best voucher ({settled})")
+        check(settled and settled[0].get("ok") and settled[0].get("action") == "settled",
+              f"C's sweep settles without closing ({settled})")
         ch = channel.functions.getChannel(cid).call()
         fee = 2 * SERVICE_ASK * SERVICE_FEE_BPS // 10_000
-        check(ch[5] == 2 and ch[3] == 2 * SERVICE_ASK
+        check(ch[5] == 1 and ch[3] == 2 * SERVICE_ASK
               and atn_of(op["C"]) - before["c"] == 2 * SERVICE_ASK - fee,
-              f"closing: 2 x the ask claimed, C paid net of the {fee / ATN:g} ATN fee")
-        # B's sweep sees the provider's close, then withdraws after the window.
-        out = await rt_b.settle_channels_once()
-        actions = [r["action"] for r in out.get("refunds") or []]
-        check("closed_by_provider" in actions, f"B's sweep sees the close ({actions})")
-        if "withdrew" not in actions:
-            advance(w3, CHANNEL_WINDOW + 1)
-            # The run moved the chain clock ahead of the wall clock
-            # (evm_increaseTime), so the sweep is given the chain's time.
-            refunds = await sweep_refunds(rt_b.channel_book,
-                                          ServiceMarketClient(rt_b._config.autonet),
-                                          rt_b._channel_key_for, now=chain_time(w3))
-            actions = [r["action"] for r in refunds]
+              f"still open; 2 x the price paid, C net of the {fee / ATN:g} ATN fee")
+        # B closes; C settles inside the window (nothing new), B withdraws.
+        closed = await execute_tool("close_credits", {"provider_address": op["C"]},
+                                    rt_b, caller_id=AGENT["B"])
+        check(closed.get("ok"), f"B closes its credits ({closed})")
+        await rt_c.settle_channels_once()
+        advance(w3, CHANNEL_WINDOW + 1)
+        # The run moved the chain clock ahead of the wall clock
+        # (evm_increaseTime), so the sweep is given the chain's time.
+        refunds = await sweep_refunds(rt_b.channel_book,
+                                      ServiceMarketClient(rt_b._config.autonet),
+                                      rt_b._channel_key_for, now=chain_time(w3))
+        actions = [r["action"] for r in refunds]
         check("withdrew" in actions and channel.functions.getChannel(cid).call()[5] == 3,
               f"B's refund sweep withdraws the remainder ({actions})")
         check(atn_of(op["B"]) - (before["b"] - 3 * SERVICE_ASK) == SERVICE_ASK

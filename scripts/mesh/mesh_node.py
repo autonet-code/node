@@ -17,6 +17,9 @@ control socket (``mesh_ctl.py``):
                          this node made when a registration arrived
   fetch {cid}            find the cid's providers in the DHT and fetch from
                          them only
+  session {peer, bytes}  open a service session to the peer and echo bytes
+                         through it (its path, its connection's remote
+                         address, whether every byte came back)
 
 On every tool registration it hears, the node looks the manifest and code
 up in the DHT and fetches them from the providers, as a daemon pulls a
@@ -57,33 +60,28 @@ log = logging.getLogger("mesh-node")
 
 
 class _FreeEcho:
-    """A free, unmetered stream service that echoes every byte (the
-    transport under test is the mesh's, not the payment gate's)."""
+    """A free service session that echoes every byte (the transport under
+    test is the mesh's, not the payment's: no ledger, so nothing is charged
+    and no voucher is asked for)."""
 
     async def accept(self, open_msg: dict):
-        from nodes.common.service_stream import Accept
-        return Accept(reply={"ok": True, "charged": False,
-                             "result": {"units": None}}, units=None)
+        from nodes.common.service_session import Accept
+        return Accept(reply={"ok": True, "result": {
+            "request_id": open_msg.get("request_id"), "prices": {}}})
 
     async def check_voucher(self, open_msg: dict, frame: dict):
-        from nodes.common.service_stream import VoucherCheck
-        return VoucherCheck(ok=False, error="free stream")
+        from nodes.common.service_session import VoucherCheck
+        return VoucherCheck(ok=False, error="a free session")
 
-    async def keep(self, open_msg, token):
-        return None
-
-    async def release(self, open_msg, token):
-        return None
-
-    async def sign(self, open_msg, request_id, reply):
-        return reply
-
-    async def serve(self, stream) -> None:
+    async def serve(self, session) -> None:
         while True:
-            data = await stream.receive()
+            data = await session.receive()
             if not data:
                 return
-            await stream.send(data)
+            await session.send(data)
+
+    async def ended(self, session) -> None:
+        return None
 
 
 class Node:
@@ -175,21 +173,20 @@ class Node:
         log.info("fetched tool %s from %s via the DHT: %s", event["name"], event["from"],
                  [(r["ok"], r["providers"][:3], r["seconds"]) for r in results])
 
-    async def stream(self, peer: str, nbytes: int, timeout: float = 120.0) -> dict:
-        """Open a service stream to ``peer`` (docs/services_market.md,
-        Decision 2026-11-10) and echo ``nbytes`` through it: the path it
+    async def session(self, peer: str, nbytes: int, timeout: float = 120.0) -> dict:
+        """Open a service session to ``peer`` (docs/services_market.md,
+        Decision 2026-11-12) and echo ``nbytes`` through it: the path it
         took, the remote address of the connection, and whether every byte
         came back."""
         t0 = time.time()
         out = {"peer": peer, "ok": False, "path": None, "bytes": nbytes}
-        opening = {"type": "service_request", "msg_id": "harness",
-                   "spec_digest": "00" * 32, "request_id": f"h-{int(t0 * 1000)}",
+        opening = {"spec_digest": "00" * 32, "request_id": f"h-{int(t0 * 1000)}",
                    "args": {}}
         payload = bytes(range(256)) * (nbytes // 256 + 1)
         payload = payload[:nbytes]
         try:
             with trio.fail_after(timeout):
-                async with self.host.service_stream(peer, opening, timeout=60) as st:
+                async with self.host.service_session(peer, opening, timeout=60) as st:
                     out["path"] = st.path
                     back = bytearray()
 
@@ -224,9 +221,9 @@ class Node:
         cmd = req.get("cmd")
         if cmd == "status":
             return self.status()
-        if cmd == "stream":
-            return await self.stream(str(req.get("peer") or ""),
-                                     int(req.get("bytes") or 1 << 20))
+        if cmd == "session":
+            return await self.session(str(req.get("peer") or ""),
+                                      int(req.get("bytes") or 1 << 20))
         if cmd == "publish_tool":
             return await self.publish_tool(str(req.get("name") or "tool"))
         if cmd == "gossip":
@@ -281,7 +278,7 @@ async def main() -> None:
         server = host_blob_server(host)
         server.add_source(store.get_bytes_local)
         node = Node(host, store)
-        host.set_service_stream_handler(_FreeEcho())
+        host.set_service_session_handler(_FreeEcho())
         await host.subscribe_topic(TOPIC, node.on_event)
         log.info("mesh node %s up: %s", host.peer_id, host.addrs)
         async with trio.open_nursery() as n:

@@ -6,6 +6,8 @@ Runs on the hashing embedder (bit-deterministic, no model download).
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from nodes.common.blob_store import BlobStore
@@ -72,7 +74,10 @@ class TestRegistration:
             "kind": "tool_registered", "seq": 1, "author_agent": "0xAgent",
             "artifact_digest": digest,
             "manifest_meta": {"trust_class": "pinned", "author": "0xAuthor",
-                              "deps": "ab" * 32},
+                              "deps": "ab" * 32,
+                              # The manifest's canonical bytes (audit G2).
+                              "manifest": json.dumps(svc.blob_json(digest),
+                                                     sort_keys=True)},
         }]
         assert svc.epoch_status()["buffered_events"] == 1
         assert svc.close_epoch()["n_events"] == 1

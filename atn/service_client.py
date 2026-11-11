@@ -1,30 +1,28 @@
-"""Consumer side of the services market rail (docs/services_market.md).
+"""Consumer side of the services market (docs/services_market.md).
 
-The three mechanics a buyer needs, factored out of the agent tool
-handlers so the ``service`` inference provider can reuse them verbatim
-instead of re-implementing chain code:
+The mechanics a buyer needs:
 
-  1. ``new_request_id()``     — a fresh bytes32 request id per call.
-  2. ``pay_for_service()``    — sign a ``Substrate.payForService`` transfer
-                                and return ``{tx_hash, request_id}``.
-  3. ``request_service()``    — send a ``service_request`` carrying the
-                                payment proof to the provider and return
-                                the reply: over libp2p to the provider's
-                                on-chain peer id (direct, or one hop
-                                through a connected relay), else over its
-                                on-chain wss endpoint.
-  4. ``lookup_service_ask()`` — read a service's on-chain ask by
-                                (provider, spec_digest).
+  1. ``new_request_id()``     a fresh bytes32 request id per call.
+  2. ``pay_for_service()``    sign a ``Substrate.payForService`` transfer
+                              (a one-off request paid directly) and return
+                              ``{tx_hash, request_id}``.
+  3. ``request_service()``    send a ``service_request`` carrying the
+                              payment (the buyer's credits, or a direct
+                              payment) to the provider and return the
+                              reply: over libp2p to the provider's on-chain
+                              peer id (direct, or one hop through a
+                              connected relay), else over its on-chain wss
+                              endpoint.
+  4. ``read_service()`` / ``lookup_service_ask()`` the registry entry
+                              (provider, active flag, optional price).
 
-``atn/agent_tools.py`` (``pay_for_service`` / ``request_service``
-agent tools) and ``atn/providers/service.py`` (the inference provider)
-are both thin wrappers over these.
+The provider signs every reply with the key of the address the buyer pays
+(``reply_sig``), so a relay or whoever answers a wss URL can drop a
+request but cannot make up its answer. The signature authenticates the
+reply only; it is not a receipt (reviews count the payment on chain).
 
-Everything here is key-agnostic: the CALLER supplies the signing key. An
-agent tool passes the agent's key; the inference provider passes the
-daemon owner's key, because buying cognition for the whole fleet is an
-owner-level act (same doctrine as the sponsor pipe, where the dependent
-identity IS the owner wallet).
+Everything here is key-agnostic: the caller supplies the signing key, the
+household's operator key for the owner surface and external Agents.
 """
 
 from __future__ import annotations
@@ -86,65 +84,53 @@ def recover_request_signer(signature: str, request_id: str, spec_digest: str,
     return Account.recover_message(msg, signature=signature)
 
 
-# The provider signs each reply (``receipt_sig``) with the key of the
-# address the buyer paid, the service's on-chain provider. A relay, or
-# whoever answers a wss URL, can drop a request but cannot make up its
-# answer: a reply the buyer cannot verify is not treated as served.
-#
-# The signature is a receipt (nodes/common/service_reviews.py): it covers
-# the request id, the spec digest, the provider, the payer the gate
-# verified, ``ok``, ``charged``, the amount charged and the sha256 of the
-# canonical result and error, never the result itself. So a buyer can prove
-# what it paid for in a review without revealing what it got.
+REPLY_AUTH_DOMAIN = "autonet:service_reply:v2"
 
 
-def _reply_receipt(reply: dict[str, Any], request_id: str, spec_digest: str,
-                   provider: str) -> dict[str, Any]:
-    """The receipt fields a reply's signature covers (no signature)."""
-    from nodes.common import service_reviews as sr
+def result_hash(result: Any, error: Any) -> str:
+    """sha256 of a reply's result and error in canonical JSON."""
+    import hashlib
+    return hashlib.sha256(json.dumps(
+        {"result": result, "error": error}, sort_keys=True,
+        separators=(",", ":"), ensure_ascii=False, default=str
+    ).encode("utf-8")).hexdigest()
 
-    def _uint(value: Any) -> int:
-        try:
-            return max(0, int(str(value or "0")))
-        except (TypeError, ValueError):
-            return 0
-    amount = _uint(reply.get("amount"))
-    return {
-        # The payment channel a voucher paid this request through, 0 for a
-        # direct payment: what the close checks on chain before it counts a
-        # review of the request.
-        "channel_id": str(_uint(reply.get("channel_id"))),
-        "request_id": sr.norm_hex(request_id),
-        "spec_digest": normalize_digest(spec_digest),
-        "provider": sr.norm_address(provider),
-        "payer": sr.norm_address(reply.get("payer")),
-        "ok": bool(reply.get("ok")),
-        "charged": reply.get("charged") is True,
-        "amount": str(amount),
-        "result_hash": sr.result_hash(reply.get("result"), reply.get("error")),
-    }
+
+def _credit_text(reply: dict[str, Any]) -> str:
+    credit = reply.get("credit")
+    if not isinstance(credit, dict):
+        return ""
+    try:
+        return (f"{int(credit.get('channel_id') or 0)}:"
+                f"{int(credit.get('consumed') or 0)}:"
+                f"{int(credit.get('cumulative') or 0)}")
+    except (TypeError, ValueError):
+        return ""
 
 
 def reply_auth_hash(request_id: str, spec_digest: str, provider: str,
                     reply: dict[str, Any]) -> bytes:
-    """The receipt hash of ``reply`` (``service_reviews.receipt_hash``):
-    what the provider signs. Ids and digests are compared lowercase without
-    ``0x``."""
-    from nodes.common import service_reviews as sr
+    """keccak over (domain, request id, spec digest, provider, ok, the
+    result's hash, the credits the provider reports): what it signs."""
+    from eth_abi import encode
+    from eth_utils import keccak, to_checksum_address
 
-    return sr.receipt_hash(_reply_receipt(reply, request_id, spec_digest, provider))
+    rid_hex = str(request_id).lower().removeprefix("0x")
+    rid = bytes.fromhex(rid_hex.rjust(64, "0")[:64]) if rid_hex else bytes(32)
+    return keccak(encode(
+        ["string", "bytes32", "string", "address", "bool", "string", "string"],
+        [REPLY_AUTH_DOMAIN, rid, normalize_digest(spec_digest),
+         to_checksum_address(provider), bool(reply.get("ok")),
+         result_hash(reply.get("result"), reply.get("error")),
+         _credit_text(reply)]))
 
 
 def sign_reply(private_key: str, request_id: str, spec_digest: str,
                reply: dict[str, Any]) -> dict[str, Any]:
     """``reply`` with ``result`` and ``error`` in their JSON form (what the
-    buyer will parse), ``payer`` (the address the gate verified, "" when
-    nothing was paid), ``amount`` (base units charged, as a string),
-    ``channel_id`` (the voucher's channel, "0" for a direct payment),
-    ``charged`` as a bool, and ``receipt_sig`` over them."""
+    buyer will parse) and ``reply_sig`` over them."""
     from eth_account import Account
-
-    from nodes.common import service_reviews as sr
+    from eth_account.messages import encode_defunct
 
     out = dict(reply)
     for key in ("result", "error"):
@@ -152,32 +138,25 @@ def sign_reply(private_key: str, request_id: str, spec_digest: str,
             out[key] = json.loads(json.dumps(out[key], default=str))
     key = private_key if private_key.startswith("0x") else "0x" + private_key
     provider = Account.from_key(key).address
-    fields = _reply_receipt(out, request_id, spec_digest, provider)
-    out["payer"] = fields["payer"]
-    out["amount"] = fields["amount"]
-    out["channel_id"] = fields["channel_id"]
-    # ``charged`` is signed either way (absent counts as false in the hash),
-    # but written on the reply only when the reply states it: a reply that
-    # says nothing about payment (a stream's opening reply) must not read as
-    # "not charged" to the buyer's channel book.
-    if isinstance(reply.get("charged"), bool):
-        out["charged"] = fields["charged"]
-    out["receipt_sig"] = sr.sign_hash(key, sr.receipt_hash(fields))
+    msg = encode_defunct(primitive=reply_auth_hash(request_id, spec_digest, provider, out))
+    out["reply_sig"] = "0x" + bytes(Account.sign_message(msg, key).signature).hex()
     return out
 
 
 def reply_signer(reply: Any, request_id: str, spec_digest: str,
                  provider: str) -> str:
-    """The address that signed ``reply`` as a receipt naming ``provider``,
-    or "" when unsigned or invalid."""
+    """The address that signed ``reply`` naming ``provider``, or ""."""
     if not isinstance(reply, dict):
         return ""
-    sig = str(reply.get("receipt_sig") or "").strip()
+    sig = str(reply.get("reply_sig") or "").strip()
     if not sig or not provider:
         return ""
-    from nodes.common import service_reviews as sr
     try:
-        return sr.recover(reply_auth_hash(request_id, spec_digest, provider, reply), sig)
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        msg = encode_defunct(primitive=reply_auth_hash(
+            request_id, spec_digest, provider, reply))
+        return str(Account.recover_message(msg, signature=sig))
     except Exception:  # noqa: BLE001 (a bad signature is just unsigned)
         return ""
 
@@ -188,50 +167,6 @@ def reply_from_provider(reply: Any, request_id: str, spec_digest: str,
     signer = reply_signer(reply, request_id, spec_digest, provider)
     return bool(signer) and signer.lower() == str(provider or "").strip().lower()
 
-
-def receipt_of(reply: Any, request_id: str, spec_digest: str,
-               provider: str) -> dict[str, Any] | None:
-    """The signed receipt of an authentic reply (the fields its signature
-    covers plus ``sig``), or None when ``provider`` did not sign it."""
-    if not reply_from_provider(reply, request_id, spec_digest, provider):
-        return None
-    receipt = _reply_receipt(reply, request_id, spec_digest, provider)
-    receipt["sig"] = str(reply["receipt_sig"]).strip().lower()
-    return receipt
-
-
-# The buyer's receipt store per runtime (atn/service_receipts.py), keyed by
-# the runtime's AutonetConfig: every authentic reply ``request_service``
-# reads is kept there, so the payer can review the request later.
-_receipt_sinks: dict[int, tuple[Any, Any]] = {}
-
-
-def set_receipt_sink(config: Any, sink: Any) -> None:
-    """``sink(receipt, reply)`` for every authentic reply to a request made
-    with ``config``."""
-    import weakref
-    try:
-        ref = weakref.ref(config)
-    except TypeError:
-        return
-    _receipt_sinks[id(config)] = (ref, sink)
-
-
-def clear_receipt_sink(config: Any) -> None:
-    _receipt_sinks.pop(id(config), None)
-
-
-def _note_receipt(config: Any, receipt: dict[str, Any],
-                  reply: dict[str, Any]) -> None:
-    entry = _receipt_sinks.get(id(config))
-    if entry is None or entry[0]() is not config:
-        return
-    try:
-        entry[1](receipt, reply)
-    except Exception:  # noqa: BLE001 (keeping a receipt never fails a request)
-        logging.getLogger(__name__).warning(
-            "could not keep the receipt for %s",
-            str(receipt.get("request_id"))[:16], exc_info=True)
 
 log = logging.getLogger(__name__)
 
@@ -485,6 +420,7 @@ async def request_service(
     p2p_host: Any = None,
     peer_id: str = "",
     voucher: dict[str, Any] | None = None,
+    channel_id: int | None = None,
 ) -> dict[str, Any]:
     """Cross-daemon ``service_request``: send it to the provider, read the reply.
 
@@ -501,9 +437,11 @@ async def request_service(
          (a paid request would be refused as a replay anyway), so a
          provider error or a reply timeout is final.
 
-    ``voucher`` (``{channel_id, cumulative_amount, signature}``) pays
-    through a payment channel instead of ``tx_hash``; the request is then
-    signed by ``payer_key`` under ``request_id`` all the same.
+    ``channel_id`` pays from the buyer's credits with the provider (a
+    payment channel), ``voucher`` (``{channel_id, cumulative_amount,
+    signature}``) adds to them first; ``tx_hash`` is a direct payment
+    instead. A paid request is signed by ``payer_key`` under
+    ``request_id``.
 
     Returns ``{ok, result, error, endpoint, transport, delivered,
     authenticated}``; ``{"error": ..., "delivered": False}`` when the
@@ -513,10 +451,9 @@ async def request_service(
     the reply carries the signature of ``provider_address`` (the address
     paid) over this request id and its content; a reply without it, from a
     relay or whoever answers the wss URL, is never ``ok``. An authentic
-    reply also carries ``charged``: whether the provider kept this
-    request's payment (it keeps a voucher only for a request it served).
-    Any other reply leaves the question open. ``endpoint`` may be passed
-    in to skip the chain read (the provider caches it).
+    reply on credits carries ``credit`` (``channel_id``, ``consumed``,
+    ``cumulative``: the provider's count). ``endpoint`` may be passed in to
+    skip the chain read (the provider caches it).
     """
     from .on_chain import OnChainService
 
@@ -526,7 +463,8 @@ async def request_service(
         return {"error": "Missing spec_digest"}
     if not isinstance(args, dict):
         return {"error": "'args' must be an object"}
-    if not request_id and not (voucher or tx_hash):
+    paid = bool(voucher or tx_hash or channel_id is not None)
+    if not request_id:
         # Unpaid (a free service, or no chain): the provider still needs an
         # id, and the reply's signature covers it.
         request_id = new_request_id()
@@ -542,14 +480,16 @@ async def request_service(
         "client_address": client_address,
     }
     if voucher:
-        # Payment proof (channel path): the voucher for this request.
+        # A new running total for the buyer's credits, sent with the request.
         frame["channel_id"] = int(voucher["channel_id"])
         frame["cumulative_amount"] = int(voucher["cumulative_amount"])
         frame["signature"] = str(voucher["signature"])
+    elif channel_id is not None:
+        frame["channel_id"] = int(channel_id)
     elif tx_hash:
-        # Payment proof (direct payForService path).
+        # A direct payment (payForService) for this one request.
         frame["tx_hash"] = tx_hash
-    if (voucher or tx_hash) and payer_key and request_id:
+    if paid and payer_key and request_id:
         # Signed by the payer, so only it can redeem the payment.
         frame["payer_signature"] = sign_request(
             payer_key, request_id, spec_digest, args, provider_address)
@@ -584,15 +524,9 @@ async def request_service(
                                       if claimed else "")),
             })
         else:
-            # The provider's own word on whether it kept the payment, and
-            # the signed receipt the payer can review the request with.
-            receipt = receipt_of(reply, request_id, spec_digest,
-                                 provider_address)
-            if receipt is not None:
-                out["charged"] = receipt["charged"]
-                out["request_id"] = request_id
-                out["receipt"] = receipt
-                _note_receipt(config, receipt, reply)
+            out["request_id"] = request_id
+            if isinstance(reply.get("credit"), dict):
+                out["credit"] = reply["credit"]
         return out
 
     # --- 1. libp2p ---------------------------------------------------------

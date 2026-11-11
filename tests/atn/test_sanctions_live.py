@@ -167,18 +167,19 @@ def _runtime(sl):
     return SimpleNamespace(autonet=SimpleNamespace(sanctions=sl))
 
 
-def test_agent_cannot_pay_or_buy_from_a_sanctioned_household(monkeypatch):
+def test_agent_cannot_buy_from_a_sanctioned_household(monkeypatch):
     import atn.agent_tools as at
-    from atn.agent_tools import _pay_for_service, _request_service
-    monkeypatch.setattr(at, "_caller_identity", lambda rt, cid: (None, None, "key"))
+    from atn.agent_tools import _open_credits, _open_session, _request_service
+    monkeypatch.setattr(at, "_buyer", lambda rt, cid: ("0x" + "b0" * 20, "key"))
     sl = _list({f"sanction.{HOUSE}": "{}"}, owners={AGENT: HOUSE})
     rt = _runtime(sl)
-    paid = asyncio.run(_pay_for_service(rt, {"recipient": AGENT, "amount": 1}))
-    assert "sanctioned" in paid["error"]
-    bought = asyncio.run(_request_service(rt, {
-        "provider_address": AGENT, "spec_digest": "s", "payload": {},
-        "tx_hash": "0x1", "request_id": "r"}))
+    ref = {"provider_address": AGENT, "spec_digest": "ab" * 32}
+    bought = asyncio.run(_request_service(rt, {**ref, "payload": {}}))
     assert "sanctioned" in bought["error"]
+    session = asyncio.run(_open_session(rt, ref))
+    assert "sanctioned" in session["error"]
+    credits = asyncio.run(_open_credits(rt, {"provider_address": AGENT, "deposit": 10}))
+    assert "sanctioned" in credits["error"]
 
 
 def test_adoption_refused_for_agents_and_flagged_for_the_owner(tmp_path):

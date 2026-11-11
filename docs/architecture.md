@@ -43,13 +43,12 @@ registered in the packaged jurisdiction keeps it. It:
   nothing and installs each anchor's state instead. That state is the
   anchor's carry bundle (registrations, review rounds, ratings, service
   reviews and ratings), the same one a joiner or a rewind installs;
-- keeps the provider's signed receipt of every service reply its buyers
-  read (`atn/service_receipts.py`) and sends the payer's reviews of paid
-  requests (`review_service`) on the epoch batch, again after a close
+- sends the household's reviews of services (`review_service`,
+  `atn/service_review_store.py`) on the epoch batch, again after a close
   that lacks one; the close counts a review once its service is
-  registered and its payment is on chain, read pinned to the snapshot
-  (Decision 2026-11-10, `services_market.md`), and service search shows
-  the rating;
+  registered and its reviewer has paid that provider on chain, read
+  pinned to the snapshot (Decision 2026-11-12, `services_market.md`), and
+  service search shows the rating;
 - reviews on its agents' behalf (commit-reveal): commits when its close
   fires, reveals once that epoch is anchored. Every review carries
   correctness, simplicity, novelty and malware; a malware flag's evidence
@@ -72,13 +71,25 @@ registered in the packaged jurisdiction keeps it. It:
   search is keyword-only until it loads. WS: `search_model_status`, event
   `search.model_status`;
 - keeps the jurisdiction's service catalog (`atn/service_catalog.py`,
-  Decision 2026-11-10 in `services_market.md`): every registered
-  service, followed from the ServiceRegistry (price, active flag and
-  payee come only from there) with its spec, which providers gossip whole
-  on `/autonet/services/<jurisdiction>` and which is kept only when the
-  chain names its digest under the spec's signer. Services are searched
+  Decisions 2026-11-10 and 2026-11-12 in `services_market.md`): every
+  registered service, followed from the ServiceRegistry (active flag and
+  payee come only from there; its price there is optional and
+  unenforced) with its spec and the provider's signed price list, which
+  providers gossip whole on `/autonet/services/<jurisdiction>`; a spec is
+  kept only when the chain names its digest under the spec's signer, a
+  price list only when that provider signed it. Services are searched
   like tools, locally, for the app and the agents; Firestore is not read
   for them;
+- sells its household's services with no further action once they are
+  published (Decision 2026-11-12): each service is a tool registered here,
+  sold by request (the tool runs once per request) or by session (the
+  daemon runs the tool as a server, `atn/service_runner.py`, restarts it,
+  enforces its session cap and records its failures); it checks every
+  payment against the buyer's credits (a payment channel per buyer and
+  provider) or a direct payment, takes back the charge of a failed
+  request, meters sessions (seconds, gigabytes, and the token counts the
+  tool reports) and cashes credits in on chain without closing them
+  (`atn/channel_settlement.py`);
 - keeps working when the chain is silent; only settlement waits.
 - prunes the tools the close lists (Decision 2026-11-10: an uncleared
   malware verdict, a tool built on one, a registration the close refused
@@ -221,13 +232,13 @@ agent directory.
   provider's on-chain peer id, dialled directly or through the provider's
   relay circuit (so NAT'd providers can sell), else forwarded one hop by a
   relay connected to it (relays only, never other daemons); the provider's
-  wss endpoint only when libp2p cannot deliver. A stream service (its spec
-  names a `protocol`) gets a two-way stream instead
-  (`/autonet/service-stream/1.0.0`, Decision 2026-11-10 in
-  `services_market.md`) over the mesh's connections: direct, hole-punched
-  by DCUtR, or a relay circuit; channel vouchers travel on it as the
-  provider meters usage. An agent opens one with `open_service_stream` and
-  gets a local port; the provider pipes it to a local backend.
+  wss endpoint only when libp2p cannot deliver. A session service gets a
+  two-way session instead (`/autonet/service-session/1.0.0`, Decision
+  2026-11-12 in `services_market.md`) over the mesh's connections: direct,
+  hole-punched by DCUtR, or a relay circuit; vouchers on the buyer's
+  credits travel on it as the provider asks. An agent opens one with
+  `open_session` and gets a local port; the provider's daemon pipes it to
+  the service's tool.
 - Daemon to chain: one RPC URL. Contract addresses come from the
   jurisdiction's Registry, read at each start (latest block). The close's
   parameters (REP, charter, sanctions, mint gate, review params, epoch rules) are read

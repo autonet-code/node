@@ -32,8 +32,8 @@ Checks, printed as PASS/FAIL lines:
       are still found and fetched;
   (e) a daemon restarted with its only seed down rejoins through its peer
       cache;
-  (f) service streams (Decision 2026-11-10): NAT'd to NAT'd across the two
-      gateways, direct over the hole-punched connection; to the proxied
+  (f) service sessions (Decision 2026-11-12): NAT'd to NAT'd across the
+      two gateways, direct over the hole-punched connection; to the proxied
       daemon, through a relay circuit, megabytes each way (relayed
       connections are unlimited unless the relay's operator caps them).
 
@@ -345,17 +345,17 @@ def phase_a() -> None:
 
 
 def phase_f() -> None:
-    say("(f) service streams: hole-punched NAT'd to NAT'd, and through a relay circuit")
+    say("(f) service sessions: hole-punched NAT'd to NAT'd, and through a relay circuit")
     b1 = ctl("nat-b1", "status").get("peer_id")
-    out = ctl("nat-a1", "stream", {"peer": b1, "bytes": 2 * 1024 * 1024}, timeout=180)
+    out = ctl("nat-a1", "session", {"peer": b1, "bytes": 2 * 1024 * 1024}, timeout=180)
     remotes = [r[0] for r in out.get("remote") or [] if r]
     check(bool(out.get("ok")) and out.get("path") == "direct" and NAT_IP["nat-b1"] in remotes,
-          f"(f) nat-a1 -> nat-b1 stream, 2 MiB each way, path {out.get('path')}, "
+          f"(f) nat-a1 -> nat-b1 session, 2 MiB each way, path {out.get('path')}, "
           f"remote {remotes}, {out.get('seconds')}s {out.get('error', '')}")
     h = ctl("proxied-h", "status").get("peer_id")
-    out = ctl("nat-a1", "stream", {"peer": h, "bytes": 8 * 1024 * 1024}, timeout=300)
+    out = ctl("nat-a1", "session", {"peer": h, "bytes": 8 * 1024 * 1024}, timeout=300)
     check(bool(out.get("ok")) and out.get("path") == "relayed",
-          f"(f) nat-a1 -> proxied-h stream through the relay, 8 MiB each way, path "
+          f"(f) nat-a1 -> proxied-h session through the relay, 8 MiB each way, path "
           f"{out.get('path')}, {out.get('seconds')}s {out.get('error', '')}")
 
 

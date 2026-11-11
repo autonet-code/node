@@ -101,6 +101,10 @@ def build_tool_manifest(
     # validate older manifests); REQUIRED to publish (publish_novelty_errors).
     # Inside the signed manifest, so the claim is bound to the digest.
     novelty: Optional[Dict[str, Any]] = None,
+    # A tool that serves sessions (Decision 2026-11-12, services_market.md):
+    # {protocol: {id, spec, spec_url?}, max_sessions, process,
+    #  reports_usage}. Absent = the tool answers one request per run.
+    session: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble and validate a tool-manifest payload.
 
@@ -149,6 +153,8 @@ def build_tool_manifest(
         manifest["capabilities"] = dict(capabilities)
     if novelty is not None:
         manifest["novelty"] = normalize_novelty(novelty)
+    if session is not None:
+        manifest["session"] = normalize_session(session)
 
     errors = validate_manifest(manifest)
     if errors:
@@ -210,6 +216,11 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
     if payload.get("novelty") is not None:
         errors.extend(novelty_errors(payload.get("novelty")))
 
+    if payload.get("session") is not None:
+        errors.extend(session_errors(payload.get("session")))
+        if trust != TRUST_PINNED:
+            errors.append("only a pinned tool (with code) can serve sessions")
+
     caps = payload.get("capabilities")
     if caps is not None:
         if not isinstance(caps, dict):
@@ -270,6 +281,98 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
         elif len(deps) != len(set(deps)):
             errors.append("dependencies must be unique")
 
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Sessions (Decision 2026-11-12, docs/services_market.md). A tool that serves
+# sessions runs as a server the daemon starts: it serves buyers on the port
+# in AUTONET_SERVICE_PORT, reads its service's settings from
+# AUTONET_SERVICE_SETTINGS (JSON), and, when it reports usage, posts each
+# connection's token counts to AUTONET_USAGE_URL. The daemon carries the
+# network, the payments and the cut-off; the tool only does the work.
+#
+#   protocol      {id, spec, spec_url?}: what buyers speak, a name and a
+#                 version ("openai-chat/1", "ssh/2"); `spec` is the sha256 of
+#                 the protocol's published specification (a blob the author
+#                 adds to the store, so any daemon can fetch it), `spec_url`
+#                 where it is published. Required.
+#   max_sessions  how many sessions at once (0 = no cap). Default 0.
+#   process       "shared": one process for every session (a model server);
+#                 "per_session": a fresh process per buyer (a rented
+#                 machine). Default "shared".
+#   reports_usage the measures the tool counts and reports, a subset of
+#                 MEASURES_REPORTED. Only these can be priced in tokens.
+# ---------------------------------------------------------------------------
+
+PROTOCOL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}/[0-9]{1,9}$")
+SESSION_PROCESSES = ("shared", "per_session")
+MEASURES_REPORTED = ("input_tokens", "output_tokens")
+_SESSION_KEYS = ("protocol", "max_sessions", "process", "reports_usage")
+_PROTOCOL_KEYS = ("id", "spec", "spec_url")
+
+
+def normalize_session(session: Any) -> Any:
+    """Canonical form of a session block: defaults filled, the spec digest
+    lower-case without 0x, reports_usage sorted. Non-dicts pass through for
+    validation to reject."""
+    if not isinstance(session, dict):
+        return session
+    out = dict(session)
+    proto = out.get("protocol")
+    if isinstance(proto, dict):
+        proto = dict(proto)
+        if isinstance(proto.get("id"), str):
+            proto["id"] = proto["id"].strip()
+        if isinstance(proto.get("spec"), str):
+            proto["spec"] = proto["spec"].strip().lower().removeprefix("0x")
+        if isinstance(proto.get("spec_url"), str):
+            proto["spec_url"] = proto["spec_url"].strip()
+            if not proto["spec_url"]:
+                del proto["spec_url"]
+        out["protocol"] = proto
+    out.setdefault("max_sessions", 0)
+    out.setdefault("process", "shared")
+    reported = out.get("reports_usage", [])
+    if isinstance(reported, list):
+        out["reports_usage"] = sorted({str(m) for m in reported})
+    return out
+
+
+def session_errors(session: Any) -> List[str]:
+    """Structure check of a session block (see above)."""
+    if not isinstance(session, dict):
+        return ["session must be an object {protocol, max_sessions, process, "
+                "reports_usage}"]
+    errors: List[str] = []
+    extra = sorted(set(session) - set(_SESSION_KEYS))
+    if extra:
+        errors.append(f"session has unknown keys {extra}")
+    proto = session.get("protocol")
+    if not isinstance(proto, dict):
+        errors.append("session.protocol is required: {id, spec, spec_url?}")
+    else:
+        extra = sorted(set(proto) - set(_PROTOCOL_KEYS))
+        if extra:
+            errors.append(f"session.protocol has unknown keys {extra}")
+        if not isinstance(proto.get("id"), str) or not PROTOCOL_ID_RE.match(proto["id"]):
+            errors.append("session.protocol.id must be a name and a version "
+                          "number, e.g. 'openai-chat/1' or 'ssh/2'")
+        if not isinstance(proto.get("spec"), str) or not _HEX64.match(proto["spec"]):
+            errors.append("session.protocol.spec must be the sha256 (64 hex) of "
+                          "the protocol's published specification")
+        url = proto.get("spec_url")
+        if url is not None and (not isinstance(url, str) or not url.startswith("https://")):
+            errors.append("session.protocol.spec_url must be an https address")
+    cap = session.get("max_sessions", 0)
+    if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
+        errors.append("session.max_sessions must be a whole number (0 = no cap)")
+    if session.get("process", "shared") not in SESSION_PROCESSES:
+        errors.append(f"session.process must be one of {SESSION_PROCESSES}")
+    reported = session.get("reports_usage", [])
+    if not isinstance(reported, list) or any(m not in MEASURES_REPORTED for m in reported):
+        errors.append(f"session.reports_usage must list measures from "
+                      f"{MEASURES_REPORTED}")
     return errors
 
 

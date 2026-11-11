@@ -70,6 +70,39 @@ def test_bad_manifests_are_refused(tmp_path):
         tool_tree.snapshot(root)
 
 
+def test_service_files_are_not_part_of_the_snapshot(tmp_path):
+    """autonet-services/ says how the tool is sold, not what it is: a
+    changed listing never changes the tool's digest."""
+    root = _codebase(tmp_path / "a")
+    digest = tool_tree.snapshot(root)[1]
+    services = root / tool_tree.SERVICES_DIR
+    services.mkdir()
+    (services / "greet.json").write_text(json.dumps({"name": "greet", "price": 5}))
+    meta, again, archive = tool_tree.snapshot(root)
+    assert again == digest
+    assert not any(f.startswith(tool_tree.SERVICES_DIR)
+                   for f in tool_tree.unpack(archive))
+    (services / "greet.json").write_text(json.dumps({"name": "greet", "price": 6}))
+    assert tool_tree.snapshot(root)[1] == digest
+
+
+@pytest.mark.asyncio
+async def test_a_codebase_declares_its_session_block(tmp_path):
+    rt = _make_runtime(tmp_path)
+    await _family(rt)
+    root = _codebase(tmp_path / "work" / "greet")
+    manifest = json.loads((root / tool_tree.MANIFEST_FILE).read_text())
+    manifest["session"] = {"protocol": {"id": "greet/1", "spec": "ab" * 32},
+                           "process": "per_session"}
+    (root / tool_tree.MANIFEST_FILE).write_text(json.dumps(manifest))
+    res = await execute_tool("register_tool", {"path": str(root)}, rt,
+                             caller_id="child")
+    assert "error" not in res, res
+    session = rt.tool_store.get(res["digest"]).manifest["session"]
+    assert session["protocol"]["id"] == "greet/1"
+    assert session["process"] == "per_session" and session["max_sessions"] == 0
+
+
 @pytest.mark.asyncio
 async def test_register_by_path_and_run_the_snapshot(tmp_path):
     rt = _make_runtime(tmp_path)

@@ -84,24 +84,31 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   presence (robots). Anything that is only know-how ends up a tool. They
   earn money only: no mint, no REP, no standing; trust in them is
   behavioral.
-- **Paying for services** (Decision 2026-11-10): holding ATN is the
-  household's credit in the service economy, and a payment channel is its
-  prepaid balance with one provider. The buyer signs the running total per
-  unit consumed, so neither side risks more than one unit, and no request
-  needs its own transaction. Each service's spec says what one unit is
-  (`unit`); its price per unit is on chain only.
-- **Service reviews** (Decision 2026-11-10, `services_market.md`): a
-  buyer rates a request it paid for with a tool review's fields
-  (correctness, simplicity read as the buyer's convenience, novelty,
-  malware with evidence, the charter axes). Authority comes from payment,
-  not REP: only the payer named in the provider's signed receipt (which
-  says the request was charged) may review it, the service must be
-  registered, a review counts only once that payment is on chain (a direct
-  payment, or the channel's close, read pinned to the snapshot like REP),
-  and every payer counts once, so rating oneself costs a real payment per
-  payer. The reviews ride the epoch batches; the close keeps each payer's
-  latest per service and commits the ratings (means, the share flagging
-  malware, payers, amount charged) in the anchored state. They inform
+- **Paying for services** (Decision 2026-11-12): holding ATN is the
+  household's credit in the service economy. Its credits with one provider
+  are a payment channel for all that provider's services, opened and
+  topped up by its Agent (nothing does either automatically). Vouchers pay
+  ahead by the provider's voucher size, so a buyer never has more than one
+  voucher at risk, and a request the provider refuses or fails costs
+  nothing; the provider cashes credits in without closing them, and its
+  fee burns as it earns. A one-off request to a provider the buyer holds
+  no credits with is paid directly. Prices are the provider's signed price
+  list (per request, or for a session per seconds, gigabytes, input tokens
+  and output tokens), changed without a transaction; a session keeps the
+  prices it opened with. The registry's price is optional and enforces
+  nothing.
+- **Service reviews** (Decisions 2026-11-10 and 2026-11-12,
+  `services_market.md`): a buyer rates a service with a tool review's
+  fields (correctness, simplicity read as the buyer's convenience,
+  novelty, malware with evidence, the charter axes). Authority comes from
+  payment, not REP: a review counts once its reviewer has paid that
+  provider on chain (a direct payment, or a payout from its credits), read
+  pinned to the snapshot like REP, and every payer counts once per service.
+  Credits are per provider, so paying a provider lets a buyer review any of
+  its services; that still costs a real payment to that provider. The
+  reviews ride the epoch batches; the close keeps each payer's latest per
+  service and commits the ratings (means, the share flagging malware,
+  payers, what they paid the provider) in the anchored state. They inform
   other buyers and enforce nothing: no mint, no REP, no slashing.
 - **OPEN:** a legal opinion (EU, MiCA) on the vault sale and on any
   redemption from treasury reserves, which would turn the ceiling into a

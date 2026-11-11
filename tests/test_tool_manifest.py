@@ -205,3 +205,51 @@ def test_manifest_lineage_tolerates_missing_and_cycles(blob_store):
     # forge a loop: a's payload can't be edited (content-addressed), so
     # just assert the walker's seen-set stops on revisits via b -> a -> stop
     assert manifest_lineage(blob_store, b) == [b, a]
+
+
+# ---------------------------------------------------------------------------
+# Session block (Decision 2026-11-12, docs/services_market.md)
+# ---------------------------------------------------------------------------
+
+_SESSION = {"protocol": {"id": "openai-chat/1", "spec": "ab" * 32}}
+
+
+def test_session_block_is_normalized():
+    m = _pinned(session={
+        "protocol": {"id": " ssh/2 ", "spec": "0X" + "AB" * 32, "spec_url": " "},
+        "reports_usage": ["output_tokens", "input_tokens", "output_tokens"]})
+    assert m["session"] == {
+        "protocol": {"id": "ssh/2", "spec": "ab" * 32},
+        "max_sessions": 0, "process": "shared",
+        "reports_usage": ["input_tokens", "output_tokens"]}
+    assert validate_manifest(m) == []
+    full = _pinned(session={**_SESSION, "max_sessions": 4, "process": "per_session",
+                            "protocol": {**_SESSION["protocol"],
+                                         "spec_url": "https://example.com/p"}})
+    assert validate_manifest(full) == []
+    # Inside the signed bytes: a tool that serves sessions is another tool.
+    assert canonical_manifest_bytes(full) != canonical_manifest_bytes(_pinned())
+
+
+def test_only_pinned_tools_serve_sessions():
+    with pytest.raises(ValueError, match="only a pinned tool"):
+        _attested(session=_SESSION)
+
+
+@pytest.mark.parametrize("session, err", [
+    ("openai-chat/1", "session must be an object"),
+    ({}, "session.protocol is required"),
+    ({**_SESSION, "port": 8080}, "unknown keys"),
+    ({"protocol": {**_SESSION["protocol"], "name": "x"}}, "unknown keys"),
+    ({"protocol": {"id": "openai-chat", "spec": "ab" * 32}}, "protocol.id"),
+    ({"protocol": {"id": "openai-chat/1", "spec": "ab"}}, "protocol.spec"),
+    ({"protocol": {**_SESSION["protocol"], "spec_url": "http://x"}}, "https"),
+    ({**_SESSION, "max_sessions": -1}, "max_sessions"),
+    ({**_SESSION, "max_sessions": True}, "max_sessions"),
+    ({**_SESSION, "process": "forked"}, "session.process"),
+    ({**_SESSION, "reports_usage": ["seconds"]}, "reports_usage"),
+    ({**_SESSION, "reports_usage": "input_tokens"}, "reports_usage"),
+])
+def test_bad_session_blocks(session, err):
+    errors = validate_manifest({**_pinned(), "session": session})
+    assert any(err in e for e in errors), errors

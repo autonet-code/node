@@ -1,56 +1,49 @@
-"""Service reviews in the epoch-close (Decision 2026-11-10,
-docs/services_market.md).
+"""Service reviews in the epoch-close (docs/services_market.md, Decisions
+2026-11-10 and 2026-11-12).
 
-A service review is a buyer's rating of a service it paid for. It has the
-fields of a tool review (correctness, simplicity, novelty, malware, the
-optional charter axes) and rides the epoch batches as one
-``service_review`` event. Authority comes from payment, not REP: a review
-counts only when its payer's payment is on chain, and every counted review
-weighs the same. The close keeps each payer's latest review of each service
-and commits the per-service ratings in the anchored carry bundle. Reviews
-enforce nothing: no mint, no REP, no slashing.
-
-**Receipt.** The provider signs every reply (``receipt_sig``) over
-``receipt_hash``: keccak of the ABI encoding of (domain, request id, spec
-digest, provider address, the payer the gate verified, ok, charged, the
-amount charged, the channel id of a voucher payment or 0, sha256 of the
-canonical ``{"error", "result"}`` JSON). The result itself is not in it, so
-a review proves the receipt without revealing what the provider returned.
+A service review is a buyer's rating of a service. It has the fields of a
+tool review (correctness, simplicity, novelty, malware, the optional
+charter axes) and rides the epoch batches as one ``service_review`` event.
+Authority comes from payment, not REP: a review counts only when its
+reviewer has paid the service's provider on chain, and every counted review
+weighs the same. A buyer's credits are per provider (one payment channel
+for all its services), so paying a provider lets the buyer review any of
+its services: the review names the service; nothing proves the reviewer
+used that one rather than another of the same provider's. That still costs
+a real payment to that provider. The close keeps each payer's latest
+review of each service and commits the per-service ratings in the anchored
+carry bundle. Reviews enforce nothing: no mint, no REP, no slashing.
 
 **Event.**::
 
-  {"kind": "service_review", "v": 1,
-   "receipt": {"request_id", "spec_digest", "provider", "payer", "ok",
-               "charged", "amount", "channel_id", "result_hash", "sig"},
+  {"kind": "service_review", "v": 2,
+   "service": {"provider": "0x...", "spec_digest": "<64 hex>"},
    "review": {"jurisdiction", "correctness", "simplicity", "novelty",
               "malware", "axes", "evidence_hash", "note", "ts"},
    "reviewer": "0x...", "sig": "0x..."}
 
 Scores are in hundredths, as on ToolBond's wire: correctness and charter
 axes -100..100, simplicity and novelty 0..100, malware true or false. The
-reviewer signs ``review_hash`` (keccak of the domain, the receipt hash and
+reviewer signs ``review_hash`` (keccak of the domain, the service key and
 the sha256 of the review's canonical JSON).
 
-**Validity** (``validate_event``, pure): the receipt is well formed, says
-``charged: true`` and is signed by its provider; the reviewer is the
-receipt's payer, is not the provider, and signed the review; the review is
-for this jurisdiction, has all four fields in range, evidence with a
-malware yes, and is not dated more than ``MAX_FUTURE_S`` after its batch.
+**Validity** (``validate_event``, pure): the service is well formed; the
+reviewer is not its provider and signed the review; the review is for this
+jurisdiction, has all four fields in range, evidence with a malware yes,
+and is not dated more than ``MAX_FUTURE_S`` after its batch.
 
 **The chain, pinned to the snapshot block** (``snapshot_from_logs``, read
 by ``voice_state.read_service_snapshot`` like the rest of the close's chain
-inputs): the (provider, digest) pairs the ServiceRegistry registered, the
-direct ``ServicePayment`` events, the closed payment channels, and the
-Registry's ``unscored_axis_bps``. With a snapshot:
+inputs): the (provider, digest) pairs the ServiceRegistry registered, what
+each payer has paid each provider (Substrate ``ServicePayment`` events
+sent by the payer, and PaymentChannel ``ChannelPaid`` payouts from the
+payer's channels), and the Registry's ``unscored_axis_bps``. With a
+snapshot:
 
   - a review of a pair that is not registered is dropped, new or carried;
-  - a review counts only when its payment is on chain: a direct payment
-    with the receipt's request id from the payer to the provider covering
-    the receipt's amount, or the receipt's channel (client the payer,
-    provider the provider) closed with a settled amount covering the
-    amounts of the reviews drawing on it (earliest first). A review whose
-    payment is not there yet waits (``paid: false``) and counts at the
-    first close whose snapshot has it.
+  - a review counts only once its reviewer has paid the provider (any
+    amount above 0). Until then it waits (``paid: false``) and counts at
+    the first close whose snapshot has the payment.
 
 Without a snapshot (no chain: tests, local tools) every valid review counts.
 
@@ -60,10 +53,11 @@ hash) replaces the earlier, so a replayed old review changes nothing. A
 service's rating is over its payers' latest paid reviews: the mean of each
 field, the malware share as the share of payers flagging it, each charter
 axis's mean (an unscored axis at the pinned ``unscored_axis_bps``) and
-their mean together, the number of payers, what their receipts charged,
-and how many reviews wait for their payment. Not counted (kept, so a change
-of the pinned inputs counts them again): payers of the provider's own
-household and sanctioned households. Ratings are keyed by (provider
+their mean together, the number of payers, what those payers have paid the
+provider in all (``paid``: for all its services, since credits are per
+provider), and how many reviews wait for a payment. Not counted (kept, so a
+change of the pinned inputs counts them again): payers of the provider's
+own household and sanctioned households. Ratings are keyed by (provider
 address, spec digest), so a copy registered under another address never
 shares a rating. Every sum is over integers and every iteration over
 sorted keys, so every daemon computes the same bytes.
@@ -77,9 +71,8 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 KIND = "service_review"
-EVENT_VERSION = 1
-RECEIPT_DOMAIN = "autonet:service_receipt:v1"
-REVIEW_DOMAIN = "autonet:service_review:v1"
+EVENT_VERSION = 2
+REVIEW_DOMAIN = "autonet:service_review:v2"
 ZERO_ADDRESS = "0x" + "00" * 20
 
 # A review may be dated at most this long after the batch carrying it.
@@ -100,12 +93,8 @@ UNSCORED_BPS_DEFAULT = 5000
 BPS = 10_000
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_HEXID = re.compile(r"^[0-9a-f]{1,64}$")
 _ADDR = re.compile(r"^0x[0-9a-f]{40}$")
 _SIG = re.compile(r"^0x[0-9a-f]{130}$")
-_UINT = re.compile(r"^(0|[1-9][0-9]{0,77})$")
-RECEIPT_KEYS = frozenset({"request_id", "spec_digest", "provider", "payer", "ok",
-                          "charged", "amount", "channel_id", "result_hash", "sig"})
 _REVIEW_KEYS = frozenset({"jurisdiction", "correctness", "simplicity", "novelty",
                           "malware", "axes", "evidence_hash", "note", "ts"})
 _RANGES = {"correctness": (-100, 100), "simplicity": (0, 100), "novelty": (0, 100)}
@@ -133,43 +122,13 @@ def norm_address(value: Any) -> str:
     return v if v.startswith("0x") else "0x" + v
 
 
-def request_id32(value: Any) -> str:
-    """A request id as the 64 hex digits of its bytes32 (what the chain
-    logs)."""
-    return norm_hex(value).rjust(64, "0")
-
-
-def result_hash(result: Any, error: Any) -> str:
-    """sha256 (hex) of the reply's result and error as canonical JSON: what a
-    receipt commits to instead of the result itself."""
-    return hashlib.sha256(canonical_json({"error": error, "result": result})).hexdigest()
-
-
-def receipt_hash(receipt: Dict[str, Any]) -> bytes:
-    """What the provider signs for one reply (see the module docstring)."""
-    from eth_abi import encode
-    from eth_utils import keccak, to_checksum_address
-
-    payer = norm_address(receipt.get("payer")) or ZERO_ADDRESS
-    return keccak(encode(
-        ["string", "string", "string", "address", "address", "bool", "bool",
-         "uint256", "uint256", "bytes32"],
-        [RECEIPT_DOMAIN, norm_hex(receipt.get("request_id")),
-         norm_hex(receipt.get("spec_digest")),
-         to_checksum_address(norm_address(receipt.get("provider")) or ZERO_ADDRESS),
-         to_checksum_address(payer), bool(receipt.get("ok")),
-         bool(receipt.get("charged")), int(receipt.get("amount") or 0),
-         int(receipt.get("channel_id") or 0),
-         bytes.fromhex(norm_hex(receipt.get("result_hash")).rjust(64, "0"))]))
-
-
-def review_hash(receipt_h: bytes, review: Dict[str, Any]) -> bytes:
-    """What the reviewer signs: the review bound to its receipt."""
+def review_hash(service_k: str, review: Dict[str, Any]) -> bytes:
+    """What the reviewer signs: the review bound to the service it rates."""
     from eth_abi import encode
     from eth_utils import keccak
 
-    return keccak(encode(["string", "bytes32", "bytes32"],
-                         [REVIEW_DOMAIN, bytes(receipt_h),
+    return keccak(encode(["string", "string", "bytes32"],
+                         [REVIEW_DOMAIN, str(service_k),
                           hashlib.sha256(canonical_json(review)).digest()]))
 
 
@@ -209,39 +168,16 @@ def _int_in(value: Any, lo: int, hi: int) -> Optional[int]:
     return value if lo <= value <= hi else None
 
 
-def _uint(value: Any) -> bool:
-    return isinstance(value, str) and bool(_UINT.match(value)) and int(value) < 2 ** 256
-
-
-def normalize_receipt(raw: Any) -> Tuple[Optional[Dict[str, Any]], str]:
-    """A receipt in canonical form, signature checked, or (None, why)."""
-    if not isinstance(raw, dict) or set(raw) != RECEIPT_KEYS:
-        return None, "receipt fields"
-    rid, digest = raw.get("request_id"), raw.get("spec_digest")
-    provider, payer = raw.get("provider"), raw.get("payer")
-    if not (isinstance(rid, str) and _HEXID.match(rid)):
-        return None, "request_id"
-    if not (isinstance(digest, str) and _HEX64.match(digest)):
-        return None, "spec_digest"
-    if not (isinstance(provider, str) and _ADDR.match(provider)):
+def normalize_service(raw: Any) -> Tuple[Optional[Dict[str, str]], str]:
+    """A review's service in canonical form, or (None, why)."""
+    if not isinstance(raw, dict) or set(raw) != {"provider", "spec_digest"}:
+        return None, "service fields"
+    provider, digest = norm_address(raw.get("provider")), norm_hex(raw.get("spec_digest"))
+    if not _ADDR.match(provider) or provider == ZERO_ADDRESS:
         return None, "provider"
-    if not (isinstance(payer, str) and _ADDR.match(payer)) or payer == ZERO_ADDRESS:
-        return None, "payer"
-    if not isinstance(raw.get("ok"), bool) or not isinstance(raw.get("charged"), bool):
-        return None, "ok/charged"
-    if not _uint(raw.get("amount")):
-        return None, "amount"
-    if not _uint(raw.get("channel_id")):
-        return None, "channel_id"
-    if not (isinstance(raw.get("result_hash"), str) and _HEX64.match(raw["result_hash"])):
-        return None, "result_hash"
-    sig = raw.get("sig")
-    if not (isinstance(sig, str) and _SIG.match(sig)):
-        return None, "receipt signature"
-    receipt = dict(raw)
-    if recover(receipt_hash(receipt), sig) != provider:
-        return None, "receipt not signed by its provider"
-    return receipt, ""
+    if not _HEX64.match(digest):
+        return None, "spec_digest"
+    return {"provider": provider, "spec_digest": digest}, ""
 
 
 def validate_event(ev: Any, *, jurisdiction: str,
@@ -252,15 +188,13 @@ def validate_event(ev: Any, *, jurisdiction: str,
         return None, "not a service review"
     if ev.get("v") != EVENT_VERSION:
         return None, "version"
-    receipt, why = normalize_receipt(ev.get("receipt"))
-    if receipt is None:
+    service, why = normalize_service(ev.get("service"))
+    if service is None:
         return None, why
-    if not receipt["charged"]:
-        return None, "the receipt says nothing was charged"
     reviewer = ev.get("reviewer")
-    if reviewer != receipt["payer"]:
-        return None, "the reviewer is not the payer"
-    if reviewer == receipt["provider"]:
+    if not (isinstance(reviewer, str) and _ADDR.match(reviewer)):
+        return None, "reviewer"
+    if reviewer == service["provider"]:
         return None, "the provider reviewing itself"
     review = ev.get("review")
     if not isinstance(review, dict) or set(review) != _REVIEW_KEYS:
@@ -299,13 +233,11 @@ def validate_event(ev: Any, *, jurisdiction: str,
     sig = ev.get("sig")
     if not (isinstance(sig, str) and _SIG.match(sig)):
         return None, "review signature"
-    h = review_hash(receipt_hash(receipt), review)
+    key = service_key(service["provider"], service["spec_digest"])
+    h = review_hash(key, review)
     if recover(h, sig) != reviewer:
-        return None, "review not signed by the payer"
+        return None, "review not signed by the reviewer"
     record = {
-        "request_id": receipt["request_id"],
-        "amount": int(receipt["amount"]),
-        "channel_id": int(receipt["channel_id"]),
         **scores,
         "malware": bool(review["malware"]),
         "axes": {k: int(axes[k]) for k in sorted(axes)},
@@ -315,16 +247,15 @@ def validate_event(ev: Any, *, jurisdiction: str,
         "hash": h.hex(),
         "paid": False,
     }
-    return {"key": service_key(receipt["provider"], receipt["spec_digest"]),
-            "payer": reviewer, "record": record}, ""
+    return {"key": key, "payer": reviewer, "record": record}, ""
 
 
-def build_event(private_key: str, receipt: Dict[str, Any], *, jurisdiction: str,
-                correctness: int, simplicity: int, novelty: int, malware: bool,
-                axes: Optional[Dict[str, int]] = None, evidence_hash: str = "",
-                note: str = "", ts: int) -> Dict[str, Any]:
-    """A signed ``service_review`` event (scores in hundredths). The
-    caller checks the inputs; ``validate_event`` is the judge."""
+def build_event(private_key: str, *, provider: str, spec_digest: str,
+                jurisdiction: str, correctness: int, simplicity: int,
+                novelty: int, malware: bool, axes: Optional[Dict[str, int]] = None,
+                evidence_hash: str = "", note: str = "", ts: int) -> Dict[str, Any]:
+    """A signed ``service_review`` event (scores in hundredths). The caller
+    checks the inputs; ``validate_event`` is the judge."""
     from eth_account import Account
 
     key = private_key if private_key.startswith("0x") else "0x" + private_key
@@ -339,14 +270,15 @@ def build_event(private_key: str, receipt: Dict[str, Any], *, jurisdiction: str,
         "note": str(note or ""),
         "ts": int(ts),
     }
-    receipt = {k: receipt[k] for k in sorted(RECEIPT_KEYS)}
+    service = {"provider": norm_address(provider), "spec_digest": norm_hex(spec_digest)}
     return {
         "kind": KIND,
         "v": EVENT_VERSION,
-        "receipt": receipt,
+        "service": service,
         "review": review,
         "reviewer": str(Account.from_key(key).address).lower(),
-        "sig": sign_hash(key, review_hash(receipt_hash(receipt), review)),
+        "sig": sign_hash(key, review_hash(
+            service_key(service["provider"], service["spec_digest"]), review)),
     }
 
 
@@ -358,49 +290,42 @@ def snapshot_from_logs(
     *,
     registered: Iterable[Dict[str, Any]] = (),
     payments: Iterable[Dict[str, Any]] = (),
-    opened: Iterable[Dict[str, Any]] = (),
-    closed: Iterable[Dict[str, Any]] = (),
+    payouts: Iterable[Dict[str, Any]] = (),
     unscored_bps: Any = None,
     channel_address: str = "",
 ) -> Dict[str, Any]:
     """The close's service snapshot from log args, all up to the snapshot
     block: ``ServiceRegistered`` (provider, specDigest), Substrate
-    ``ServicePayment`` (payer, recipient, amount, requestId), PaymentChannel
-    ``ChannelOpened`` (channelId, client, provider) and ``ChannelClosed``
-    (channelId, paidToProvider). Returns::
+    ``ServicePayment`` (payer, recipient, amount) and PaymentChannel
+    ``ChannelPaid`` (client, provider, amount). Returns::
 
       {"registered": ["<provider>:<digest>", ...],
-       "payments": {request_id64: {"<payer>:<recipient>": amount}},
-       "channels": {"<id>": {"client", "provider", "paid"}},
+       "paid": {"<payer>:<provider>": amount},
        "unscored_bps": int}
 
-    Payments are kept only to registered providers, and not the channel
-    contract's own settlements (a channel counts by its close)."""
+    Payments count only to registered providers. A channel payout counts
+    for the channel's client; the channel contract's own ``ServicePayment``
+    (it pays providers through Substrate) is not counted twice."""
     pairs = sorted({service_key(a.get("provider"), _hex32(a.get("specDigest")))
                     for a in registered})
     providers = {p.split(":", 1)[0] for p in pairs}
     channel = norm_address(channel_address)
-    paid: Dict[str, Dict[str, int]] = {}
+    paid: Dict[str, int] = {}
+
+    def add(payer: str, provider: str, amount: Any) -> None:
+        if provider not in providers or not payer:
+            return
+        who = f"{payer}:{provider}"
+        paid[who] = paid.get(who, 0) + max(0, int(amount or 0))
     for a in payments:
-        payer, recipient = norm_address(a.get("payer")), norm_address(a.get("recipient"))
-        if recipient not in providers or (channel and payer == channel):
+        payer = norm_address(a.get("payer"))
+        if channel and payer == channel:
             continue
-        rid = _hex32(a.get("requestId"))
-        who = f"{payer}:{recipient}"
-        paid.setdefault(rid, {})
-        paid[rid][who] = paid[rid].get(who, 0) + int(a.get("amount") or 0)
-    sides = {str(int(a["channelId"])): (norm_address(a.get("client")),
-                                        norm_address(a.get("provider")))
-             for a in opened}
-    channels: Dict[str, Dict[str, Any]] = {}
-    for a in closed:
-        cid = str(int(a["channelId"]))
-        if cid in sides:
-            client, provider = sides[cid]
-            channels[cid] = {"client": client, "provider": provider,
-                             "paid": int(a.get("paidToProvider") or 0)}
-    return normalize_snapshot({"registered": pairs, "payments": paid,
-                               "channels": channels, "unscored_bps": unscored_bps})
+        add(payer, norm_address(a.get("recipient")), a.get("amount"))
+    for a in payouts:
+        add(norm_address(a.get("client")), norm_address(a.get("provider")), a.get("amount"))
+    return normalize_snapshot({"registered": pairs, "paid": paid,
+                               "unscored_bps": unscored_bps})
 
 
 def _hex32(value: Any) -> str:
@@ -416,21 +341,10 @@ def normalize_snapshot(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]
         bps = int(str(raw.get("unscored_bps")).strip())
     except (TypeError, ValueError):
         bps = UNSCORED_BPS_DEFAULT
-    payments: Dict[str, Dict[str, int]] = {}
-    for rid in sorted(raw.get("payments") or {}):
-        by = (raw.get("payments") or {})[rid]
-        if isinstance(by, dict):
-            payments[request_id32(rid)] = {str(k): max(0, int(v)) for k, v in sorted(by.items())}
-    channels: Dict[str, Dict[str, Any]] = {}
-    for cid in sorted(raw.get("channels") or {}, key=lambda c: int(c)):
-        c = (raw.get("channels") or {})[cid]
-        if isinstance(c, dict):
-            channels[str(int(cid))] = {"client": norm_address(c.get("client")),
-                                       "provider": norm_address(c.get("provider")),
-                                       "paid": max(0, int(c.get("paid") or 0))}
+    paid = {str(k): max(0, int(v)) for k, v in sorted((raw.get("paid") or {}).items())
+            if isinstance(v, int) or str(v).isdigit()}
     return {"registered": sorted({str(p) for p in raw.get("registered") or ()}),
-            "payments": payments, "channels": channels,
-            "unscored_bps": max(0, min(BPS, bps))}
+            "paid": paid, "unscored_bps": max(0, min(BPS, bps))}
 
 
 # ---------------------------------------------------------------------------
@@ -457,40 +371,14 @@ def _normalize_carried(carried: Optional[Dict[str, Any]]) -> Dict[str, Dict[str,
 
 def _mark_paid(reviews: Dict[str, Dict[str, Dict[str, Any]]],
                snapshot: Optional[Dict[str, Any]]) -> None:
-    """Set each review's ``paid``: its payment is on chain as of the
-    snapshot (every review without one). Each payment covers the amounts of
-    the reviews drawing on it, earliest first."""
-    groups: Dict[Tuple[str, ...], Tuple[int, List[Tuple[Tuple[int, str], str, str]]]] = {}
+    """Set each review's ``paid``: its reviewer has paid the provider as of
+    the snapshot (every review without one)."""
     for key in sorted(reviews):
         provider = key.split(":", 1)[0]
         for payer in sorted(reviews[key]):
             r = reviews[key][payer]
-            r["paid"] = snapshot is None
-            if snapshot is None:
-                continue
-            cid = int(r.get("channel_id") or 0)
-            if cid:
-                ch = snapshot["channels"].get(str(cid))
-                if not ch or ch["client"] != payer or ch["provider"] != provider:
-                    continue
-                group: Tuple[str, ...] = ("channel", str(cid))
-                budget = int(ch["paid"])
-            else:
-                rid = request_id32(r.get("request_id"))
-                budget = int((snapshot["payments"].get(rid) or {}).get(f"{payer}:{provider}", 0))
-                if budget <= 0:
-                    continue
-                group = ("direct", rid, payer, provider)
-            groups.setdefault(group, (budget, []))[1].append((_order(r), key, payer))
-    for group in sorted(groups):
-        budget, members = groups[group]
-        used = 0
-        for _, key, payer in sorted(members):
-            r = reviews[key][payer]
-            amount = int(r.get("amount") or 0)
-            if used + amount <= budget:
-                used += amount
-                r["paid"] = True
+            r["paid"] = (snapshot is None
+                         or int(snapshot["paid"].get(f"{payer}:{provider}", 0)) > 0)
 
 
 def _bound(reviews: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
@@ -530,16 +418,19 @@ def _bound(reviews: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str,
 def service_rating(key: str, payers: Dict[str, Dict[str, Any]], *,
                    axis_ids: List[str], household: Any,
                    sanctioned: Iterable[str] = (),
-                   unscored_bps: int = UNSCORED_BPS_DEFAULT) -> Optional[Dict[str, Any]]:
+                   unscored_bps: int = UNSCORED_BPS_DEFAULT,
+                   paid: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:
     """One service's rating over its payers' latest paid reviews, or None
     when no review counts. ``household(address)`` maps an address to its
     household (the pinned owner map)."""
     provider, _, digest = key.partition(":")
     banned = set(sanctioned)
     own = household(provider)
-    eligible = [payers[p] for p in sorted(payers)
-                if household(p) != own and household(p) not in banned]
+    eligible_payers = [p for p in sorted(payers)
+                       if household(p) != own and household(p) not in banned]
+    eligible = [payers[p] for p in eligible_payers]
     counted = [r for r in eligible if r.get("paid")]
+    counted_payers = [p for p in eligible_payers if payers[p].get("paid")]
     n = len(counted)
     if n == 0:
         return None
@@ -567,7 +458,7 @@ def service_rating(key: str, payers: Dict[str, Dict[str, Any]], *,
         "malware": round(flagged / n, 9),
         "axes": axes,
         "value": round(total / (n * len(axis_ids)) / BPS, 9) if axis_ids else None,
-        "charged": sum(int(r.get("amount") or 0) for r in counted),
+        "paid": sum(int((paid or {}).get(f"{p}:{provider}", 0)) for p in counted_payers),
         "latest_ts": max(int(r.get("ts") or 0) for r in counted),
     }
 
@@ -623,7 +514,8 @@ def close_service_reviews(
     ratings: Dict[str, Dict[str, Any]] = {}
     for key in sorted(reviews):
         rating = service_rating(key, reviews[key], axis_ids=ids, household=household,
-                                sanctioned=banned, unscored_bps=unscored)
+                                sanctioned=banned, unscored_bps=unscored,
+                                paid=snap["paid"] if snap is not None else None)
         if rating is not None:
             ratings[key] = rating
     return {"reviews": reviews, "ratings": ratings, "accepted": accepted,

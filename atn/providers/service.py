@@ -1,25 +1,16 @@
-"""Service provider — inference bought off the marketplace rail.
+"""Service provider: a native agent's model calls bought from a request
+service (docs/services_market.md). The agent does ordinary chat
+completions, and underneath each call is one ``service_request`` to a
+request service whose tool answers ``{messages, max_tokens}``:
 
-Consumer side of ``docs/services_market.md``, "Decision (2026-07-26): LLM
-inference as a marketplace service" (item 2). A purchased marketplace
-service backs an agent's PROVIDER: the agent does ordinary chat
-completions, and underneath each call is
+    price (the provider's signed price list)  ->  pay  ->  service_request
 
-    read ask  →  voucher on the payment channel  →  service_request
-              →  completion, the voucher counted only if it was served
-
-Indistinguishable from any other model from the agent's seat. Any wallet
-holding ATN can buy cognition — no sponsor relationship required.
-
-Payment is the payment channel (Decision 2026-11-10, the unit of work;
-metered on channels), exactly as the ``request_service`` agent tool pays:
-one channel per (payer, provider), opened on the first call with ten
-calls' worth, and one voucher per call (one call is one unit of the
-service). The voucher is written down as pending before the request goes
-out, counted when the provider's signed reply says ``charged: true`` or
-when the outcome is unknown, and dropped on ``charged: false``, so a failed
-call is not paid. The book and the per-channel lock are the daemon's one
-``ChannelBook`` (``atn/service_channels.py``), shared with the agent tools.
+Payment is the buyer's credits with the provider when it holds them (a
+payment channel, opened and topped up by the Agent with ``open_credits``;
+``service_channels.request_on_credits``: a failed or refused call costs
+nothing), else one direct payment per call. Native agents are an opt-in
+mode; external Agents buy model access as sessions (an OpenAI-compatible
+protocol) instead.
 
 Configured with the two facts that name a purchase:
 
@@ -113,21 +104,22 @@ class ServiceProvider(Provider):
         self._payer_kind = payer_kind or "owner"
         self._payer_id = payer_id or ""
         # The service's ServiceRegistry number, found by one registry scan
-        # and kept; the price is re-read from that entry on every call, since
-        # the chain is the only reference for it and ``updateServiceAsk``
-        # changes it in place (Decision 2026-11-10). ``_ask_amount`` is the
-        # last price read. The wss endpoint is cached.
+        # and kept; the entry is re-read on every call for whether the
+        # service is still active. ``_ask_amount`` is the last request price
+        # read from the provider's price list (Decision 2026-11-12). The wss
+        # endpoint is cached.
         self._service_id: int | None = None
         self._ask_amount: int | None = None
         self._endpoint: str = ""
         # The daemon's one ChannelBook (atn/service_channels.py), shared with
-        # the request_service agent tool: the open channel per (payer,
-        # provider) and the running total signed on it. A path is opened on
-        # the first paid call (``book_at``: one book per path).
+        # the request_service agent tool: the payer's credits per provider.
+        # A path is opened on the first paid call (``book_at``: one book per
+        # path).
         self._book = channel_book
-        # The last call's payment: {channel_id, cumulative_amount, paid},
-        # paid being the ask when the voucher counted and 0 when it was
-        # dropped; {} for an unpaid call (no chain, or a zero ask).
+        # The last call's payment: {credits, paid} on credits (paid 0 when
+        # the request was not served, so its charge was refunded), {tx_hash,
+        # paid} for a direct payment, {} for an unpaid call (no chain, or a
+        # free service).
         self._last_payment: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -153,7 +145,7 @@ class ServiceProvider(Provider):
 
     @property
     def cached_ask(self) -> int | None:
-        """Last-read on-chain ask in ATN base units (None = not yet read)."""
+        """Last-read request price in ATN base units (None = not yet read)."""
         return self._ask_amount
 
     @property
@@ -168,9 +160,9 @@ class ServiceProvider(Provider):
 
     @property
     def last_payment(self) -> dict[str, Any]:
-        """The last call's voucher: ``{channel_id, cumulative_amount,
-        paid}`` (``paid`` 0 when it was not counted), ``{}`` when the call
-        was unpaid."""
+        """The last call's payment: ``{credits, paid}`` on credits (``paid``
+        0 when it was not served), ``{tx_hash, paid}`` paid directly, ``{}``
+        when the call was unpaid."""
         return dict(self._last_payment)
 
     # ------------------------------------------------------------------
@@ -187,23 +179,18 @@ class ServiceProvider(Provider):
             return False
 
     async def _resolve_ask(self) -> int:
-        """The service's on-chain ask, read for every call.
-
-        The first call scans the registry for the (provider, digest) entry
-        and keeps its number; later calls read that one entry. Raises
-        ProviderError when the service can't be found on chain — paying an
-        unknown ask is not something to guess at.
-        """
+        """The price of one request: the provider's signed price list for
+        the service (Decision 2026-11-12), with the registry entry read for
+        whether the service is still active. Raises ProviderError when the
+        service can't be found or is not a request service."""
         from .. import service_client
         found: dict[str, Any] = {}
         if self._service_id is not None:
-            found = await service_client.read_service(
-                self._config, self._service_id)
+            found = await service_client.read_service(self._config, self._service_id)
             if (found.get("error")
                     or str(found.get("provider") or "").lower()
                     != self._provider_address.lower()
-                    or service_client.normalize_digest(
-                        str(found.get("spec_digest") or ""))
+                    or service_client.normalize_digest(str(found.get("spec_digest") or ""))
                     != service_client.normalize_digest(self._spec_digest)):
                 found = {}
                 self._service_id = None
@@ -214,25 +201,34 @@ class ServiceProvider(Provider):
                 self._service_id = int(found["service_id"])
         if found.get("error"):
             raise ProviderError(
-                f"service provider: cannot read the on-chain ask for "
-                f"{self._spec_digest[:16]} — {found['error']}",
-                provider=self.name,
-            )
+                f"service provider: cannot find service {self._spec_digest[:16]} on "
+                f"chain: {found['error']}", provider=self.name)
         if not found.get("active"):
             raise ProviderError(
-                f"service provider: service {self._spec_digest[:16]} is "
-                f"retired on chain — nothing to buy.",
-                provider=self.name,
-            )
-        self._ask_amount = int(found.get("ask_amount") or 0)
-        logger.info("service provider: ask for %s = %d ATN base units "
-                    "(service_id=%s)", self._spec_digest[:16],
-                    self._ask_amount, found.get("service_id"))
+                f"service provider: service {self._spec_digest[:16]} is retired on "
+                "chain: nothing to buy.", provider=self.name)
+        catalog = service_client._catalog
+        price_list = (catalog.price_list(self._spec_digest, self._provider_address)
+                      if catalog is not None else None)
+        spec = catalog.spec(self._spec_digest) if catalog is not None else None
+        if isinstance(spec, dict) and spec.get("mode") != "request":
+            raise ProviderError(
+                "service provider: that is a session service; this provider sends "
+                "requests (bind a request service, or use the session's protocol "
+                "directly)", provider=self.name)
+        if price_list is None:
+            raise ProviderError(
+                f"service provider: no price list is known yet for "
+                f"{self._spec_digest[:16]}; try again once the catalog has it",
+                provider=self.name)
+        from ..service_prices import request_price, voucher_size
+        self._ask_amount = request_price(price_list)
+        self._voucher = voucher_size(price_list)
         return self._ask_amount
 
     async def _refuse_if_sanctioned(self) -> None:
         """Raise when the provider belongs to a household the DAO sanctioned
-        (same rule the pay_for_service / request_service tools apply)."""
+        (same rule the request_service tool applies)."""
         sanctions = getattr(self, "_sanctions", None)
         if sanctions is None:
             from ..sanctions import SanctionList
@@ -317,15 +313,9 @@ class ServiceProvider(Provider):
         return ask
 
     async def _purchase(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Send one call and pay for it on the payment channel.
-
-        The voucher for one unit (one call) is written down as pending
-        before the request leaves, then counted or dropped by the
-        provider's signed word (``settle_voucher``): a failed or refused
-        call is not paid, one whose outcome is unknown is counted (the book
-        is never behind the provider). Vouchers on one channel are signed
-        one at a time, under the lock the agent tools take too.
-        """
+        """Send one call and pay for it: from the payer's credits with the
+        provider when it has them (``request_on_credits``: a failed or
+        refused call costs nothing), else with one direct payment."""
         from .. import service_client
 
         kwargs: dict[str, Any] = {}
@@ -340,59 +330,37 @@ class ServiceProvider(Provider):
                 payer_key=self._owner_key, **kwargs)
 
         from ..on_chain import ServiceMarketClient
-        from ..service_channels import channel_lock, settle_voucher, voucher_for
+        from ..service_channels import request_on_credits
 
         smc = ServiceMarketClient(self._config)
         book = self._channel_book()
-        if not smc.channel_available or book is None:
-            raise ProviderError(
-                "service provider: PaymentChannel not configured on this "
-                "daemon (payment_channel_address), so the call cannot be "
-                "paid; aborting before anything is sent.",
-                provider=self.name,
-            )
         payer = self._payer_address()
         provider = self._provider_address
-        async with channel_lock(book, payer, provider):
-            voucher = await voucher_for(book, smc, self._owner_key, payer,
-                                        provider, ask)
-            if voucher.get("error"):
-                raise ProviderError(
-                    f"service provider: payment failed, aborting the call: "
-                    f"{voucher['error']}",
-                    provider=self.name,
-                )
-            # Written down before it goes out: a daemon stopped mid-request
-            # counts it at start, since the provider may hold it.
-            book.reserve(payer, provider, voucher["channel_id"],
-                         voucher["cumulative_amount"])
-            try:
-                reply = await service_client.request_service(
-                    self._config, provider, self._spec_digest, args,
-                    # Fresh per call: the provider's gate uses each id once.
-                    request_id=service_client.new_request_id(),
-                    client_address=self._client_address or payer,
-                    endpoint=self._endpoint,
-                    payer_key=self._owner_key,
-                    voucher=voucher,
-                    **kwargs,
-                )
-            except BaseException:
-                # Unknown whether it left: count it (never behind the
-                # provider).
-                book.commit(payer, provider, voucher["channel_id"],
-                            voucher["cumulative_amount"])
-                raise
-            paid = settle_voucher(book, payer, provider, voucher, reply)
-        self._last_payment = {"channel_id": int(voucher["channel_id"]),
-                              "cumulative_amount": int(voucher["cumulative_amount"]),
-                              "paid": ask if paid else 0}
-        logger.info("service provider: %s %s %d on channel %s (running total %d)",
-                    f"agent {self._payer_id}" if self._payer_kind == "agent"
-                    else "the operator",
-                    "paid" if paid else "was not charged", ask,
-                    voucher["channel_id"], voucher["cumulative_amount"])
-        return reply
+        if book is not None and smc.channel_available and book.get(payer, provider):
+            reply = await request_on_credits(
+                book, smc, self._config, self._owner_key, payer, provider,
+                self._spec_digest, args, price=ask,
+                voucher=int(getattr(self, "_voucher", 0) or 0),
+                endpoint=self._endpoint, **kwargs)
+            if reply.get("error") and not reply.get("delivered"):
+                raise ProviderError(f"service provider: payment failed: {reply['error']}",
+                                    provider=self.name)
+            self._last_payment = {"credits": reply.get("credits"),
+                                  "paid": ask if reply.get("ok") else 0}
+            return reply
+        request_id = service_client.new_request_id()
+        paid = await service_client.pay_for_service(self._config, self._owner_key,
+                                                    provider, ask, request_id=request_id)
+        if paid.get("error"):
+            raise ProviderError(f"service provider: payment failed: {paid['error']}",
+                                provider=self.name)
+        self._last_payment = {"tx_hash": paid.get("tx_hash"), "paid": ask}
+        return await service_client.request_service(
+            self._config, provider, self._spec_digest, args,
+            tx_hash=str(paid.get("tx_hash") or ""),
+            request_id=str(paid.get("request_id") or request_id),
+            client_address=self._client_address or payer, endpoint=self._endpoint,
+            payer_key=self._owner_key, **kwargs)
 
     # ------------------------------------------------------------------
     # send
@@ -463,16 +431,19 @@ class ServiceProvider(Provider):
                 provider=self.name,
             )
 
+        # The provider's envelope is {request_id, result}: the tool's output
+        # is its ``result``.
+        if isinstance(result, dict) and isinstance(result.get("result"), dict):
+            result = result["result"]
         if not isinstance(result, dict):
             raise ProviderError(
                 "service provider: malformed reply (no result object)",
                 provider=self.name,
             )
 
-        # Success envelope (provider-side): {request_id, content, model, usage,
-        # stop_reason, max_tokens}. The spec names the served model, but an
-        # upstream may report none, so fall back to our config label rather
-        # than error.
+        # The tool's output: {content, model?, usage?, stop_reason?}. The
+        # spec's settings name the served model, but a tool may report none,
+        # so fall back to our config label rather than error.
         usage_raw = result.get("usage") or {}
         served_model = str(result.get("model") or "") or (model or self._model)
         self._active_model = served_model

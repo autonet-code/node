@@ -1,8 +1,9 @@
-"""ServiceCatalog (Decision 2026-11-10): services published and found the
-way tools are. Specs arrive whole on gossip or by digest, and are kept only
-when the chain names them; an entry counts only when its provider signed
-the spec; the catalog follows the ServiceRegistry by enumeration and logs.
-"""
+"""ServiceCatalog (Decisions 2026-11-10 and 2026-11-12): services published
+and found the way tools are. Specs arrive whole on gossip (with the
+provider's signed price list) or by digest, and are kept only when the
+chain names them; an entry counts only when its provider signed the spec;
+a price list only when that provider signed it; the catalog follows the
+ServiceRegistry by enumeration and logs."""
 from __future__ import annotations
 
 import json
@@ -18,31 +19,49 @@ from atn.service_catalog import (
     ServiceCatalog,
     announcement,
     fetch_missing,
+    service_keyword_tokens,
     spec_digest,
     topic_for,
 )
-from atn.service_spec import canonical_service_bytes
+from atn.service_prices import build_price_list, sign_price_list
+from atn.service_spec import canonical_service_bytes, service_embedding_text
 from atn.tool_search import ToolSearchIndex
-from atn.service_spec import service_embedding_text
 
 KEY_A = "0x" + "a1" * 32
 KEY_B = "0x" + "b2" * 32
 ADDR_A = Account.from_key(KEY_A).address
 ADDR_B = Account.from_key(KEY_B).address
+PROTOCOL = {"id": "ssh/2", "spec": "5e" * 32}
 
 
-def _spec(name: str, description: str, key: str = KEY_A, **extra) -> dict:
+def _spec(name: str, description: str, key: str = KEY_A, mode: str = "request",
+          **extra) -> dict:
     spec = {
         "kind": "service_spec", "name": name, "description": description,
+        "mode": mode,
         "input_schema": {"type": "object", "properties": {"audio": {"type": "string"}}},
         "author": "agent", "author_pubkey": Account.from_key(key).address,
-        "unit": "one audio minute",
-        "endpoint_hint": "", "image_uri": "", "version_of": None,
-        "created_ts": 1, **extra,
+        "settings": {}, "image_uri": "", "version_of": None, "created_ts": 1,
     }
+    if mode == "session":
+        spec.update(measures=[{"measure": "seconds", "quantity": 60},
+                              {"measure": "gigabytes", "quantity": 1}],
+                    protocol=PROTOCOL)
+    spec.update(extra)
     spec["author_sig"] = Account.sign_message(
         encode_defunct(canonical_service_bytes(spec)), private_key=key).signature.hex()
     return spec
+
+
+def _prices(spec: dict, key: str = KEY_A, *, prices=None, voucher: int = 500,
+            seq: int = 1, provider: str = "") -> dict:
+    if prices is None:
+        prices = ({"requests": 100} if spec["mode"] == "request"
+                  else {"seconds": 3, "gigabytes": 40})
+    pl = build_price_list(service=spec_digest(spec),
+                          provider=provider or Account.from_key(key).address,
+                          prices=prices, voucher=voucher, seq=seq, ts=seq)
+    return sign_price_list(pl, key)
 
 
 class _Runtime:
@@ -50,12 +69,13 @@ class _Runtime:
 
     def __init__(self, own=()):
         self._config = SimpleNamespace(rpb=SimpleNamespace())
+        records = {d: SimpleNamespace(digest=d, price_list=None) for d in own}
         self.service_store = SimpleNamespace(
-            list=lambda include_retired=False: [SimpleNamespace(digest=d) for d in own])
+            list=lambda include_retired=False: list(records.values()),
+            get=lambda d: records.get(d))
 
 
 def _catalog(tmp_path: Path | None = None, own=()) -> ServiceCatalog:
-    from atn.service_catalog import service_keyword_tokens
     index = ToolSearchIndex(None, embed=lambda texts: None,
                             text_of=service_embedding_text,
                             tokens_of=service_keyword_tokens)
@@ -63,11 +83,17 @@ def _catalog(tmp_path: Path | None = None, own=()) -> ServiceCatalog:
     return ServiceCatalog(_Runtime(own), path, index=index)
 
 
-def _entry(sid: int, spec: dict, provider: str, ask: int = 100,
+def _entry(sid: int, spec: dict, provider: str, ask: int = 0,
            active: bool = True) -> dict:
     return {"service_id": sid, "provider": provider,
             "spec_digest": spec_digest(spec), "ask_amount": ask,
             "active": active, "registered_at": 1, "updated_at": 1}
+
+
+def _listed(cat: ServiceCatalog, sid: int, spec: dict, provider: str = ADDR_A,
+            pl: dict | None = None, ask: int = 0) -> None:
+    cat._entries[sid] = _entry(sid, spec, provider, ask)
+    assert cat.accept_announcement(announcement(spec, sid, pl))
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +126,7 @@ class _Registry:
                     int(sid), ("0x" + "00" * 20, b"\x00" * 32, 0, False, 0, 0)))
         self.functions = _F()
 
-    def put(self, sid, provider, spec, ask, active=True):
+    def put(self, sid, provider, spec, ask=0, active=True):
         self.services[sid] = (provider, bytes.fromhex(spec_digest(spec)), ask,
                               active, 10, 10)
 
@@ -142,28 +168,40 @@ def _log(sid: int, block: int) -> dict:
 # ---------------------------------------------------------------------------
 
 class TestAnnouncements:
+    def test_an_announcement_carries_the_spec_and_its_price_list(self):
+        spec = _spec("transcribe", "speech to text")
+        pl = _prices(spec)
+        assert json.loads(announcement(spec, 3, pl)) == {
+            "v": 2, "service_id": 3, "spec": spec, "prices": pl}
+        assert "prices" not in json.loads(announcement(spec, 3))
+
     def test_kept_when_the_chain_names_the_spec(self):
         cat = _catalog()
         spec = _spec("transcribe", "speech to text per minute")
-        cat._entries[1] = _entry(1, spec, ADDR_A)
-        assert cat.accept_announcement(announcement(spec, 1)) is True
+        _listed(cat, 1, spec, pl=_prices(spec))
         assert cat.spec(spec_digest(spec)) == spec
+        assert cat.price_list(spec_digest(spec))["prices"] == {"requests": 100}
         assert [r["service_id"] for r in cat.search("speech")] == [1]
 
     def test_held_until_the_chain_names_it(self, chain):
         cat = _catalog()
         spec = _spec("transcribe", "speech to text")
-        assert cat.accept_announcement(announcement(spec, 1)) is False
+        assert cat.accept_announcement(announcement(spec, 1, _prices(spec))) is False
         assert cat.spec(spec_digest(spec)) is None
-        chain.reg.put(1, ADDR_A, spec, 100)
+        assert cat.price_list(spec_digest(spec)) is None
+        chain.reg.put(1, ADDR_A, spec)
         assert cat.sync_chain()["adopted_specs"] == 1
         assert cat.spec(spec_digest(spec)) == spec
+        # The price list that waited with it is kept too.
+        assert cat.price_list(spec_digest(spec), ADDR_A)["voucher"] == 500
 
-    def test_a_spec_with_a_price_is_refused(self):
+    def test_a_spec_with_removed_fields_is_refused(self):
         cat = _catalog()
-        spec = _spec("priced", "d", ask={"amount": "5"})
-        cat._entries[1] = _entry(1, spec, ADDR_A)
-        assert cat.accept_announcement(announcement(spec, 1)) is False
+        for extra in ({"unit": "one minute"}, {"endpoint_hint": ""},
+                      {"ask": {"amount": "5"}}, {"hardware": "one H100"}):
+            spec = _spec("old", "d", **extra)
+            cat._entries[1] = _entry(1, spec, ADDR_A)
+            assert cat.accept_announcement(announcement(spec, 1)) is False, extra
 
     def test_oversized_or_malformed_announcements_are_dropped(self):
         cat = _catalog()
@@ -172,15 +210,14 @@ class TestAnnouncements:
         assert cat.accept_announcement(json.dumps({"spec": {"kind": "tool"}}).encode()) is False
 
     def test_a_copy_registered_by_another_address_is_ignored(self):
-        """Anyone can register a public spec's digest, at price 0: only the
-        entry under the spec's signer counts."""
+        """Anyone can register a public spec's digest: only the entry under
+        the spec's signer counts."""
         cat = _catalog()
         spec = _spec("transcribe", "speech to text", key=KEY_A)
-        cat._entries[1] = _entry(1, spec, ADDR_B, ask=0)      # the copy
-        cat._entries[2] = _entry(2, spec, ADDR_A, ask=900)    # the provider's
-        cat.accept_announcement(announcement(spec, 2))
+        cat._entries[1] = _entry(1, spec, ADDR_B)             # the copy
+        _listed(cat, 2, spec, ask=900)                        # the provider's
         rows = cat.search("")
-        assert [(r["service_id"], r["ask_amount"]) for r in rows] == [(2, 900)]
+        assert [(r["service_id"], r["registry_price"]) for r in rows] == [(2, 900)]
         assert cat.entry_for(spec_digest(spec))["service_id"] == 2
         assert cat.entry_for(spec_digest(spec), ADDR_B) is None
 
@@ -196,16 +233,87 @@ class TestAnnouncements:
         """A dev daemon without keys publishes unsigned specs; its own
         still list."""
         spec = {"kind": "service_spec", "name": "local", "description": "d",
-                "input_schema": {}, "author": "user", "author_pubkey": ADDR_A,
-                "created_ts": 1}
+                "mode": "request", "input_schema": {"type": "object"},
+                "author": "user", "author_pubkey": ADDR_A, "created_ts": 1}
         cat = _catalog(own=[spec_digest(spec)])
         cat._entries[1] = _entry(1, spec, ADDR_A)
         cat._specs[spec_digest(spec)] = spec
-        assert [r["service_id"] for r in cat.search("")] == [1]
-        assert cat.search("")[0]["owned"] is True
+        rows = cat.search("")
+        assert [r["service_id"] for r in rows] == [1] and rows[0]["owned"] is True
 
     def test_topic_is_per_jurisdiction(self):
         assert topic_for("1337:0xdao") == "/autonet/services/1337:0xdao"
+
+
+# ---------------------------------------------------------------------------
+# Price lists
+# ---------------------------------------------------------------------------
+
+class TestPriceLists:
+    def test_kept_only_when_signed_by_the_registered_provider(self):
+        cat = _catalog()
+        spec = _spec("transcribe", "speech to text")
+        _listed(cat, 1, spec)
+        d = spec_digest(spec)
+        # Naming the provider, signed by someone else.
+        assert cat.note_prices(_prices(spec, KEY_B, provider=ADDR_A)) is False
+        # Signed by its signer, for a copy entry that is not genuine.
+        cat._entries[2] = _entry(2, spec, ADDR_B)
+        assert cat.note_prices(_prices(spec, KEY_B)) is False
+        assert cat.price_list(d) is None
+        assert cat.note_prices(_prices(spec)) is True
+        assert cat.price_list(d)["provider"] == ADDR_A
+        assert cat.price_list(d, ADDR_B) is None
+
+    def test_the_prices_must_name_the_specs_measures(self):
+        cat = _catalog()
+        spec = _spec("rent_a_box", "a shell on a machine", mode="session")
+        _listed(cat, 1, spec)
+        assert cat.note_prices(_prices(spec, prices={"requests": 5})) is False
+        assert cat.note_prices(_prices(spec, prices={"seconds": 5})) is False
+        assert cat.note_prices(_prices(spec)) is True
+        # A priced list needs a voucher size.
+        assert cat.note_prices(_prices(spec, voucher=0, seq=2)) is False
+
+    def test_a_newer_sequence_number_wins(self):
+        cat = _catalog()
+        spec = _spec("transcribe", "speech to text")
+        _listed(cat, 1, spec, pl=_prices(spec, prices={"requests": 100}, seq=5))
+        d = spec_digest(spec)
+        assert cat.note_prices(_prices(spec, prices={"requests": 1}, seq=4)) is False
+        assert cat.price_list(d)["prices"] == {"requests": 100}
+        # A prices-only announcement (no spec) changes them.
+        msg = json.dumps({"v": 2, "service_id": 1,
+                          "prices": _prices(spec, prices={"requests": 70}, seq=6)})
+        assert cat.accept_announcement(msg.encode()) is True
+        assert cat.price_list(d)["prices"] == {"requests": 70}
+
+    def test_a_price_list_waits_for_its_spec(self):
+        cat = _catalog()
+        spec = _spec("transcribe", "speech to text")
+        d = spec_digest(spec)
+        cat._entries[1] = _entry(1, spec, ADDR_A)
+        assert cat.note_prices(_prices(spec)) is False          # no spec yet
+        # A forged list for the same service does not push it out.
+        assert cat.note_prices(_prices(spec, KEY_B)) is False
+        assert cat.note_spec(d, spec) is True
+        assert cat.price_list(d, ADDR_A)["prices"] == {"requests": 100}
+
+    def test_price_lists_survive_a_restart(self, tmp_path):
+        cat = _catalog(tmp_path)
+        spec = _spec("transcribe", "speech to text")
+        _listed(cat, 1, spec, pl=_prices(spec, seq=3))
+        again = _catalog(tmp_path)
+        assert again.price_list(spec_digest(spec))["seq"] == 3
+        assert again.search("speech")[0]["prices"] == {"requests": 100}
+
+    def test_the_providers_own_services_answer_from_its_store(self):
+        spec = _spec("transcribe", "speech to text")
+        d = spec_digest(spec)
+        cat = _catalog(own=[d])
+        own = _prices(spec, seq=9)
+        cat._runtime.service_store.get(d).price_list = own
+        assert cat.price_list(d) == own
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +330,7 @@ class TestChainSync:
         assert out["entries"] == 2 and cat.synced
         assert sorted(chain.reg.reads) == [1, 2]
 
-        # Block 150: #1's price changes; #3 is registered.
+        # Block 150: #1's registry price changes; #3 is registered.
         chain.reg.reads.clear()
         chain.reg.put(1, ADDR_A, s1, 150)
         s3 = _spec("three", "third")
@@ -237,11 +345,11 @@ class TestChainSync:
     def test_retirement_comes_from_the_logs(self, chain):
         cat = _catalog()
         spec = _spec("one", "first")
-        chain.reg.put(1, ADDR_A, spec, 100)
+        chain.reg.put(1, ADDR_A, spec)
         cat.sync_chain()
         cat.accept_announcement(announcement(spec, 1))
         assert len(cat.search("")) == 1
-        chain.reg.put(1, ADDR_A, spec, 100, active=False)
+        chain.reg.put(1, ADDR_A, spec, active=False)
         chain.eth.block_number = 120
         chain.eth.logs.append(_log(1, 110))
         cat.sync_chain()
@@ -264,7 +372,7 @@ class TestChainSync:
     def test_state_survives_a_restart(self, chain, tmp_path):
         cat = _catalog(tmp_path)
         spec = _spec("one", "speech to text")
-        chain.reg.put(1, ADDR_A, spec, 100)
+        chain.reg.put(1, ADDR_A, spec)
         cat.sync_chain()
         cat.accept_announcement(announcement(spec, 1))
         again = _catalog(tmp_path)
@@ -322,62 +430,78 @@ class TestFetch:
 # ---------------------------------------------------------------------------
 
 class TestSearch:
-    def test_relevance_order_with_chain_metadata(self):
+    def test_rows_of_a_request_service(self):
+        cat = _catalog()
+        spec = _spec("chat_llama", "chat completions",
+                     settings={"model": "llama3.1:70b-instruct"})
+        _listed(cat, 1, spec, pl=_prices(spec), ask=90)
+        row = cat.search("")[0]
+        assert row["service_id"] == 1 and row["provider"] == ADDR_A
+        assert row["mode"] == "request"
+        assert row["settings"] == {"model": "llama3.1:70b-instruct"}
+        assert row["measures"] == [{"measure": "requests", "quantity": 1}]
+        assert row["prices"] == {"requests": 100} and row["voucher"] == 500
+        assert row["price_list"]["sig"]
+        assert row["registry_price"] == 90 and row["protocol"] is None
+        assert row["input_schema"] == spec["input_schema"]
+        for removed in ("unit", "hardware", "ask", "endpoint_hint"):
+            assert removed not in row
+
+    def test_rows_of_a_session_service(self):
+        cat = _catalog()
+        spec = _spec("rent_a_box", "a shell on a fast machine", mode="session")
+        _listed(cat, 1, spec)
+        row = cat.search("")[0]
+        assert row["mode"] == "session" and row["protocol"] == PROTOCOL
+        assert [m["measure"] for m in row["measures"]] == ["seconds", "gigabytes"]
+        # Until its price list arrives a row shows no prices.
+        assert row["prices"] == {} and row["voucher"] == 0 and row["price_list"] is None
+        assert row["registry_price"] is None
+
+    def test_relevance_order_and_newest_first_without_a_query(self):
         cat = _catalog()
         a = _spec("transcribe_audio", "speech to text for audio files")
         b = _spec("render_frames", "gpu rendering of video frames")
-        cat._entries[1] = _entry(1, a, ADDR_A, ask=10)
-        cat._entries[2] = _entry(2, b, ADDR_A, ask=20)
-        for sid, sp in ((1, a), (2, b)):
-            cat.accept_announcement(announcement(sp, sid))
-        rows = cat.search("transcribe audio")
-        assert rows[0]["service_id"] == 1
-        assert rows[0]["ask"] == {"amount": "10", "unit": "per_item"}
-        assert rows[0]["provider"] == ADDR_A
-        assert [r["service_id"] for r in cat.search("")] == [2, 1]   # newest first
+        _listed(cat, 1, a)
+        _listed(cat, 2, b)
+        assert cat.search("transcribe audio")[0]["service_id"] == 1
+        assert [r["service_id"] for r in cat.search("")] == [2, 1]
 
-    def test_rows_show_the_unit_of_work_and_hardware(self):
-        """What one work item is and what it runs on travel with every row
-        (Decision 2026-11-10)."""
+    def test_settings_and_protocol_match_by_keyword(self):
+        """With no search model loaded (keyword only), a query naming the
+        model or the protocol finds the service."""
         cat = _catalog()
-        gpu = _spec("render_frames", "video frame rendering",
-                    unit="one minute of RTX 5090 time",
-                    hardware="one RTX 5090, 32 GB")
+        llama = _spec("chat", "chat completions", settings={"model": "llama3"})
+        box = _spec("rent_a_box", "a fast machine", mode="session")
         plain = _spec("transcribe_audio", "speech to text")
-        cat._entries[1] = _entry(1, gpu, ADDR_A)
-        cat._entries[2] = _entry(2, plain, ADDR_A)
-        for sid, sp in ((1, gpu), (2, plain)):
-            assert cat.accept_announcement(announcement(sp, sid))
-        rows = {r["service_id"]: r for r in cat.search("")}
-        assert rows[1]["unit"] == "one minute of RTX 5090 time"
-        assert rows[1]["hardware"] == "one RTX 5090, 32 GB"
-        assert rows[2]["unit"] == "one audio minute"
-        assert rows[2]["hardware"] == ""
+        for sid, sp in ((1, llama), (2, box), (3, plain)):
+            _listed(cat, sid, sp)
+        assert [r["service_id"] for r in cat.search("llama3")] == [1]
+        assert [r["service_id"] for r in cat.search("ssh")] == [2]
+        assert "llama3" in service_keyword_tokens(llama)
+        assert "ssh" in service_keyword_tokens(box)
 
-    @pytest.mark.asyncio
-    async def test_find_services_passes_unit_and_hardware(self):
-        from atn.agent_tools import _find_services
+    def test_rows_carry_the_rating_of_their_provider_and_digest(self):
+        """Service reviews: the latest close's rating, looked up by
+        (provider, digest), so a copy never shares one."""
         cat = _catalog()
-        spec = _spec("render_frames", "frames", unit="one rendered frame",
-                     hardware="one H100")
-        cat._entries[1] = _entry(1, spec, ADDR_A)
-        assert cat.accept_announcement(announcement(spec, 1))
-        cat._last_block = 1
-        rt = SimpleNamespace(
-            _config=SimpleNamespace(rpb=SimpleNamespace(network_joined=True)),
-            service_catalog=cat)
-        out = await _find_services(rt, {})
-        row = out["services"][0]
-        assert row["unit"] == "one rendered frame"
-        assert row["hardware"] == "one H100"
+        spec = _spec("transcribe_audio", "speech to text")
+        _listed(cat, 1, spec)
+        assert cat.search("")[0]["rating"] is None
+        asked = []
 
-    def test_a_spec_without_a_unit_is_not_kept(self):
-        cat = _catalog()
-        spec = _spec("vague", "no unit of work")
-        spec.pop("unit")
-        cat._entries[1] = _entry(1, spec, ADDR_A)
-        assert cat.accept_announcement(announcement(spec, 1)) is False
-        assert cat.search("") == []
+        def lookup(provider, digest):
+            asked.append((provider, digest))
+            return {"payers": 2, "correctness": 0.5} if provider == ADDR_A else None
+        cat.rating_provider = lookup
+        assert cat.search("transcribe")[0]["rating"] == {"payers": 2, "correctness": 0.5}
+        assert asked[-1] == (ADDR_A, spec_digest(spec))
+
+        def broken(provider, digest):
+            raise RuntimeError("no driver")
+        cat.rating_provider = broken
+        assert cat.search("")[0]["rating"] is None
+
 
 class TestListingContext:
     def test_rows_show_the_providers_household_and_sanction(self):
@@ -388,8 +512,7 @@ class TestListingContext:
         house = "0x" + "cc" * 20
         cat = _catalog()
         spec = _spec("transcribe", "speech to text")
-        cat._entries[1] = _entry(1, spec, ADDR_A)
-        cat.accept_announcement(announcement(spec, 1))
+        _listed(cat, 1, spec)
         sl = SanctionList(lambda: {f"sanction.{house}": "{}"},
                           {ADDR_A.lower(): house}.get)
         cat._runtime.autonet = SimpleNamespace(sanctions=sl)
@@ -400,44 +523,6 @@ class TestListingContext:
     def test_no_chain_leaves_the_context_empty(self):
         cat = _catalog()
         spec = _spec("transcribe", "speech to text")
-        cat._entries[1] = _entry(1, spec, ADDR_A)
-        cat.accept_announcement(announcement(spec, 1))
+        _listed(cat, 1, spec)
         row = cat.search("")[0]
         assert row["provider_household"] == "" and row["sanction"] is None
-
-
-def test_hardware_and_unit_match_by_keyword():
-    """With no search model loaded (keyword only), a query naming the
-    hardware finds the service."""
-    cat = _catalog()
-    gpu = _spec("render_frames", "video frame rendering",
-                unit="one minute of GPU time", hardware="one RTX 5090")
-    plain = _spec("transcribe_audio", "speech to text")
-    cat._entries[1] = _entry(1, gpu, ADDR_A)
-    cat._entries[2] = _entry(2, plain, ADDR_A)
-    for sid, sp in ((1, gpu), (2, plain)):
-        cat.accept_announcement(announcement(sp, sid))
-    assert [r["service_id"] for r in cat.search("rtx 5090")] == [1]
-
-    def test_rows_carry_the_rating_of_their_provider_and_digest(self):
-        """Service reviews (Decision 2026-11-10): the latest close's rating,
-        looked up by (provider, digest), so a copy never shares one."""
-        cat = _catalog()
-        spec = _spec("transcribe_audio", "speech to text")
-        cat._entries[1] = _entry(1, spec, ADDR_A)
-        cat.accept_announcement(announcement(spec, 1))
-        assert cat.search("")[0]["rating"] is None
-        asked = []
-
-        def lookup(provider, digest):
-            asked.append((provider, digest))
-            return {"payers": 2, "correctness": 0.5} if provider == ADDR_A else None
-        cat.rating_provider = lookup
-        row = cat.search("transcribe")[0]
-        assert row["rating"] == {"payers": 2, "correctness": 0.5}
-        assert asked[-1] == (ADDR_A, spec_digest(spec))
-
-        def broken(provider, digest):
-            raise RuntimeError("no driver")
-        cat.rating_provider = broken
-        assert cat.search("")[0]["rating"] is None

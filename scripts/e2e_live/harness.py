@@ -55,9 +55,9 @@ for p in (str(REPO), str(HERE.parent)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-# Reuse the cross-daemon E2E's proven pieces (isolated config writer, home
-# redirect env, the WS client, owner-bound registration) rather than fork them.
-import local_e2e_cross_daemon_inference as xd  # noqa: E402
+# Shared pieces for running real daemons (isolated config writer, home
+# redirect env, the WS client, owner-bound registration).
+import e2e_daemons as xd  # noqa: E402
 from nodes.common.library.charter_version import charter_hash  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -567,14 +567,11 @@ async def seed(state: Dict[str, Any], contracts: Dict[str, str]) -> None:
         # 4. A tool-backed service on the local ServiceRegistry, signed by
         #    e2e-alpha's own key through the daemon's register_service leg.
         svc = await client.ok({
-            "type": "register_service", "name": SERVICE_NAME,
+            "type": "register_service", "mode": "request", "name": SERVICE_NAME,
             "description": "Live-harness fixture: upper-cases text.",
-            "input_schema": {"type": "object",
-                             "properties": {"text": {"type": "string"}}},
             "agent_id": "e2e-alpha",
-            "tool_digest": tool_digest,
-            "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
-            "unit": "one upper-cased text",
+            "backing_tool": tool_digest,
+            "price": SERVICE_ASK, "voucher": SERVICE_ASK,
         })
         if not svc.get("on_chain"):
             raise RuntimeError(f"service not listed on chain: {svc}")

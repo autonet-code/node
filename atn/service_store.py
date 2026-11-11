@@ -1,33 +1,25 @@
-"""ServiceStore — daemon-side registry of published service specs.
+"""ServiceStore: the provider's services and its buyers' credits.
 
-Design: ``docs/services_market.md``. A Service is a remote API an agent
-(ultimately its human benefactor) offers to the market: general-purpose,
-priced per work item in ATN. The price, whether the service is active
-and who is paid live on chain only (``ServiceRegistry``, Decision
-2026-11-10); the spec carries none of them. It rides the same
-content-addressed blob rail as tool manifests, but — unlike a tool — a
-service gets NO substrate standing, NO verdict claims, NO mint. Trust is
-behavioral: signed identity, atomic payment, receipt-gated reviews.
+Design: ``docs/services_market.md`` (Decision 2026-11-12). Every service is
+backed by a tool registered on this daemon; the spec says how the tool is
+sold (``atn/service_spec.py``) and the signed price list what it costs
+(``atn/service_prices.py``). Registering puts the spec's digest on chain
+(``ServiceRegistry``), which names the provider (the address paid) and
+whether the service is active; the registry's ``askAmount`` is an optional
+price nothing enforces. A service earns money only: no substrate standing,
+no verdict claims, no mint.
 
-This is the provider-side store: specs are AUTHORED here, publish =
-register-on-chain + blob push. This store owns spec build/sign/persist,
-the on-chain service number each registration returned, and the local
-request log that later reviews ride.
-
-The backing implementation of a v1 service is just a local tool run on
-the provider's daemon — "a Service is a tool the OWNER chose to sell"
-(spec §3). ``ServiceRecord.backing_tool`` names that tool by digest;
-dispatch goes through ``runtime.tool_store``.
-
-The second backing kind (decision 2026-07-26) is INFERENCE: the spec
-carries ``{"inference": {"provider", "model", "max_tokens_cap",
-"max_input_chars"}}`` and requests are served by exactly that upstream
-provider of the provider daemon's OWN stack (their GPU, their key). The two
-are mutually exclusive — a service has exactly one backing.
+This store owns spec and price-list build/sign/persist, the on-chain
+service number each registration returned, the request log, the replay
+guard for direct payments, and the credit ledger: per payment channel (a
+buyer's credits with this provider, for all its services), the best
+voucher (``cumulative``, what the provider can cash in) and what has been
+served against it (``consumed``). A request or a session is served while
+``consumed`` stays within ``cumulative``; vouchers pay ahead by the price
+list's voucher size, so the most a buyer has at risk is one voucher.
 
 The substrate package (``nodes.*``) is imported lazily; on a standalone
-atn install registration fails loudly instead of degrading silently —
-mirroring ToolStore.
+atn install registration fails loudly instead of degrading silently.
 """
 
 from __future__ import annotations
@@ -35,18 +27,26 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .service_prices import (
+    build_price_list,
+    sign_price_list,
+    validate_price_list,
+)
 from .service_spec import (
-    DEFAULT_MAX_INPUT_CHARS,
-    DEFAULT_MAX_TOKENS_CAP,
+    MODE_REQUEST,
+    MODE_SESSION,
+    REPORTED_MEASURES,
     build_service_spec,
     canonical_service_bytes,
-    validate_inference,
-    validate_service_spec,
+    normalize_measures,
+    session_protocol,
+    spec_measures,
 )
 
 if TYPE_CHECKING:
@@ -57,19 +57,24 @@ log = logging.getLogger(__name__)
 # Author id recorded for owner-published services (WS surface, caller "").
 OWNER_AUTHOR = "user"
 
+# The credit ledger is written at most this often while sessions charge it
+# (a voucher is written at once).
+LEDGER_PERSIST_INTERVAL = 2.0
+
 
 @dataclass
 class ServiceRecord:
     """One published service: spec digest + daemon-local provider state."""
     digest: str
     spec: dict[str, Any]
-    backing_tool: str = ""      # digest of the local tool that fulfils requests
+    backing_tool: str = ""      # digest of the local tool that does the work
     retired: bool = False
     registered_ts: int = 0
     # ServiceRegistry's number for this spec, from the registration this
-    # daemon sent (None until it lands). The price, the active flag and the
-    # payee are read from that entry on chain, never from the spec.
+    # daemon sent (None until it lands).
     service_id: int | None = None
+    # The current signed price list (atn/service_prices.py).
+    price_list: dict[str, Any] = field(default_factory=dict)
 
     @property
     def author(self) -> str:
@@ -81,50 +86,36 @@ class ServiceRecord:
 
     @property
     def image_uri(self) -> str:
-        """Display-plane banner image (advisory; may be absent)."""
         return str(self.spec.get("image_uri") or "")
 
     @property
-    def unit(self) -> str:
-        """What one work item is: the meaning of the on-chain price."""
-        return str(self.spec.get("unit") or "")
+    def mode(self) -> str:
+        return str(self.spec.get("mode") or "")
 
     @property
-    def hardware(self) -> str:
-        """The hardware a compute service runs on ("" when not declared)."""
-        return str(self.spec.get("hardware") or "")
+    def settings(self) -> dict[str, Any]:
+        s = self.spec.get("settings")
+        return s if isinstance(s, dict) else {}
 
     @property
-    def inference(self) -> dict[str, Any]:
-        """The declared inference backing (``{provider, model,
-        max_tokens_cap, max_input_chars}``), or ``{}`` when this service is
-        tool-backed. Lives in the signed spec, so it survives a store reload
-        for free."""
-        block = self.spec.get("inference")
-        return block if isinstance(block, dict) else {}
+    def measures(self) -> list[dict[str, Any]]:
+        return spec_measures(self.spec)
 
-    def _bound(self, key: str, default: int) -> int:
-        block = self.inference
-        if not block:
-            return 0
+    @property
+    def protocol(self) -> dict[str, Any]:
+        return session_protocol(self.spec)
+
+    @property
+    def prices(self) -> dict[str, int]:
+        p = self.price_list.get("prices") if self.price_list else None
+        return dict(p) if isinstance(p, dict) else {}
+
+    @property
+    def voucher(self) -> int:
         try:
-            value = int(block.get(key) or 0)
+            return int(self.price_list.get("voucher") or 0) if self.price_list else 0
         except (TypeError, ValueError):
-            return default
-        return value if value > 0 else default
-
-    @property
-    def max_tokens_cap(self) -> int:
-        """Output-token ceiling for an inference-backed service (0 when
-        not inference-backed)."""
-        return self._bound("max_tokens_cap", DEFAULT_MAX_TOKENS_CAP)
-
-    @property
-    def max_input_chars(self) -> int:
-        """Input bound of an inference-backed service, in characters
-        (``service_spec.inference_input_chars``); 0 when not
-        inference-backed."""
-        return self._bound("max_input_chars", DEFAULT_MAX_INPUT_CHARS)
+            return 0
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -133,6 +124,7 @@ class ServiceRecord:
             "retired": self.retired,
             "registered_ts": self.registered_ts,
             "service_id": self.service_id,
+            "price_list": self.price_list,
         }
 
 
@@ -150,11 +142,15 @@ class ServiceStore:
         # accepted cumulative per channel (so the increment must exceed the
         # ask) plus the latest voucher signature the provider settles with.
         self._seen_path = self._dir / "served_requests.jsonl"
+        # The credit ledger (see the module docstring): channel id ->
+        # {cumulative, signature, consumed, client, provider, ts}.
         self._voucher_path = self._dir / "channel_vouchers.json"
         self._records: dict[str, ServiceRecord] = {}
-        # Called with the record once the chain numbers a registration: the
-        # daemon's service catalog announces the spec on gossip from here.
+        # Called with the record once the chain numbers a registration, and
+        # when its price list changes: the daemon's service catalog
+        # announces the spec and the list on gossip from here.
         self.on_registered: Any = None
+        self.on_prices: Any = None
         self._blobs: Any = None  # lazy; None until substrate package needed
         self._request_seq = 0
         # request id -> when it was used up. Kept for REPLAY_HORIZON_S: the
@@ -163,11 +159,14 @@ class ServiceStore:
         self._seen_requests: dict[str, float] = {}
         self._seen_lines = 0
         self._channel_vouchers: dict[str, dict[str, Any]] = {}
-        # Vouchers the gate accepted for requests still being served, per
-        # channel (memory only): kept when the dispatch succeeds, dropped
-        # when it fails, so a buyer pays only for what was served.
-        self._pending_vouchers: dict[str, dict[int, dict[str, Any]]] = {}
-        self._pending_seq = 0
+        # Requests and sessions being served right now, per channel (memory
+        # only): the settlement sweep leaves such a channel for later.
+        self._in_use: dict[str, int] = {}
+        self._ledger_dirty = False
+        self._ledger_saved = 0.0
+        # Sessions charge the ledger from the libp2p host's thread while
+        # requests do from the daemon's loop.
+        self._ledger_lock = threading.RLock()
         # async digest -> bytes | None over the libp2p blob protocol, set by
         # the autonet wiring: specs of other daemons' services (#45).
         self.blob_fetcher: Any = None
@@ -184,78 +183,138 @@ class ServiceStore:
         *,
         name: str,
         description: str,
-        input_schema: dict[str, Any],
+        mode: str,
         author: str,
-        unit: str = "",
-        hardware: str = "",
-        backing_tool: str = "",
+        backing_tool: str,
+        prices: dict[str, Any],
+        voucher: int,
+        settings: dict[str, Any] | None = None,
+        measures: list[dict[str, Any]] | None = None,
+        input_schema: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
-        endpoint_hint: str = "",
         image_uri: str = "",
-        inference: dict[str, Any] | None = None,
         version_of: str | None = None,
-        protocol: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build, sign, blob-store, and persist a service spec. Returns
-        ``{"digest", "spec"}`` or raises ValueError on bad input.
+        """Build, sign, blob-store and persist a service spec and its first
+        price list. Returns ``{"digest", "spec", "price_list"}`` or raises
+        ValueError on bad input.
 
-        ``unit`` is required: what one work item is, the thing the on-chain
-        price buys (Decision 2026-11-10). ``hardware`` optionally names the
-        hardware a compute service runs on.
-
-        ``inference`` declares an LLM backing instead of a backing tool
-        (decision 2026-07-26): a paid request is served by this daemon's
-        own provider stack. Exactly one backing kind per service — a
-        spec naming both is a contradiction about what the buyer gets,
-        so it's refused at registration rather than resolved at dispatch.
-        """
+        ``backing_tool`` is the digest of a tool registered here (it can be
+        unpublished). What the buyer sends comes from it: a request
+        service's input and output schema are the tool's unless given; a
+        session service's protocol is the one the tool's manifest names
+        (its ``session`` block), and it can charge for tokens only when the
+        tool reports them. ``prices`` is ``{measure: amount}`` in ATN base
+        units for the spec's measures (``{"requests": amount}`` for a
+        request service); ``voucher`` how much each voucher pays ahead."""
         blobs = self._blob_store()
-        author_pubkey = self._author_address(author)
-
-        if inference is not None:
-            if backing_tool:
+        tool = self._backing(backing_tool)
+        manifest = tool.manifest
+        protocol = None
+        if mode == MODE_SESSION:
+            block = manifest.get("session")
+            if not isinstance(block, dict) or not isinstance(block.get("protocol"), dict):
                 raise ValueError(
-                    "invalid service spec: a service has ONE backing — "
-                    "'inference' and 'backing_tool' are mutually exclusive"
-                )
-            problems = validate_inference(inference)
-            if not problems:
-                problem = self._unknown_upstream(inference)
-                if problem:
-                    problems = [problem]
-            if problems:
-                raise ValueError("invalid service spec: " + "; ".join(problems))
-
+                    "invalid service: a session service's tool must serve sessions "
+                    "(its manifest's 'session' block names the protocol)")
+            protocol = dict(block["protocol"])
+            reported = set(block.get("reports_usage") or [])
+            # Checked as the spec will hold them (" output_tokens" is
+            # output_tokens).
+            measures = normalize_measures(measures)
+            for m in measures if isinstance(measures, list) else []:
+                if (isinstance(m, dict) and m.get("measure") in REPORTED_MEASURES
+                        and m.get("measure") not in reported):
+                    raise ValueError(
+                        f"invalid service: the tool does not report "
+                        f"{m.get('measure')}, so the daemon cannot charge for it")
+            if input_schema is None:
+                input_schema = manifest.get("input_schema") or {}
+        elif mode == MODE_REQUEST:
+            if isinstance(manifest.get("session"), dict):
+                raise ValueError(
+                    "invalid service: this tool serves sessions; register a "
+                    "session service for it")
+            if input_schema is None:
+                input_schema = manifest.get("input_schema") or {}
+            if output_schema is None and isinstance(manifest.get("output_schema"), dict):
+                output_schema = manifest["output_schema"]
+        author_pubkey = self._author_address(author)
         spec = build_service_spec(
-            name=name,
-            description=description,
-            input_schema=input_schema,
-            author=author,
-            unit=unit,
-            hardware=hardware,
-            output_schema=output_schema,
-            author_pubkey=author_pubkey,
-            endpoint_hint=endpoint_hint,
-            image_uri=image_uri,
-            inference=inference,
-            version_of=version_of,
-            created_ts=int(time.time()),
-            protocol=protocol,
-        )
+            name=name, description=description, mode=mode,
+            input_schema=input_schema or {}, author=author,
+            author_pubkey=author_pubkey, output_schema=output_schema,
+            settings=settings, measures=measures if mode == MODE_SESSION else None,
+            protocol=protocol, image_uri=image_uri, version_of=version_of,
+            created_ts=int(time.time()))
         self._sign(author, spec)
-
         digest = blobs.add_json(spec)
-        record = ServiceRecord(
-            digest=digest,
-            spec=spec,
-            backing_tool=backing_tool,
-            registered_ts=int(time.time()),
-        )
+        # The same spec again (same content in the same second, e.g. a
+        # repeated publish): keep its service number and never send a price
+        # list with a lower sequence than one already announced.
+        prior = self._records.get(digest)
+        seq = int((prior.price_list or {}).get("seq") or 0) + 1 if prior else 1
+        price_list = self._price_list(author, digest, spec, prices, voucher, seq=seq)
+        record = ServiceRecord(digest=digest, spec=spec, backing_tool=tool.digest,
+                               registered_ts=int(time.time()), price_list=price_list,
+                               service_id=prior.service_id if prior else None)
         self._records[digest] = record
         self._persist()
-        log.info("registered service %r by %s -> %s",
-                 name, author, digest[:16])
-        return {"digest": digest, "spec": spec}
+        log.info("registered service %r (%s) by %s -> %s", name, mode, author, digest[:16])
+        return {"digest": digest, "spec": spec, "price_list": price_list}
+
+    def set_prices(self, digest: str, prices: dict[str, Any],
+                   voucher: int | None = None) -> dict[str, Any]:
+        """A new price list for one of this daemon's services (no new spec,
+        no transaction). Returns it, or raises ValueError."""
+        record = self._records.get(digest)
+        if record is None:
+            raise ValueError(f"unknown service {digest[:16]}")
+        seq = int((record.price_list or {}).get("seq") or 0) + 1
+        record.price_list = self._price_list(
+            record.author, digest, record.spec, prices,
+            record.voucher if voucher is None else int(voucher), seq=seq)
+        self._persist()
+        hook = self.on_prices
+        if hook is not None:
+            try:
+                hook(record)
+            except Exception:  # noqa: BLE001 - announcing never fails a price change
+                log.debug("service price hook failed", exc_info=True)
+        return record.price_list
+
+    def _price_list(self, author: str, digest: str, spec: dict[str, Any],
+                    prices: dict[str, Any], voucher: int, *, seq: int) -> dict[str, Any]:
+        try:
+            clean = {str(k): int(v) for k, v in (prices or {}).items()}
+        except (TypeError, ValueError):
+            raise ValueError("prices must be whole ATN base units per measure") from None
+        pl = build_price_list(service=digest, provider=self._author_address(author),
+                              prices=clean, voucher=int(voucher or 0), seq=seq,
+                              ts=int(time.time()))
+        errors = validate_price_list(pl, spec)
+        if errors:
+            raise ValueError("invalid price list: " + "; ".join(errors))
+        key = self._signing_key(author)
+        if key:
+            try:
+                pl = sign_price_list(pl, key)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("price list signing skipped for %s: %s", author, exc)
+        return pl
+
+    def _backing(self, backing_tool: str) -> Any:
+        store = getattr(self._runtime, "tool_store", None)
+        if store is None or not backing_tool:
+            raise ValueError("invalid service: name the tool that does the work "
+                             "(backing_tool, a tool registered on this daemon)")
+        record = store.get(backing_tool) or store.resolve(backing_tool)
+        if record is None:
+            raise ValueError(f"invalid service: no tool {backing_tool[:16]} is "
+                             "registered on this daemon")
+        if not record.manifest.get("code_digest"):
+            raise ValueError("invalid service: the backing tool has no code to run")
+        return record
 
     def set_service_id(self, digest: str, service_id: int) -> bool:
         """Record the ServiceRegistry number a registration returned."""
@@ -528,117 +587,120 @@ class ServiceStore:
                                if t >= cutoff}
         self._persist_seen()
 
+    # ---- the credit ledger ---------------------------------------------------
+
+    def channel_ledger(self, channel_id: str | int) -> dict[str, Any] | None:
+        with self._ledger_lock:
+            entry = self._channel_vouchers.get(str(channel_id))
+            return dict(entry) if entry else None
+
     def kept_channel_cumulative(self, channel_id: str | int) -> int:
-        """The cumulative of the best voucher kept for a channel (0 if
-        none): what the provider can settle with."""
-        entry = self._channel_vouchers.get(str(channel_id))
-        if not entry:
-            return 0
-        try:
-            return int(entry.get("cumulative", 0))
-        except (TypeError, ValueError):
-            return 0
+        """The running total of the best voucher held for a channel (0 if
+        none): what the provider can cash in."""
+        with self._ledger_lock:
+            entry = self._channel_vouchers.get(str(channel_id))
+            try:
+                return int(entry.get("cumulative", 0)) if entry else 0
+            except (TypeError, ValueError):
+                return 0
 
-    def last_channel_cumulative(self, channel_id: str | int) -> int:
-        """The highest cumulative accepted for a channel, kept or reserved
-        by a request still being served (0 if never seen). A new voucher
-        must add at least one price on top of it."""
-        pending = self._pending_vouchers.get(str(channel_id)) or {}
-        return max([self.kept_channel_cumulative(channel_id)]
-                   + [int(p["cumulative"]) for p in pending.values()])
+    def balance(self, channel_id: str | int) -> tuple[int, int]:
+        """``(consumed, cumulative)`` for a channel."""
+        with self._ledger_lock:
+            entry = self._channel_vouchers.get(str(channel_id)) or {}
+            return int(entry.get("consumed") or 0), int(entry.get("cumulative") or 0)
 
-    def record_channel_voucher(
-        self,
-        channel_id: str | int,
-        cumulative: int,
-        signature: str,
-        provider: str = "",
-        service_id: int | None = None,
-        ask: int = 0,
-    ) -> None:
-        """Store the latest accepted voucher for a channel so the provider can
-        settle later via close_channel. Monotone: a lower cumulative than the
-        stored one is ignored (never regress the settlement position).
-        ``service_id`` and ``ask`` name the service it paid for, so the
-        settlement sweep can tell when the deposit no longer covers it."""
-        cid = str(channel_id)
-        prev = self.kept_channel_cumulative(cid)
-        if int(cumulative) < prev:
-            return
-        self._channel_vouchers[cid] = {
-            "cumulative": int(cumulative),
-            "signature": str(signature),
-            "provider": str(provider or ""),
-            "service_id": None if service_id is None else int(service_id),
-            "ask": int(ask or 0),
-            "ts": int(time.time()),
-        }
-        self._persist_vouchers()
+    def paid_up(self, channel_id: str | int) -> bool:
+        """Whether what was served is within the best voucher held. A
+        channel with no credits held is not paid up (charges to it are not
+        recorded, so nothing may be served against it)."""
+        with self._ledger_lock:
+            if str(channel_id) not in self._channel_vouchers:
+                return False
+            consumed, cumulative = self.balance(channel_id)
+            return consumed <= cumulative
 
-    def reserve_channel_voucher(
-        self,
-        channel_id: str | int,
-        cumulative: int,
-        signature: str,
-        provider: str = "",
-        service_id: int | None = None,
-        ask: int = 0,
-    ) -> dict[str, Any]:
-        """Hold a voucher the gate accepted while its request is served.
-        Counts toward ``last_channel_cumulative`` at once (a copy sent
-        meanwhile is refused), but is kept only by
-        ``keep_channel_voucher``; ``release_channel_voucher`` drops it and
-        the channel is back at its previous cumulative. Returns the handle
-        both take."""
-        cid = str(channel_id)
-        self._pending_seq += 1
-        token = self._pending_seq
-        self._pending_vouchers.setdefault(cid, {})[token] = {
-            "cumulative": int(cumulative), "signature": str(signature),
-            "provider": str(provider or ""),
-            "service_id": None if service_id is None else int(service_id),
-            "ask": int(ask or 0)}
-        return {"channel_id": cid, "token": token}
+    def accept_voucher(self, channel_id: str | int, cumulative: int, signature: str,
+                       *, client: str, provider: str) -> bool:
+        """Hold a voucher the gate verified: kept when its running total is
+        above the one held (a lower one never regresses what the provider
+        can cash in). Returns whether it was kept."""
+        with self._ledger_lock:
+            cid = str(channel_id)
+            entry = self._channel_vouchers.get(cid)
+            if entry is not None and int(cumulative) <= int(entry.get("cumulative") or 0):
+                return False
+            new = dict(entry or {"consumed": 0})
+            new.update({"cumulative": int(cumulative), "signature": str(signature),
+                        "client": str(client or "").lower(),
+                        "provider": str(provider or "").lower(), "ts": int(time.time())})
+            self._channel_vouchers[cid] = new
+            self._persist_vouchers()
+            return True
 
-    def _pop_pending(self, reservation: dict[str, Any]) -> dict[str, Any] | None:
-        cid = str(reservation.get("channel_id"))
-        pending = self._pending_vouchers.get(cid)
-        if not pending:
-            return None
-        entry = pending.pop(reservation.get("token"), None)
-        if not pending:
-            self._pending_vouchers.pop(cid, None)
-        return entry
+    def consume(self, channel_id: str | int, amount: int) -> None:
+        """Record ``amount`` served on a channel. ``consumed`` may pass
+        ``cumulative`` by what one reply or one step already served; nothing
+        more is served until a voucher covers it (``paid_up``)."""
+        with self._ledger_lock:
+            if int(amount) <= 0:
+                return
+            entry = self._channel_vouchers.get(str(channel_id))
+            if entry is None:
+                return
+            entry["consumed"] = int(entry.get("consumed") or 0) + int(amount)
+            self._ledger_dirty = True
+            if time.monotonic() - self._ledger_saved >= LEDGER_PERSIST_INTERVAL:
+                self._persist_vouchers()
 
-    def keep_channel_voucher(self, reservation: dict[str, Any]) -> None:
-        """The request was served: keep its voucher to settle with."""
-        entry = self._pop_pending(reservation)
-        if entry is not None:
-            self.record_channel_voucher(
-                reservation["channel_id"], entry["cumulative"],
-                entry["signature"], provider=entry["provider"],
-                service_id=entry["service_id"], ask=entry["ask"])
+    def refund(self, channel_id: str | int, amount: int) -> None:
+        """A request charged and then not served: take its charge back."""
+        with self._ledger_lock:
+            entry = self._channel_vouchers.get(str(channel_id))
+            if entry is None or int(amount) <= 0:
+                return
+            entry["consumed"] = max(0, int(entry.get("consumed") or 0) - int(amount))
+            self._persist_vouchers()
 
-    def release_channel_voucher(self, reservation: dict[str, Any]) -> None:
-        """The request was not served: drop its voucher (not paid)."""
-        self._pop_pending(reservation)
+    def flush_ledger(self) -> None:
+        with self._ledger_lock:
+            if self._ledger_dirty:
+                self._persist_vouchers()
+
+    def begin_use(self, channel_id: str | int) -> None:
+        with self._ledger_lock:
+            cid = str(channel_id)
+            self._in_use[cid] = self._in_use.get(cid, 0) + 1
+
+    def end_use(self, channel_id: str | int) -> None:
+        with self._ledger_lock:
+            cid = str(channel_id)
+            n = self._in_use.get(cid, 0) - 1
+            if n <= 0:
+                self._in_use.pop(cid, None)
+            else:
+                self._in_use[cid] = n
+            self.flush_ledger()
 
     def has_pending_voucher(self, channel_id: str | int) -> bool:
-        """A request on this channel is being served right now."""
-        return bool(self._pending_vouchers.get(str(channel_id)))
+        """A request or session on this channel is being served right now."""
+        with self._ledger_lock:
+            return bool(self._in_use.get(str(channel_id)))
 
     def channel_vouchers(self) -> dict[str, dict[str, Any]]:
         """Every channel this provider holds a voucher for (settlement)."""
-        return {k: dict(v) for k, v in self._channel_vouchers.items()}
+        with self._ledger_lock:
+            return {k: dict(v) for k, v in self._channel_vouchers.items()}
 
     def forget_channel_voucher(self, channel_id: str | int) -> None:
-        """Drop a settled channel's voucher."""
-        if self._channel_vouchers.pop(str(channel_id), None) is not None:
-            self._persist_vouchers()
+        """Drop a closed channel's entry."""
+        with self._ledger_lock:
+            if self._channel_vouchers.pop(str(channel_id), None) is not None:
+                self._persist_vouchers()
 
     def get_channel_voucher(self, channel_id: str | int) -> dict[str, Any] | None:
-        """Return the latest stored voucher for a channel, or None."""
-        return self._channel_vouchers.get(str(channel_id))
+        with self._ledger_lock:
+            return self._channel_vouchers.get(str(channel_id))
 
     def _load_payment_state(self) -> None:
         if self._seen_path.exists():
@@ -687,24 +749,12 @@ class ServiceStore:
         with tmp.open("w", encoding="utf-8") as fh:
             json.dump(self._channel_vouchers, fh)
         os.replace(tmp, self._voucher_path)
+        self._ledger_dirty = False
+        self._ledger_saved = time.monotonic()
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
-
-    def _unknown_upstream(self, inference: dict[str, Any]) -> str:
-        """Why this daemon cannot serve ``inference`` (its provider id is
-        not one the provider manager knows), or ""."""
-        manager = getattr(self._runtime, "providers", None)
-        check = getattr(manager, "routing_error", None)
-        if check is None:
-            return ""
-        try:
-            err = check(str(inference.get("provider") or "").strip(),
-                        str(inference.get("model") or "").strip())
-        except Exception:  # noqa: BLE001 - the serving path refuses instead
-            return ""
-        return f"inference: {err}" if err else ""
 
     def _signing_key(self, author: str) -> str:
         """The key that signs ``author``'s specs and registers them: the
@@ -852,6 +902,8 @@ class ServiceStore:
                 registered_ts=int(row.get("registered_ts") or 0),
                 service_id=(int(row["service_id"])
                             if row.get("service_id") is not None else None),
+                price_list=(row.get("price_list")
+                            if isinstance(row.get("price_list"), dict) else {}),
             )
 
     def _persist(self) -> None:

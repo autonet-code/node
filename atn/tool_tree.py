@@ -28,9 +28,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 MANIFEST_FILE = "autonet-tool.json"
+# A codebase's service specs (Decision 2026-11-12): one JSON file per
+# service, read by register_service {"path"}. They describe how the tool is
+# sold, not what it is, so they are never part of the tool's snapshot: a
+# changed listing must not change the tool's digest.
+SERVICES_DIR = "autonet-services"
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 MAX_FILES = 2000
-_ALWAYS_EXCLUDED = (".git", ".git/*", "*/.git", "*/.git/*", "__pycache__",
+_ALWAYS_EXCLUDED = (SERVICES_DIR, SERVICES_DIR + "/*",
+                    ".git", ".git/*", "*/.git", "*/.git/*", "__pycache__",
                     "*/__pycache__", "*/__pycache__/*", "__pycache__/*",
                     "*.pyc")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
@@ -38,7 +44,7 @@ _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 # Fields a codebase manifest may carry, besides the required ones.
 MANIFEST_FIELDS = ("name", "description", "input_schema", "output_schema",
                    "entrypoint", "runtime", "capabilities", "dependencies",
-                   "novelty", "exclude", "source")
+                   "novelty", "exclude", "source", "session")
 
 
 class TreeError(ValueError):

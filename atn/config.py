@@ -283,11 +283,16 @@ class RPBConfig:
                                         # address (ServiceMarket.sol). Seeded from
                                         # registry.json contracts.payment_channel.
                                         # The settlement rail for services.
-    channel_idle_close_s: float = 86400.0  # A provider closes a payment
-                                        # channel to collect once it has had
-                                        # no new voucher for this long
-                                        # (atn/channel_settlement.py); <= 0
-                                        # never closes on idleness.
+    channel_idle_close_s: float = 86400.0  # A provider settles what a
+                                        # payment channel owes it at least
+                                        # this often (since its last settle,
+                                        # or since it was first seen;
+                                        # atn/channel_settlement.py); <= 0
+                                        # never settles on time alone.
+    channel_settle_min: int = 1_000_000  # A provider settles a payment
+                                        # channel once this much (base units,
+                                        # 1 ATN by default) is unpaid on it;
+                                        # <= 0 never settles on the amount.
     token_address: str = ""             # Discovered from Governor.token()
     economy_address: str = ""           # Discovered from RepToken.economyAddress()
     timelock_address: str = ""          # Discovered from Governor.timelock()
@@ -1483,6 +1488,8 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         payment_channel_address=resolved.get("payment_channel_address", ""),
         channel_idle_close_s=float(resolved.get("channel_idle_close_s", 86400.0)
                                    or 0.0),
+        channel_settle_min=int(resolved.get("channel_settle_min", 1_000_000)
+                               or 0),
         token_address=resolved.get("token_address", ""),
         economy_address=resolved.get("economy_address", ""),
         timelock_address=resolved.get("timelock_address", ""),

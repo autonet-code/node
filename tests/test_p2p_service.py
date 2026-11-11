@@ -110,7 +110,7 @@ async def test_only_relays_are_asked_to_forward():
     request: its args are plaintext to whoever forwards it."""
     a, d, c = _host("nat-a"), _host("daemon-d"), _host("nat-c")
     calls, seen = [], []
-    real = d._handle_service_stream
+    real = d._handle_service_request_stream
 
     async def spy(stream):
         seen.append(1)
@@ -150,7 +150,7 @@ async def test_a_seed_forwards_before_it_advertises():
 class _ForgingRelay(AutonetHost):
     """A relay that answers every request itself, ok, with made-up output."""
 
-    async def _handle_service_stream(self, stream):
+    async def _handle_service_request_stream(self, stream):
         envelope = json.loads((await _read_frame_no_close(stream)).decode())
         self.forged = getattr(self, "forged", 0) + 1
         msg = envelope.get("msg") or {}
@@ -304,64 +304,58 @@ class _Hosts:
 async def test_relayed_request_runs_the_providers_payment_gate(tmp_path, monkeypatch):
     """The libp2p path lands on WebSocketBridge._handle_service_request
     (local=False): a request signed by a key that did not pay is refused,
-    the payer's own request passes the gate."""
-    import atn.on_chain as oc
+    the payer's own request passes the gate, and a request on credits comes
+    back with the provider's count, signed (reply_sig) over the wire."""
     from atn import service_client
     from atn.ws_server import WebSocketBridge
     from tests.test_service_payment_gate import (
-        PAYER_KEY, _make_runtime, _patch_listing, _payer, _register_service)
+        PAYER_KEY, PRICE, VOUCHER, Chain, _make_runtime, _patch_listing, _register_service,
+        _voucher)
 
     _patch_listing(monkeypatch)
     rt = _make_runtime(tmp_path, chain=True)
     server = WebSocketBridge(rt)
-    # The entry is registered under the key that signs the owner's
-    # services, so its replies are signed by the address the buyer pays.
-    provider_addr = server._service_provider_address("user")
-    record = _register_service(rt, provider=provider_addr)
-    served = []
-
-    class _Tool:
-        manifest: dict = {}
-
-    async def _call(tool, args, caller_id=None):
-        served.append(args)
-        return {"result": "served"}
-    monkeypatch.setattr(rt.tool_store, "get",
-                        lambda d: _Tool() if d == record.backing_tool else None)
-    monkeypatch.setattr(rt.tool_store, "call", _call)
-
-    async def _verify(self, *, request_id, recipient, min_amount,
-                      tx_hash=None, payer=None):
-        if payer != _payer():
-            return {"verified": False, "reason": "payer mismatch"}
-        return {"verified": True, "reason": "ok"}
-    monkeypatch.setattr(oc.OnChainService, "verify_service_payment", _verify)
+    chain = Chain(monkeypatch)
+    # The entry names the operator, the key that signs the owner's services,
+    # so its replies are signed by the address the buyer pays.
+    record = _register_service(rt)
+    provider_addr = record.test_listing["provider"]
+    assert provider_addr == server._service_provider_address("user")
+    chain.open(5, provider_addr)
 
     with _Hosts() as hosts:
         hosts.provider.set_service_handler(service_client.host_service_handler(
             server._serve_p2p_service_request, asyncio.get_running_loop()))
 
-        async def buy(rid, key):
+        async def buy(rid, key, **payment):
             return await service_client.request_service(
-                rt._config.rpb, provider_addr, record.digest, {},
-                tx_hash="0x" + "ab" * 32, request_id=rid, payer_key=key,
-                p2p_host=hosts.consumer, peer_id=hosts.provider.peer_id,
-                timeout=20)
+                rt._config.rpb, provider_addr, record.digest, {"x": 1},
+                request_id=rid, payer_key=key, p2p_host=hosts.consumer,
+                peer_id=hosts.provider.peer_id, timeout=20, **payment)
 
-        thief = await buy("0x" + "0c" * 32, "0x" + "22" * 32)
+        rid = "0x" + "0c" * 32
+        tx = chain.pay(rid, provider_addr, PRICE)
+        thief = await buy(rid, "0x" + "22" * 32, tx_hash=tx)
         assert thief["transport"] == "libp2p"
-        assert thief["ok"] is False and "Payment validation failed" in thief["error"]
+        assert thief["ok"] is False and "payer mismatch" in thief["error"]
         assert thief["authenticated"] is True   # the provider's own "no"
 
-        paid = await buy("0x" + "0d" * 32, PAYER_KEY)
+        paid = await buy(rid, PAYER_KEY, tx_hash=tx)
         assert paid["transport"] == "libp2p"
         assert paid["ok"] is True and paid["authenticated"] is True
-        assert paid["result"]["result"] == "served"
-        assert served == [{}]
+        assert paid["result"]["result"]["echo"] == {"x": 1}
+
+        on_credits = await buy("0x" + "0e" * 32, PAYER_KEY, voucher=_voucher(5, VOUCHER))
+        assert on_credits["ok"] is True and on_credits["authenticated"] is True
+        assert on_credits["credit"] == {"channel_id": 5, "consumed": PRICE,
+                                        "cumulative": VOUCHER}
+        held = await buy("0x" + "0f" * 32, PAYER_KEY, channel_id=5)
+        assert held["ok"] is True and held["credit"]["consumed"] == 2 * PRICE
+        assert rt.service_store.balance(5) == (2 * PRICE, VOUCHER)
 
 
 class _Unsigned:
-    """A provider-side handler that answers ok without a receipt_sig, as a
+    """A provider-side handler that answers ok without a reply_sig, as a
     peer impersonating the provider would."""
 
     def __init__(self):
@@ -461,12 +455,35 @@ async def test_service_spec_gossip_reaches_a_peer_through_a_relay():
     services topic, as ``atn relay`` is) to a buyer that reaches the
     provider only through it, and the buyer's catalog keeps it because the
     chain names its digest (Decision 2026-11-10)."""
-    from atn.service_catalog import announcement, spec_digest, topic_for
-    from tests.atn.test_service_catalog import ADDR_A, _catalog, _entry, _spec
+    from types import SimpleNamespace
 
-    cat = _catalog()
-    spec = _spec("transcribe_audio", "speech to text per audio minute")
-    cat._entries[1] = _entry(1, spec, ADDR_A)
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    from atn.service_catalog import (
+        ServiceCatalog, announcement, service_keyword_tokens, spec_digest, topic_for)
+    from atn.service_spec import (
+        build_service_spec, canonical_service_bytes, service_embedding_text)
+    from atn.tool_search import ToolSearchIndex
+
+    key = "0x" + "a1" * 32
+    author = Account.from_key(key).address
+    spec = build_service_spec(
+        name="transcribe_audio", description="speech to text per audio minute",
+        mode="request", input_schema={"type": "object"}, author="agent",
+        author_pubkey=author, created_ts=1)
+    spec["author_sig"] = Account.sign_message(
+        encode_defunct(canonical_service_bytes(spec)), private_key=key).signature.hex()
+    runtime = SimpleNamespace(
+        _config=SimpleNamespace(rpb=SimpleNamespace()),
+        service_store=SimpleNamespace(list=lambda include_retired=False: [],
+                                      get=lambda d: None))
+    cat = ServiceCatalog(runtime, None, index=ToolSearchIndex(
+        None, embed=lambda texts: None, text_of=service_embedding_text,
+        tokens_of=service_keyword_tokens))
+    cat._entries[1] = {"service_id": 1, "provider": author,
+                       "spec_digest": spec_digest(spec), "ask_amount": 0,
+                       "active": True, "registered_at": 1, "updated_at": 1}
     topic = topic_for("1337:0x" + "da" * 20)
     got = threading.Event()
 

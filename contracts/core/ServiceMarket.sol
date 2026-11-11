@@ -15,10 +15,13 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 ///      Firestore `services`. Chain = truth, blob = spec storage.
 ///
 ///   2. PaymentChannel — the ONLY settlement rail (prepaid, unidirectional):
-///      client opens with a deposit, hands the provider EIP-712 vouchers
-///      over (channelId, cumulativeAmount) off-chain per work item, provider
-///      closes claiming the latest cumulative, remainder refunds to client
-///      after a challenge window.
+///      client opens with a deposit (its credit with that provider, across
+///      all of the provider's services) and may top it up; it hands the
+///      provider EIP-712 vouchers over (channelId, cumulativeAmount)
+///      off-chain per work item; the provider cashes in the latest
+///      cumulative whenever it likes (settle) without ending the channel,
+///      and either side ends it (closeChannel / startClose), the remainder
+///      refunding to the client after a challenge window.
 ///
 /// Channel-only settlement is a ratified decision (services_market.md,
 /// 2026-07-04), not an interim state: the postpaid escrow was DELETED. An
@@ -162,56 +165,80 @@ contract ServiceRegistry {
 // PaymentChannel — prepaid credits, unidirectional (the ONLY settlement rail)
 // =============================================================================
 //
-// "Prepaid credits done trustlessly." Two on-chain txs for N off-chain work
-// items:
+// "Prepaid credits done trustlessly." A buyer's channel with a provider is
+// its credit balance with that provider, used across all of the provider's
+// services, like API credits. On-chain txs are per deposit and per cash-in,
+// never per work item:
 //
 //   1. openChannel(provider, deposit) — client escrows a deposit of ATN.
+//      topUp(channelId, amount) adds to it while the channel is Open.
 //   2. per work item, OFF-CHAIN: client signs an EIP-712 voucher over
 //      (channelId, cumulativeAmount). cumulativeAmount is MONOTONE — each
 //      voucher supersedes the last. "Not served = no voucher" preserves
 //      per-item granularity without a tx per item.
-//   3. closeChannel(channelId, cumulativeAmount, sig) — provider submits the
-//      HIGHEST voucher it holds; contract pays min(cumulative, deposit) to
-//      the provider and opens a challenge window.
-//   4. after the challenge window, withdrawRemainder refunds the unclaimed
-//      remainder to the client.
+//   3. settle(channelId, cumulativeAmount, sig) — provider cashes in the
+//      HIGHEST voucher it holds, as often as it likes: the contract pays
+//      min(cumulative, deposit) minus what it already paid, and the channel
+//      stays as it was (Open stays Open), so the buyer's credit carries on.
+//      `claimed` is the cumulative paid to the provider so far (gross).
+//   4. closeChannel(channelId, cumulativeAmount, sig) — provider ends the
+//      channel with its best voucher: pays whatever settle has not paid yet
+//      and opens a challenge window. Or the client ends it (startClose):
+//      the provider may still settle or close inside that window.
+//   5. after the challenge window, withdrawRemainder refunds deposit -
+//      claimed to the client.
 //
-// ATN-only (ratified 2026-07-10). The deposit is pulled with
-// substrate.transferFrom and the provider payout routes through
+// ATN-only (ratified 2026-07-10). The deposit and every top-up are pulled
+// with substrate.transferFrom and every provider payout (settle, and close
+// when it pays something) routes through
 // substrate.payForService(provider, pay, channelId) — so the provider
-// receives NET of the 2.5% service fee, exactly like the direct
-// payForService rail (closes audit gap G1). Vouchers remain
-// GROSS-denominated (the cumulative the client signs is the pre-fee ask);
-// the fee is taken at settlement. The theft-ceiling analysis below is
-// UNCHANGED — the fee is on the same side of every voucher, so the bound is
-// still one client-sized voucher's increment (now net of fee, strictly
-// smaller). The remainder refund is NOT a service payment and pays no fee.
+// receives NET of the service fee, exactly like the direct payForService
+// rail (closes audit gap G1), and the fee burns as soon as the provider
+// cashes in rather than when the channel ends. Every payout emits
+// ChannelPaid. Vouchers remain GROSS-denominated (the cumulative the client
+// signs is the pre-fee ask); the fee is taken at each payout. The theft
+// ceiling below is UNCHANGED by settling in steps and by top-ups — the fee
+// is on the same side of every voucher, and each payout only moves claimed
+// up to a cumulative the client signed, so the bound is still one
+// client-sized voucher's increment (net of fee, strictly smaller). The
+// remainder refund is NOT a service payment and pays no fee.
 //
 // Unidirectional only (client→provider). No bidirectional / mutual-close
 // complexity — the spec explicitly says keep it minimal and standard.
 //
 // GRIEFING ANALYSIS
 // -----------------
-//   * Voucher REPLAY: closeChannel can only be called once per channel
-//     (status flips to Closing). A resubmitted voucher hits ChannelNotOpen.
+//   * Voucher REPLAY: settle pays only the part of a voucher above claimed,
+//     so a resubmitted voucher pays nothing (NothingToSettle). closeChannel
+//     can only be called once per channel (status flips to Closing); after
+//     it, settle and closeChannel hit ChannelNotOpen.
 //   * STALE voucher (provider submits an older, lower cumulative than the
-//     latest it holds): only hurts the provider — it claims less. The client
-//     benefits (larger remainder). We still store the claimed cumulative so a
-//     provider can't later "top up" with a higher voucher after close (single
-//     close). Providers are expected to submit their highest voucher.
+//     latest it holds): only hurts the provider — it claims less now, and a
+//     later settle with the higher voucher pays the difference. A close with
+//     a voucher at or below claimed pays nothing more. The client benefits
+//     (larger remainder) only if the provider closes on the stale one.
 //   * Over-claim (cumulative > deposit): capped at deposit via min(). A
 //     client cannot be drained past what it escrowed; a provider cannot forge
-//     a voucher (EIP-712 sig recovers to the client, checked on close).
+//     a voucher (EIP-712 sig recovers to the client, checked on settle and
+//     close). A top-up raises the cap: a voucher the client signed above the
+//     old deposit becomes collectable up to the new one, which is what the
+//     client signed for (a voucher is the client's running total of work it
+//     accepted, not a payment capped by the deposit of the day).
 //   * Client vanishing after close: the challenge window is a timer, not a
 //     client action. Once it elapses ANYONE can trigger withdrawRemainder
 //     (refunds to the client). Provider is never blocked from its claimed
-//     funds — those transferred at close, before the window.
+//     funds — those transferred at each settle and at close, before the
+//     window.
 //   * Client double-spend / not-served: since a voucher is only produced by
 //     the CLIENT and only AFTER the client accepts a work item, a provider
 //     that under-delivers simply gets no higher voucher — per-item
 //     granularity at 1/N the gas. The theft ceiling is exactly one voucher:
 //     a provider that pockets a voucher and never serves steals at most that
-//     item's increment, so the client's loss is bounded by a single item.
+//     item's increment, so the client's loss is bounded by a single item,
+//     however many times the provider has settled before.
+//   * Top-ups only while Open: a client that started a close cannot add to
+//     the deposit (it opens a new channel instead), so the remainder it
+//     waits for never moves during the window.
 //
 // The challenge window is a settle-delay for the remainder refund
 // (giving an honest party time to act) rather than a fraud-proof court —
@@ -244,7 +271,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         address client;
         address provider;
         uint256 deposit;
-        uint256 claimed;       // cumulative paid to provider at close (gross)
+        uint256 claimed;       // cumulative paid to the provider so far (gross)
         uint256 closesAt;      // timestamp remainder becomes withdrawable
         Status status;
         uint256 window;        // challengeWindow when the channel opened
@@ -263,6 +290,24 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         address indexed provider,
         uint256 deposit
     );
+    /// @notice A payout to the provider (settle, or a close that pays
+    ///         something): `amount` gross paid now, `paidTotal` the
+    ///         channel's cumulative paid so far (its `claimed`).
+    event ChannelPaid(
+        uint256 indexed channelId,
+        address indexed client,
+        address indexed provider,
+        uint256 amount,
+        uint256 paidTotal
+    );
+    event ChannelToppedUp(
+        uint256 indexed channelId,
+        address indexed client,
+        uint256 amount,
+        uint256 deposit
+    );
+    /// @dev paidToProvider is the cumulative paid over the channel's life
+    ///      (its `claimed` at close), not only what the close itself paid.
     event ChannelClosed(
         uint256 indexed channelId,
         uint256 paidToProvider,
@@ -284,6 +329,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     error DepositTransferFailed();
     error NotGovernor();
     error ZeroWindow();
+    error NothingToSettle();
 
     constructor(address substrateAddr, uint256 challengeWindow_)
         EIP712("AutonetPaymentChannel", "1")
@@ -329,6 +375,21 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         emit ChannelOpened(channelId, msg.sender, provider, deposit);
     }
 
+    /// @notice Client adds `amount` of ATN to an Open channel's deposit (its
+    ///         credit with the provider). Must approve this contract on
+    ///         Substrate first, as for openChannel.
+    function topUp(uint256 channelId, uint256 amount) external nonReentrant {
+        Channel storage c = channels[channelId];
+        if (c.status != Status.Open) revert ChannelNotOpen();
+        if (msg.sender != c.client) revert NotClient();
+        if (amount == 0) revert ZeroDeposit();
+        c.deposit += amount;
+        if (!substrate.transferFrom(msg.sender, address(this), amount)) {
+            revert DepositTransferFailed();
+        }
+        emit ChannelToppedUp(channelId, msg.sender, amount, c.deposit);
+    }
+
     /// @notice EIP-712 digest a client signs for a voucher. Exposed for
     ///         off-chain signers / tests.
     function voucherHash(
@@ -341,9 +402,9 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     }
 
     /// @notice Client starts closing an open channel. The provider has one
-    ///         challenge window to settle with its best voucher
-    ///         (closeChannel); if it does not, the client withdraws the whole
-    ///         deposit after the window (withdrawRemainder).
+    ///         challenge window to collect its best voucher (settle or
+    ///         closeChannel); if it does not, the client withdraws everything
+    ///         not yet paid after the window (withdrawRemainder).
     function startClose(uint256 channelId) external nonReentrant {
         Channel storage c = channels[channelId];
         if (c.status != Status.Open) revert ChannelNotOpen();
@@ -353,9 +414,35 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         emit ChannelCloseStarted(channelId, msg.sender, c.closesAt);
     }
 
+    /// @notice Provider cashes in without ending the channel, up to
+    ///         `upTo` (gross, cumulative): what it has served. Vouchers pay
+    ///         ahead, so the best voucher may cover more than was served; an
+    ///         honest provider claims only what it served, and the rest stays
+    ///         the client's (refunded at the close, or served later under the
+    ///         same voucher). Pays min(cumulativeAmount, deposit, upTo) minus
+    ///         what was already paid, NET of the service fee (routed through
+    ///         payForService); the channel keeps its status (Open stays Open,
+    ///         a client's close keeps its deadline).
+    /// @param cumulativeAmount The voucher's cumulative total (gross).
+    /// @param signature Client's EIP-712 signature over (channelId, cumulative).
+    /// @param upTo The cumulative total to be paid after this call, at most.
+    function settle(
+        uint256 channelId,
+        uint256 cumulativeAmount,
+        bytes calldata signature,
+        uint256 upTo
+    ) external nonReentrant {
+        Channel storage c = channels[channelId];
+        uint256 capped = _checkProviderVoucher(c, channelId, cumulativeAmount, signature);
+        if (upTo < capped) capped = upTo;
+        if (capped <= c.claimed) revert NothingToSettle();
+        _payProvider(c, channelId, capped);
+    }
+
     /// @notice Provider closes the channel with its highest voucher. Pays the
-    ///         provider min(cumulativeAmount, deposit) NET of the service fee
-    ///         (routed through payForService); the rest becomes the client's
+    ///         provider whatever of min(cumulativeAmount, deposit) settle has
+    ///         not paid yet, NET of the service fee (routed through
+    ///         payForService); deposit - claimed becomes the client's
     ///         withdrawable remainder after the challenge window.
     /// @param cumulativeAmount The voucher's cumulative total (gross).
     /// @param signature Client's EIP-712 signature over (channelId, cumulative).
@@ -365,7 +452,25 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         bytes calldata signature
     ) external nonReentrant {
         Channel storage c = channels[channelId];
-        // Open, or inside the window of a close the client started.
+        uint256 capped = _checkProviderVoucher(c, channelId, cumulativeAmount, signature);
+        c.status = Status.Closing;
+        c.closesAt = block.timestamp + c.window;
+        // A voucher at or below what settle already paid pays nothing more.
+        if (capped > c.claimed) {
+            _payProvider(c, channelId, capped);
+        }
+        emit ChannelClosed(channelId, c.claimed, c.deposit - c.claimed, c.closesAt);
+    }
+
+    /// @dev The provider may collect while the channel is Open, or inside the
+    ///      window of a close the client started. Checks the caller and the
+    ///      client's voucher signature; returns min(cumulative, deposit).
+    function _checkProviderVoucher(
+        Channel storage c,
+        uint256 channelId,
+        uint256 cumulativeAmount,
+        bytes calldata signature
+    ) private view returns (uint256 capped) {
         if (c.status != Status.Open && !(c.status == Status.ClientClosing
                 && block.timestamp < c.closesAt)) revert ChannelNotOpen();
         if (msg.sender != c.provider) revert NotProvider();
@@ -375,20 +480,19 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         address signer = digest.recover(signature);
         if (signer != c.client) revert BadVoucherSignature();
 
-        uint256 pay = cumulativeAmount > c.deposit ? c.deposit : cumulativeAmount;
-        c.claimed = pay;
-        c.status = Status.Closing;
-        c.closesAt = block.timestamp + c.window;
+        capped = cumulativeAmount > c.deposit ? c.deposit : cumulativeAmount;
+    }
 
-        uint256 remainder = c.deposit - pay;
-        // Provider is paid immediately at close (it produced a valid voucher).
-        // Route through payForService so the fee-recycled emission takes its
-        // cut on the canonical rail; the provider receives the net. The
-        // channelId is the requestId so the settlement is matchable off-chain.
-        if (pay > 0) {
-            substrate.payForService(c.provider, pay, bytes32(channelId));
-        }
-        emit ChannelClosed(channelId, pay, remainder, c.closesAt);
+    /// @dev Pay the provider up to `capped` (> claimed): claimed moves first,
+    ///      then the payout routes through payForService so the fee-recycled
+    ///      emission takes its cut on the canonical rail and the provider
+    ///      receives the net. The channelId is the requestId so the payout is
+    ///      matchable off-chain.
+    function _payProvider(Channel storage c, uint256 channelId, uint256 capped) private {
+        uint256 pay = capped - c.claimed;
+        c.claimed = capped;
+        substrate.payForService(c.provider, pay, bytes32(channelId));
+        emit ChannelPaid(channelId, c.client, c.provider, pay, capped);
     }
 
     /// @notice After the challenge window, refund the client's remainder.
@@ -397,7 +501,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     function withdrawRemainder(uint256 channelId) external nonReentrant {
         Channel storage c = channels[channelId];
         // A provider close (remainder) or a client close the provider never
-        // answered (claimed stays 0: the whole deposit).
+        // closed (the deposit less whatever settle paid).
         if (c.status != Status.Closing && c.status != Status.ClientClosing) {
             revert ChannelNotClosing();
         }

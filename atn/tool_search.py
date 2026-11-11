@@ -202,7 +202,7 @@ class ToolSearchIndex:
         # default; the service catalog passes service_embedding_text.
         self._text_of = text_of
         # The keyword document per document: the manifest's by default; the
-        # service catalog adds a spec's unit of work and hardware.
+        # service catalog adds a spec's settings and protocol.
         self._tokens_of = tokens_of or keyword_tokens
         self._lock = threading.RLock()
         self._texts: dict[str, str] = {}          # digest -> embedding text

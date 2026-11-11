@@ -49,9 +49,10 @@ _GROUPS: dict[str, tuple[str, ...]] = {
     "tools": ("probe_tools", "list_tools", "adopt_tool",
               "register_tool", "publish_tool", "attest_tools",
               "fetch_evidence"),
-    "services": ("find_services", "request_service", "pay_for_service",
-                 "close_service_channel", "register_service",
-                 "open_service_stream", "review_service"),
+    "services": ("find_services", "request_service", "open_session",
+                 "open_credits", "top_up_credits", "close_credits",
+                 "list_credits", "review_service", "register_service",
+                 "set_service_prices"),
     # Any transaction from the operator the agent acts as: governance
     # (werule proposals and votes, ToolBond appeals), any contract call.
     "chain": ("send_transaction",),

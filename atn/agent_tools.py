@@ -1342,286 +1342,225 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     # ------------------------------------------------------------------
-    # Services rail (docs/services_market.md) — the remote-API market.
-    # A Service is a paid remote API another agent (its human benefactor)
-    # offers: general-purpose, priced per work item, settled in ATN via
-    # Substrate.payForService. Services get NO substrate standing, mint,
-    # or verdict claims — trust is behavioral (identity, atomic payment).
+    # Services (docs/services_market.md, Decision 2026-11-12): work that
+    # runs on a provider's tool and needs something buyers can't copy
+    # (hardware, a model, data, a credential, a presence). A service is
+    # used by request (one reply each) or by session (a two-way connection
+    # in a protocol the tool serves). Buyers pay from credits with the
+    # provider (a payment channel) or, for a one-off request, directly.
+    # Services earn money only: no substrate standing, mint or REP.
     # ------------------------------------------------------------------
     ToolDefinition(
         name="find_services",
         description=(
-            "Discover services offered on the network — remote paid APIs other "
-            "agents sell (NOT tools: services run on the provider's daemon and "
-            "settle in ATN, they earn no substrate standing). Lists on-chain "
-            "services most-recent first: service_id, provider address, ask "
-            "(ATN price per work item), spec digest, and whether it's active. "
-            "Pass 'query' to filter by a substring against locally-known service "
-            "names/descriptions. Each row carries the service's spec (name, "
-            "description, unit: what one work item is, the thing the ask "
-            "buys; hardware: what a compute service runs on, when declared; "
-            "input_schema), fetched from the network when this daemon doesn't "
-            "hold it. To invoke one: request_service with its service_id (it "
-            "pays through a payment channel, one ask per work item). Read-only."
+            "Search the jurisdiction's services (keyword and meaning, like tools). "
+            "Each row: service_id, provider, spec_digest, name, description, mode "
+            "('request': one reply per request; 'session': a connection you keep "
+            "open), settings (what sets the service apart, such as the model), "
+            "measures (what it charges for: a request service per request; a "
+            "session service per seconds open, gigabytes, input or output "
+            "tokens, each per a quantity), prices (the provider's signed price "
+            "list: ATN base units per measure's quantity), voucher (how much each "
+            "voucher pays ahead), registry_price (an optional on-chain price "
+            "nothing enforces), protocol (a session service's, with its "
+            "specification's sha256), input_schema, rating (buyers' reviews as of "
+            "the latest close), provider_household, sanction, and your_credits "
+            "(your credits with that provider, if any). Use request_service or "
+            "open_session. Read-only."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Optional substring/topic filter over locally-known service metadata.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max services to return (default 25).",
-                },
+                "query": {"type": "string", "description": "What you are looking for."},
+                "limit": {"type": "integer", "description": "Max services to return (default 25)."},
             },
         },
     ),
     ToolDefinition(
         name="register_service",
         description=(
-            "Author a service YOU offer: a remote paid API other agents can "
-            "invoke, priced per work item in ATN. 'unit' (required) says what "
-            "one work item is, the thing one ask buys: e.g. 'one completion "
-            "up to 4,000 output tokens', 'one minute of RTX 5090 time', 'one "
-            "transcribed audio minute'. For request/reply services one "
-            "request is one work item. 'hardware' (optional) names the "
-            "hardware a compute service runs on, so buyers can check its "
-            "throughput against what that hardware documents. This builds and "
-            "persists the local service spec AND registers it on-chain in the "
-            "ServiceRegistry "
-            "under your agent address (you become the provider). Requires you to "
-            "be registered on-chain (register_on_chain first) — the contract's "
-            "onlyAgent gate rejects unregistered callers. A service needs ONE "
-            "backing to actually fulfil requests: either 'backing_tool' (the "
-            "digest of a registered tool you own) so incoming service_requests "
-            "dispatch to it, or 'inference' ({provider, model, max_tokens_cap?, "
-            "max_input_chars?}) to sell cognition off one provider of this "
-            "daemon's own stack, named on purpose. "
-            "The price lives on chain only, in the ServiceRegistry entry: "
-            "change it with updateServiceAsk(service_id, ask_amount) or "
-            "retire the service with retireService(service_id) through "
-            "send_transaction. Returns {service_id, tx_hash, spec_digest}."
+            "Sell work one of your registered tools does, as a service (you become "
+            "the provider, paid for every unit; publishing costs one transaction's "
+            "gas and no stake). Fields: mode ('request': each request runs the tool "
+            "once, JSON in and out; 'session': the tool's manifest has a 'session' "
+            "block, the daemon runs it as a server and pipes each buyer's "
+            "connection to it, see GET /guide), backing_tool (the tool's digest; "
+            "it can stay unpublished), name, description, settings (values passed "
+            "to the tool as AUTONET_SERVICE_SETTINGS and shown to buyers, such as "
+            "{'model': 'llama3.1:70b-instruct-q4_K_M'}: a different model is a "
+            "different service), price (ATN base units per request, a request "
+            "service) or measures + prices (a session service: measures "
+            "[{measure, quantity}] from seconds, gigabytes, input_tokens, "
+            "output_tokens, the token ones only if the tool reports them; prices "
+            "{measure: amount per that quantity}), voucher (how much each buyer's "
+            "voucher pays ahead: the most a buyer risks), optional registry_price "
+            "(an on-chain price nothing enforces) and image_uri. Or 'path': a "
+            "service file autonet-services/<name>.json in the tool's codebase "
+            "holding these fields. Once published, the daemon serves every buyer "
+            "whose payment checks out, with no further action. Change prices with "
+            "set_service_prices (no transaction); retire with retireService "
+            "through send_transaction."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Service name (how it's discovered — be precise)."},
-                "description": {"type": "string", "description": "What the service does."},
-                "ask_amount": {
-                    "type": "integer",
-                    "description": "Price per work item in ATN base units (uint). This is the on-chain ask and the payment minimum the gate enforces.",
-                },
-                "unit": {
-                    "type": "string",
-                    "description": "What one work item is: the meaning of the price (a short text, e.g. 'one completion up to 4,000 output tokens'). Required. Not a price: the price is ask_amount, on chain only.",
-                },
-                "hardware": {
-                    "type": "string",
-                    "description": "Optional: the hardware a compute service runs on (e.g. 'one RTX 5090, 32 GB'), so buyers can check throughput against what it documents.",
-                },
-                "input_schema": {
-                    "type": "object",
-                    "description": "JSON schema of the service's request arguments.",
-                    "additionalProperties": True,
-                },
-                "backing_tool": {
-                    "type": "string",
-                    "description": "Digest of a registered tool you own that fulfils requests (a Service is a tool the owner chose to sell).",
-                },
-                "inference": {
-                    "type": "object",
-                    "description": "The OTHER backing kind: sell cognition off "
-                                   "this daemon's own provider stack instead of "
-                                   "a tool. {provider, model, max_tokens_cap?, "
-                                   "max_input_chars?}. Mutually exclusive with "
-                                   "'backing_tool': a service has exactly one "
-                                   "backing.",
-                    "properties": {
-                        "provider": {"type": "string", "description": "The upstream provider id of this daemon that serves every request (e.g. 'ollama', 'anthropic'). Required, never inferred from the model."},
-                        "model": {"type": "string", "description": "Model id served to buyers. Required."},
-                        "max_tokens_cap": {"type": "integer", "description": "Output-token ceiling clamped onto every request (default 4096)."},
-                        "max_input_chars": {"type": "integer", "description": "Largest request accepted: characters of its messages (compact JSON) plus its system prompt (default 64000). A larger request is refused before its payment is taken."},
-                    },
-                    "required": ["provider", "model"],
-                    "additionalProperties": False,
-                },
-                "output_schema": {
-                    "type": "object",
-                    "description": "Optional JSON schema of the service's result.",
-                    "additionalProperties": True,
-                },
-                "protocol": {
-                    "type": "object",
-                    "description": "Makes the service a two-way stream: the "
-                                   "application protocol buyers speak on it, "
-                                   "{id: name/version such as 'openai-chat/1' "
-                                   "or 'webrtc-sdp/1', description}. The "
-                                   "backing_tool is then the local address the "
-                                   "stream is piped to, 'tcp://127.0.0.1:<port>'.",
-                    "properties": {
-                        "id": {"type": "string"},
-                        "description": {"type": "string"},
-                    },
-                    "required": ["id"],
-                    "additionalProperties": False,
-                },
-                "endpoint_hint": {"type": "string", "description": "Optional reachability hint (advisory)."},
-                "image_uri": {
-                    "type": "string",
-                    "description": "Optional https URL of a banner image for the "
-                                   "marketplace card (advisory, display-only). "
-                                   "Use a real, stable image you host or "
-                                   "uploaded; without it the card shows a "
-                                   "default banner.",
-                },
+                "mode": {"type": "string", "enum": ["request", "session"]},
+                "backing_tool": {"type": "string", "description": "Digest of the registered tool that does the work."},
+                "name": {"type": "string", "description": "How buyers find it; be precise."},
+                "description": {"type": "string", "description": "What it does, in the words a buyer would search for."},
+                "settings": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Values passed to the tool and shown to buyers."},
+                "price": {"type": "integer", "description": "A request service: ATN base units per request."},
+                "measures": {"type": "array", "items": {"type": "object"}, "description": "A session service: [{measure, quantity}]."},
+                "prices": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "A session service: {measure: ATN base units per its quantity}."},
+                "voucher": {"type": "integer", "description": "ATN base units each voucher pays ahead."},
+                "registry_price": {"type": "integer", "description": "Optional price recorded on chain (nothing enforces it)."},
+                "image_uri": {"type": "string", "description": "Optional https banner for the listing card."},
+                "input_schema": {"type": "object", "additionalProperties": True, "description": "Optional, a request service: overrides the tool's input schema."},
+                "output_schema": {"type": "object", "additionalProperties": True, "description": "Optional, a request service: overrides the tool's output schema."},
+                "path": {"type": "string", "description": "Optional: a service file (autonet-services/<name>.json) with these fields."},
             },
-            "required": ["name", "description", "ask_amount", "unit"],
         },
     ),
     ToolDefinition(
-        name="pay_for_service",
+        name="set_service_prices",
         description=(
-            "Pay a service provider in ATN up front, outside a channel. Prefer "
-            "request_service without a payment proof: it pays per request through "
-            "a payment channel, so a request that is never served is never paid. "
-            "This "
-            "signs a Substrate.payForService transfer from YOUR agent key to the "
-            "provider (taking the network service fee) and returns {tx_hash, "
-            "request_id}. Hand BOTH the tx_hash and request_id to the provider "
-            "when you call request_service — the provider verifies the payment "
-            "on-chain against the service ask before serving. 'amount' is the "
-            "gross ATN (>= the service ask); the provider receives net of fee. "
-            "Generate one payment per request: a request_id is single-use "
-            "(replay-protected provider-side)."
+            "Change one of your services' prices or voucher size: a new signed "
+            "price list, sent to every daemon. No transaction and no new spec. "
+            "Sessions already open keep the prices they opened with."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "recipient": {"type": "string", "description": "The provider's agent address (0x...)."},
-                "amount": {"type": "integer", "description": "Gross ATN base units to pay (>= the service ask)."},
-                "request_id": {
-                    "type": "string",
-                    "description": "Optional bytes32 hex request id; a fresh one is generated if omitted.",
-                },
+                "spec_digest": {"type": "string", "description": "The service's spec digest."},
+                "price": {"type": "integer", "description": "A request service: ATN base units per request."},
+                "prices": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "A session service: {measure: amount}."},
+                "voucher": {"type": "integer", "description": "Optional new voucher size."},
             },
-            "required": ["recipient", "amount"],
+            "required": ["spec_digest"],
         },
     ),
     ToolDefinition(
         name="request_service",
         description=(
-            "Invoke a service on the provider's daemon (cross-daemon call). "
-            "Reaches the provider over libp2p by the peer id in the on-chain "
-            "agent registry (directly or through a relay, so providers behind "
-            "NAT work), else at its on-chain WS endpoint. Name the service by "
-            "'service_id' (its number from find_services: its spec and "
-            "provider are read from the chain) or by 'spec_digest' with "
-            "'provider_address', and pass the request 'payload' (matching the "
-            "service's input schema). Payment: by default a payment channel to "
-            "the provider (opened on first use, escrowing 'deposit', default 10 "
-            "requests' worth; the unspent part comes back on "
-            "close_service_channel, or when the provider closes the channel) "
-            "and a signed voucher per request. A request the provider refuses "
-            "or fails is not paid ('paid' is 0); one that may have reached the "
-            "provider but got no answer is counted as paid. Or pass a direct "
-            "proof (tx_hash + request_id from pay_for_service). Returns the "
-            "provider's result, or a clear error if the provider is "
-            "unreachable or the payment failed verification."
+            "Send one request to a request service and get its reply. Reaches the "
+            "provider over libp2p by its on-chain peer id (directly, hole-punched "
+            "or through a relay), else its on-chain wss endpoint. Pays from your "
+            "credits with the provider when you have them (open_credits), else "
+            "with one direct payment for this request; 'pay' picks ('credits' or "
+            "'direct'). A request the provider refuses or fails costs nothing on "
+            "credits; a directly paid request it fails can be sent again on the "
+            "same payment ('paid_directly' from its reply). Open credits with a "
+            "provider you will use more than once. The reply says what your "
+            "credits look like after it."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "service_id": {"type": "integer", "description": "The service's number in the ServiceRegistry (service_id from find_services)."},
-                "spec_digest": {"type": "string", "description": "Or: the service's spec digest (spec_digest from find_services), with provider_address."},
-                "provider_address": {"type": "string", "description": "The provider's address (0x...). Needed with spec_digest; with service_id it is read from the chain."},
-                "payload": {
-                    "type": "object",
-                    "description": "The request arguments (per the service input schema).",
-                    "additionalProperties": True,
-                },
-                "tx_hash": {"type": "string", "description": "Optional: a direct payment's tx hash from pay_for_service."},
-                "request_id": {"type": "string", "description": "Optional: that payment's request_id (bytes32 hex)."},
-                "deposit": {"type": "integer", "description": "Optional: ATN base units to escrow when a new channel to this provider is opened (default 10x the ask)."},
+                'service_id': {'type': 'integer', 'description': "The service's number in the ServiceRegistry (service_id from find_services)."},
+                'spec_digest': {'type': 'string', 'description': "Or: the service's spec digest, with provider_address."},
+                'provider_address': {'type': 'string', 'description': "The provider's address (0x...). Needed with spec_digest."},
+                "payload": {"type": "object", "additionalProperties": True, "description": "The request (per the service's input schema)."},
+                "pay": {"type": "string", "enum": ["credits", "direct"], "description": "Optional: how to pay."},
+                "paid_directly": {"type": "object", "description": "Optional: resend a directly paid request that was not served, on the same payment: the 'paid_directly' ({tx_hash, request_id}) of its reply, with the same payload."},
             },
             "required": ["payload"],
         },
     ),
     ToolDefinition(
-        name="open_service_stream",
+        name="open_session",
         description=(
-            "Open a paid two-way stream to a stream service (one whose spec "
-            "names a 'protocol', such as 'openai-chat/1' or 'webrtc-sdp/1') "
-            "and get a local port for it: connect one program to "
-            "127.0.0.1:<port> and speak that protocol; the bytes reach the "
-            "provider's application. The daemons connect directly when the "
-            "provider is reachable, else through a relay. Payment: vouchers "
-            "on your payment channel to the provider, each paying for "
-            "'units' units, sent as the provider asks while it serves; a "
-            "voucher the provider never uses is not paid. The stream ends "
-            "when your program disconnects (or when nobody connects within "
-            "5 minutes). Name the service by 'service_id' or by "
-            "'spec_digest' with 'provider_address'. Returns {port, path, "
-            "protocol, units, request_id}."
+            "Open a session to a session service and get a local port for it: "
+            "connect one program to 127.0.0.1:<port> and speak the service's "
+            "protocol; the bytes reach the provider's tool. Paid from your credits "
+            "with the provider (open_credits first): your daemon signs a voucher, "
+            "each by the provider's voucher size, whenever the provider asks. The "
+            "prices quoted at opening hold for the whole session. The session ends "
+            "when your program disconnects, when nobody connects within 5 minutes, "
+            "or when your credits run out (top them up with top_up_credits). "
+            "Returns {port, path, protocol, prices, measures, voucher, credits}."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "service_id": {"type": "integer", "description": "The service's number in the ServiceRegistry (service_id from find_services)."},
-                "spec_digest": {"type": "string", "description": "Or: the service's spec digest, with provider_address."},
-                "provider_address": {"type": "string", "description": "The provider's address (0x...). Needed with spec_digest."},
-                "args": {"type": "object", "description": "Optional opening arguments for the provider's application.", "additionalProperties": True},
-                "units": {"type": "integer", "description": "Units each voucher pays for (default 1): more means fewer vouchers and more paid ahead."},
-                "deposit": {"type": "integer", "description": "Optional: ATN base units to escrow if a new channel to this provider is opened."},
+                'service_id': {'type': 'integer', 'description': "The service's number in the ServiceRegistry (service_id from find_services)."},
+                'spec_digest': {'type': 'string', 'description': "Or: the service's spec digest, with provider_address."},
+                'provider_address': {'type': 'string', 'description': "The provider's address (0x...). Needed with spec_digest."},
+                "args": {"type": "object", "additionalProperties": True, "description": "Opening arguments (per the service's input schema)."},
             },
         },
     ),
     ToolDefinition(
-        name="close_service_channel",
+        name="open_credits",
         description=(
-            "Close your payment channel to a service provider. The provider "
-            "has one challenge window to collect what your vouchers cover; "
-            "the rest of the deposit returns to you automatically after it."
+            "Open credits with a service provider: a payment channel escrowing "
+            "'deposit' (ATN base units) from your balance, used for every service "
+            "of that provider, requests and sessions alike. Nothing opens or tops "
+            "up credits automatically. What you don't use comes back when you "
+            "close them."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "provider_address": {"type": "string", "description": "The provider's agent address (0x...)."},
+                "provider_address": {"type": "string"},
+                "deposit": {"type": "integer", "description": "ATN base units to escrow."},
             },
+            "required": ["provider_address", "deposit"],
+        },
+    ),
+    ToolDefinition(
+        name="top_up_credits",
+        description="Add ATN base units to your open credits with a provider.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "provider_address": {"type": "string"},
+                "amount": {"type": "integer"},
+            },
+            "required": ["provider_address", "amount"],
+        },
+    ),
+    ToolDefinition(
+        name="close_credits",
+        description=(
+            "Close your credits with a provider. The provider has one challenge "
+            "window to cash in what your vouchers cover; the rest comes back to "
+            "you automatically after it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"provider_address": {"type": "string"}},
             "required": ["provider_address"],
         },
     ),
     ToolDefinition(
+        name="list_credits",
+        description="Your open credits with service providers: deposit, used, paid ahead, left.",
+        input_schema={"type": "object", "properties": {}},
+    ),
+    ToolDefinition(
         name="review_service",
         description=(
-            "Review a service request you paid for, so other buyers can "
-            "judge the service (find_services shows each service's rating "
-            "from the latest epoch close). Only the payer of a charged "
-            "request may review it, every payer counts the same, and your "
-            "latest review of a service replaces your earlier one. The "
-            "proof is the provider's signed receipt this daemon kept for "
-            "the request: it covers what was charged and a hash of the "
-            "result, never the result itself. Reviews enforce nothing: no "
-            "mint, no REP. Every review needs correctness, simplicity, "
-            "novelty and malware; a malware flag needs evidence (the "
-            "provider's signed reply is attached to it)."
+            "Review a service, so other buyers can judge it (find_services shows "
+            "each service's rating from the latest epoch close). Your review counts "
+            "once you have paid that provider on chain (your credits cashed in, or "
+            "a direct payment), for any of its services; every payer counts the "
+            "same, and your latest review "
+            "of a service replaces your earlier one. Reviews enforce nothing: no "
+            "mint, no REP. Every review needs correctness, simplicity, novelty and "
+            "malware; a malware flag needs evidence."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "request_id": {"type": "string", "description": "The request's id (request_id in request_service's reply)."},
-                "receipt": {"type": "object", "description": "Or: the receipt itself (receipt in request_service's reply), for a request this daemon has no receipt of.", "additionalProperties": True},
+                'service_id': {'type': 'integer', 'description': "The service's number in the ServiceRegistry (service_id from find_services)."},
+                'spec_digest': {'type': 'string', 'description': "Or: the service's spec digest, with provider_address."},
+                'provider_address': {'type': 'string', 'description': "The provider's address (0x...). Needed with spec_digest."},
                 "correctness": {"type": "number", "description": "Required, -1..1: the service delivered what it describes (harm to people counts here or on a charter axis)."},
                 "simplicity": {"type": "number", "description": "Required, 0..1: convenience for the buyer: time, preparation, documents asked for."},
                 "novelty": {"type": "number", "description": "Required, 0..1: your own judgment of how much of your view of what exists the service makes you revise."},
                 "malware": {"type": "boolean", "description": "Required: true only when the service acts to perform an unauthorized process with adverse impact on the confidentiality, integrity or availability of a system (NIST SP 800-53 'malicious code'), for example a model primed to make your agent leak data or run harmful commands."},
-                "evidence": {"type": "string", "description": "Required with malware true: what the service did and how it shows in its reply."},
-                "axes": {
-                    "type": "object",
-                    "description": "Optional charter-axis scores, -1..1, keyed by axis id (autonet_status lists them); an unscored axis counts as half the top score.",
-                    "additionalProperties": {"type": "number"},
-                },
+                "evidence": {"type": "string", "description": "Required with malware true: what the service did and how it shows in what it returned."},
+                "axes": {"type": "object", "additionalProperties": {"type": "number"}, "description": "Optional charter-axis scores, -1..1, keyed by axis id (autonet_status lists them); an unscored axis counts as half the top score."},
                 "note": {"type": "string", "description": "Optional, up to 500 characters, public with the review."},
             },
             "required": ["correctness", "simplicity", "novelty", "malware"],
@@ -2284,8 +2223,8 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 # What an external agent may call unless its creator says otherwise: the
 # tool library (probe, use, review), authoring, publishing, adoption
 # proposals, its own registration, and buying services (find, request,
-# close a channel; Decision 2026-11-08: the operator pays). Selling a
-# service (register_service) stays a separate grant.
+# sessions, credits, reviews; Decision 2026-11-08: the operator pays).
+# Selling a service (register_service) stays a separate grant.
 EXTERNAL_DEFAULT_TOOLS = ["unified_tools", "toolsmith", "publishing",
                           "adoption", "identity", "transactions",
                           "services_buy"]
@@ -3175,7 +3114,7 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         meta = tree["meta"]
         input = {**input, **{k: meta[k] for k in (
             "name", "description", "input_schema", "capabilities",
-            "dependencies", "novelty") if k in meta}}
+            "dependencies", "novelty", "session") if k in meta}}
     name = str(input.get("name") or "").strip()
     if not name:
         return {"error": "Missing required field: 'name'"}
@@ -3240,6 +3179,11 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     if novelty is not None and not isinstance(novelty, dict):
         return {"error": "novelty must be an object {statement, prior_art}"}
 
+    session = input.get("session")
+    if session is not None and not isinstance(session, dict):
+        return {"error": "session must be an object {protocol, max_sessions, "
+                         "process, reports_usage}"}
+
     try:
         result = runtime.tool_store.register(
             name=name,
@@ -3257,6 +3201,7 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             dependencies=dependencies,
             capabilities=capabilities or None,
             novelty=novelty,
+            session=session,
             **({"archive": tree["archive"], "tree_digest": tree["tree_digest"],
                 "entrypoint": tree["meta"]["entrypoint"],
                 "source": tree["meta"].get("source"),
@@ -3514,7 +3459,7 @@ async def _probe_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
 
 
 # ---------------------------------------------------------------------------
-# Services rail (docs/services_market.md) — find/register/pay/request
+# Services (docs/services_market.md): find, sell, request, sessions, credits, reviews
 # ---------------------------------------------------------------------------
 
 def _caller_identity(runtime: Runtime, caller_id: str | None):
@@ -3522,17 +3467,18 @@ def _caller_identity(runtime: Runtime, caller_id: str | None):
 
     Returns (defn, identity, private_key) or an ``{"error": ...}`` dict when
     the caller isn't a registered agent with a daemon-held key. Owner callers
-    have no agent key of their own — a service author/payer must be an agent.
+    have no agent key of their own: a service's provider is an agent (the
+    owner's app publishes through the WS server's register_service).
     """
     if caller_id is None or is_owner_caller(caller_id):
-        return {"error": "This tool must be called by a registered agent — the "
-                         "owner surface has no agent key to sign with. Ask an "
-                         "agent (or register one) to author/pay for services."}
+        return {"error": "This command must be called by an agent: the owner "
+                         "surface has no agent key to sign with. Ask an agent "
+                         "(or create one) to sell the service."}
     defn = runtime.get_agent(caller_id)
     if defn is None:
         return {"error": f"Agent '{caller_id}' not found."}
     if not defn.identity or not defn.identity.address:
-        return {"error": f"Agent '{caller_id}' has no on-chain identity — "
+        return {"error": f"Agent '{caller_id}' has no on-chain identity: "
                          "register it first (register_on_chain)."}
     key = runtime.registry.get_agent_key(caller_id)
     if not key:
@@ -3540,141 +3486,177 @@ def _caller_identity(runtime: Runtime, caller_id: str | None):
     return defn, defn.identity, key
 
 
+async def _service_ref(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """The service an Agent names: ``service_id`` (read from the chain), or
+    ``spec_digest`` with ``provider_address``. ``{spec_digest, provider,
+    active}`` or ``{"error"}``."""
+    from . import service_client
+
+    provider = str(input.get("provider_address") or "").strip()
+    digest = service_client.normalize_digest(str(input.get("spec_digest") or ""))
+    raw_id = input.get("service_id")
+    if raw_id not in (None, ""):
+        try:
+            number = int(str(raw_id).strip())
+        except (TypeError, ValueError):
+            return {"error": "'service_id' is the service's number from find_services"}
+        entry = await service_client.read_service(runtime._config.rpb, number)
+        if entry.get("error"):
+            return {"error": str(entry["error"])}
+        found = service_client.normalize_digest(str(entry.get("spec_digest") or ""))
+        if digest and digest != found:
+            return {"error": f"service #{number} is another spec than {digest[:16]}"}
+        if provider and provider.lower() != str(entry.get("provider") or "").lower():
+            return {"error": f"service #{number} is provided by {entry.get('provider')}"}
+        return {"spec_digest": found, "provider": str(entry.get("provider") or ""),
+                "active": bool(entry.get("active"))}
+    if not (digest and provider):
+        return {"error": "Name the service: 'service_id' (its number from "
+                         "find_services), or 'spec_digest' with 'provider_address'"}
+    # The catalog's entry, when it has one, says whether it is retired (no
+    # chain read: a direct payment to a retired service would be lost).
+    active = True
+    try:
+        from .service_catalog import catalog_for
+        entry = catalog_for(runtime).entry_for(digest, provider)
+        if entry is not None:
+            active = bool(entry.get("active"))
+    except Exception:  # noqa: BLE001 (no catalog: the provider decides)
+        log.debug("service catalog lookup failed", exc_info=True)
+    return {"spec_digest": digest, "provider": provider, "active": active}
+
+
+def _buyer(runtime: Runtime, caller_id: Any) -> Any:
+    """``(address, key)`` the caller buys with: an external Agent and the
+    owner surface buy as the household's operator, a native agent as itself."""
+    try:
+        if is_owner_caller(caller_id):
+            key = str(runtime.registry.daemon_operator_key() or "")
+        else:
+            key = str(runtime.registry.get_agent_key(caller_id) or "")
+    except Exception:  # noqa: BLE001 (no vault, no registry: no key)
+        key = ""
+    if not key:
+        return {"error": "no key is held for you on this daemon, so you cannot pay"}
+    from eth_account import Account
+    return str(Account.from_key(key).address), key
+
+
+_NO_PRICE_LIST = (
+    "the provider's price list for this service has not reached this daemon "
+    "yet (it travels with the spec on the jurisdiction's gossip, announced "
+    "again every 30 minutes): try again later")
+
+
+async def _service_terms(runtime: Runtime, digest: str, provider: str) -> tuple:
+    """``(spec, price_list)`` of a service as this daemon's catalog knows
+    them (``{}`` and None while it lacks them). A catalog without the price
+    list syncs with the chain once first: a list gossiped before its entry
+    was synced waits for the sync, and one before its spec for the spec."""
+    from .service_catalog import catalog_for, fetch_missing
+
+    catalog = catalog_for(runtime)
+    price_list = catalog.price_list(digest, provider)
+    if price_list is None:
+        try:
+            await asyncio.to_thread(catalog.sync_chain)
+            store = getattr(runtime, "service_store", None)
+            if store is not None and catalog.spec(digest) is None:
+                await fetch_missing(catalog, store.spec_for)
+        except Exception:  # noqa: BLE001 (the lists held still answer)
+            log.debug("service catalog refresh failed", exc_info=True)
+        price_list = catalog.price_list(digest, provider)
+    return catalog.spec(digest) or {}, price_list
+
+
 async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Search the jurisdiction's active services (Decision 2026-11-10): the
-    daemon's catalog, keyword + semantic like tools, newest first without a
-    query. Price, provider and active flag are the chain's."""
+    """Search the jurisdiction's services: the daemon's catalog, keyword and
+    semantic like tools, newest first without a query."""
     query = str(input.get("query") or "").strip()
     try:
         limit = max(1, min(int(input.get("limit") or 25), 200))
     except (TypeError, ValueError):
         limit = 25
-
     if not getattr(runtime._config.rpb, "network_joined", False):
-        # Fully local until the first registration (or autonet.enabled):
-        # say so instead of reading the chain or listing nothing.
         from .config import not_joined_state
         return not_joined_state()
-
     from . import service_catalog as sc
+    from .service_channels import credits_view
     catalog = sc.catalog_for(runtime)
     synced = await sc.ensure_synced(catalog)
     if synced.get("error") and not catalog.synced:
         return {"error": synced["error"]}
-    # Registered services whose spec is not here yet: fetch the ones due
-    # now (bounded, with the catalog's backoff) from whoever holds them.
     store = getattr(runtime, "service_store", None)
     if store is not None:
         await sc.fetch_missing(catalog, store.spec_for, limit=limit)
     rows = await asyncio.to_thread(catalog.search, query, limit)
-    return {"services": [{
-        "service_id": r["service_id"],
-        "provider": r["provider"],
-        "ask": r["ask_amount"],
-        "spec_digest": r["digest"],
-        "active": r["active"],
-        "name": r["name"],
-        "description": r["description"],
-        "unit": r["unit"],
-        "hardware": r["hardware"],
-        "input_schema": r["input_schema"],
-        "output_schema": r["output_schema"],
-        "spec_available": r["known_spec"],
-        "rating": r.get("rating"),
-    } for r in rows], "count": len(rows)}
+    book = getattr(runtime, "channel_book", None)
+    buyer = _buyer(runtime, input.get("_caller_id")) if book is not None else None
+    payer = buyer[0] if isinstance(buyer, tuple) else ""
+    out = []
+    for r in rows:
+        credits = book.get(payer, r["provider"]) if book is not None and payer else None
+        out.append({
+            "service_id": r["service_id"], "provider": r["provider"],
+            "spec_digest": r["digest"], "active": r["active"], "name": r["name"],
+            "description": r["description"], "mode": r["mode"],
+            "settings": r["settings"], "measures": r["measures"],
+            "prices": r["prices"], "voucher": r["voucher"],
+            "registry_price": r["registry_price"], "protocol": r["protocol"],
+            "input_schema": r["input_schema"], "output_schema": r["output_schema"],
+            "spec_available": r["known_spec"], "rating": r.get("rating"),
+            "provider_household": r.get("provider_household"),
+            "sanction": r.get("sanction"),
+            "your_credits": credits_view(credits) or None,
+        })
+    return {"services": out, "count": len(out)}
 
 
 async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Author a service: persist the local spec (service_store) AND register it
-    on-chain in the ServiceRegistry under the caller's agent key."""
+    """Publish a service (atn/service_publish.py) under the caller's key."""
+    from .service_publish import form_from, publish_service
     caller_id = input.get("_caller_id")
     resolved = _caller_identity(runtime, caller_id)
     if isinstance(resolved, dict):
         return resolved
     _defn, identity, key = resolved
-
-    name = str(input.get("name") or "").strip()
-    if not name:
-        return {"error": "Missing required field: 'name'"}
-    description = str(input.get("description") or "").strip()
-    if not description:
-        return {"error": "Missing required field: 'description'"}
-    ask_amount = input.get("ask_amount")
     try:
-        ask_amount = int(ask_amount)
-    except (TypeError, ValueError):
-        return {"error": "ask_amount must be an integer (ATN base units)"}
-    if ask_amount < 0:
-        return {"error": "ask_amount must be non-negative"}
-    # What one work item is: the meaning of ask_amount (Decision 2026-11-10).
-    unit = input.get("unit")
-    if not isinstance(unit, str) or not unit.strip():
-        return {"error": "Missing required field: 'unit' (what one work item "
-                         "is, e.g. 'one completion up to 4,000 output tokens')"}
-    hardware = input.get("hardware")
-    if hardware is not None and not isinstance(hardware, str):
-        return {"error": "hardware must be a text naming the hardware"}
+        form = form_from(input)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    result = await publish_service(runtime, author=str(caller_id), signing_key=key,
+                                   form=form)
+    if result.get("error"):
+        return result
+    return {"service_id": result.get("service_id"), "tx_hash": result.get("tx_hash"),
+            "spec_digest": result["digest"], "provider": identity.address,
+            "price_list": result["price_list"], "on_chain": result.get("on_chain"),
+            **({"reason": result["reason"]} if result.get("reason") else {})}
 
-    schema = input.get("input_schema")
-    if schema is not None and not isinstance(schema, dict):
-        return {"error": "input_schema must be a JSON-schema object"}
-    schema = schema or {"type": "object", "properties": {}}
-    output_schema = input.get("output_schema")
-    if output_schema is not None and not isinstance(output_schema, dict):
-        return {"error": "output_schema must be a JSON-schema object or absent"}
 
+async def _set_service_prices(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    from .service_publish import _amount
     store = getattr(runtime, "service_store", None)
     if store is None:
         return {"error": "Service store not available on this daemon."}
-
-    # The price goes on chain only (Decision 2026-11-10): the spec carries
-    # none, and the provider changes it with ServiceRegistry.updateServiceAsk.
-    # The second backing kind (docs/services_market.md, decision 2026-07-26):
-    # sell this daemon's own inference. The store refuses it alongside a
-    # backing_tool, so no check is needed here.
-    inference = input.get("inference")
-    if not isinstance(inference, dict):
-        inference = None
+    digest = str(input.get("spec_digest") or "").lower().removeprefix("0x")
+    record = store.get(digest)
+    if record is None:
+        return {"error": f"no service {digest[:16]} published from this daemon"}
+    if not is_owner_caller(input.get("_caller_id")) and record.author != str(input.get("_caller_id")):
+        return {"error": "only the service's author changes its prices"}
+    prices = input.get("prices")
+    if prices is None and input.get("price") is not None:
+        prices = {"requests": input["price"]}
     try:
-        built = store.register(
-            name=name,
-            description=description,
-            input_schema=schema,
-            author=str(caller_id),
-            unit=unit,
-            hardware=hardware or "",
-            backing_tool=str(input.get("backing_tool") or ""),
-            output_schema=output_schema,
-            endpoint_hint=str(input.get("endpoint_hint") or ""),
-            image_uri=str(input.get("image_uri") or "").strip(),
-            inference=inference,
-            protocol=input.get("protocol") if isinstance(
-                input.get("protocol"), dict) else None,
-        )
-    except (ValueError, RuntimeError) as exc:
+        if not isinstance(prices, dict):
+            raise ValueError("name the prices: 'price' or 'prices'")
+        prices = {str(k): _amount(v, f"the price of {k}") for k, v in prices.items()}
+        voucher = None if input.get("voucher") is None else _amount(input["voucher"], "voucher")
+        price_list = store.set_prices(digest, prices, voucher)
+    except ValueError as exc:
         return {"error": str(exc)}
-    spec_digest = built["digest"]
-
-    from .on_chain import ServiceMarketClient
-    smc = ServiceMarketClient(runtime._config.rpb)
-    if not smc.registry_available:
-        return {"error": "Local spec persisted but ServiceRegistry not "
-                         "configured (missing service_registry_address / "
-                         "rpc_url) — cannot register on-chain.",
-                "spec_digest": spec_digest}
-
-    result = await smc.register_service(key, spec_digest, ask_amount)
-    if not result.get("success"):
-        return {"error": f"On-chain registration failed: {result.get('error')}",
-                "spec_digest": spec_digest}
-    if result.get("service_id") is not None:
-        store.set_service_id(spec_digest, int(result["service_id"]))
-    return {
-        "service_id": result.get("service_id"),
-        "tx_hash": result.get("tx_hash"),
-        "spec_digest": spec_digest,
-        "provider": identity.address,
-    }
+    return {"ok": True, "price_list": price_list}
 
 
 async def _sanctioned(runtime: Runtime, address: str, what: str) -> dict[str, Any] | None:
@@ -3693,270 +3675,178 @@ async def _sanctioned(runtime: Runtime, address: str, what: str) -> dict[str, An
     return refusal(address, entry, what)
 
 
-async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Sign a Substrate.payForService transfer from the caller's key; returns
-    {tx_hash, request_id} for the consumer to hand to the provider.
-
-    Thin wrapper over ``atn.service_client.pay_for_service`` (shared with the
-    ``service`` inference provider), which owns the chain mechanics."""
-    from . import service_client
-
-    caller_id = input.get("_caller_id")
-    resolved = _caller_identity(runtime, caller_id)
-    if isinstance(resolved, dict):
-        return resolved
-    _defn, _identity, key = resolved
-
-    recipient = str(input.get("recipient") or "").strip()
-    if not recipient:
-        return {"error": "Missing required field: 'recipient'"}
-    if input.get("amount") is None:
-        return {"error": "Missing required field: 'amount'"}
-    blocked = await _sanctioned(runtime, recipient, "pay")
-    if blocked:
-        return blocked
-
-    return await service_client.pay_for_service(
-        runtime._config.rpb,
-        key,
-        recipient,
-        input.get("amount"),
-        request_id=str(input.get("request_id") or "").strip(),
-    )
-
-
 async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Consumer cross-daemon call: send a service_request with the payment
-    proof to the provider (libp2p by its on-chain peer id, else its on-chain
-    WS endpoint) and return the reply.
-
-    Thin wrapper over ``atn.service_client.request_service`` (shared with the
-    ``service`` inference provider).
-
-    The service is named either by its ServiceRegistry number
-    (``service_id``, as find_services returns it; its digest and provider
-    are read from that entry) or by ``spec_digest`` with
-    ``provider_address`` (a digest alone is not unique: anyone can register
-    a copy of a public spec)."""
+    """Send one request to a request service: from the caller's credits with
+    the provider, else (or with pay='direct') one direct payment."""
     from . import service_client
+    from .on_chain import ServiceMarketClient
+    from .service_channels import request_on_credits
+    from .service_prices import request_price, voucher_size
 
-    provider_address = str(input.get("provider_address") or "").strip()
-    spec_digest = service_client.normalize_digest(
-        str(input.get("spec_digest") or ""))
-    raw_id = input.get("service_id")
     payload = input.get("payload")
-    tx_hash = str(input.get("tx_hash") or "").strip()
-    request_id = str(input.get("request_id") or "").strip()
     if not isinstance(payload, dict):
         return {"error": "'payload' must be an object"}
-    if bool(tx_hash) != bool(request_id):
-        return {"error": "A direct payment needs both 'tx_hash' and "
-                         "'request_id' (from pay_for_service); omit both to "
-                         "pay through a payment channel."}
-    entry: dict[str, Any] | None = None
-    if raw_id not in (None, ""):
-        try:
-            number = int(str(raw_id).strip())
-        except (TypeError, ValueError):
-            return {"error": "'service_id' is the service's number from "
-                             "find_services; pass a spec digest as 'spec_digest'"}
-        entry = await service_client.read_service(runtime._config.rpb, number)
-        if entry.get("error"):
-            return {"error": str(entry["error"])}
-        found = service_client.normalize_digest(str(entry.get("spec_digest") or ""))
-        if spec_digest and spec_digest != found:
-            return {"error": f"service #{number} is another spec than "
-                             f"{spec_digest[:16]}"}
-        if provider_address and provider_address.lower() != \
-                str(entry.get("provider") or "").lower():
-            return {"error": f"service #{number} is provided by "
-                             f"{entry.get('provider')}, not {provider_address}"}
-        spec_digest = found
-        provider_address = str(entry.get("provider") or "")
-    elif not spec_digest:
-        return {"error": "Name the service: 'service_id' (its number from "
-                         "find_services) or 'spec_digest' with "
-                         "'provider_address'"}
-    if not provider_address:
-        return {"error": "Missing required field: 'provider_address' (or "
-                         "pass 'service_id' to read it from the chain)"}
-    blocked = await _sanctioned(runtime, provider_address, "buy services from")
+    ref = await _service_ref(runtime, input)
+    if ref.get("error"):
+        return ref
+    if not ref.get("active"):
+        return {"error": "that service is retired"}
+    digest, provider = ref["spec_digest"], ref["provider"]
+    blocked = await _sanctioned(runtime, provider, "buy services from")
     if blocked:
         return blocked
-
-    caller_id = input.get("_caller_id")
-    defn = runtime.get_agent(caller_id) if caller_id else None
-    client_addr = (defn.identity.address
-                   if defn and defn.identity else "")
-    # The payer's key signs the request so the provider can tell the payer
-    # from a copier (and, on the channel path, signs the voucher).
-    payer_key = ""
-    if caller_id and not is_owner_caller(caller_id):
-        payer_key = runtime.registry.get_agent_key(caller_id) or ""
-
-    if tx_hash:
+    spec, price_list = await _service_terms(runtime, digest, provider)
+    if spec.get("mode") == "session":
+        return {"error": "this is a session service: use open_session"}
+    if price_list is None:
+        return {"error": _NO_PRICE_LIST}
+    price = request_price(price_list)
+    buyer = _buyer(runtime, input.get("_caller_id"))
+    config = runtime._config.rpb
+    if price <= 0:
+        # A free service: nothing to pay, so no key is needed.
+        payer, key = buyer if isinstance(buyer, tuple) else ("", "")
         return await service_client.request_service(
-            runtime._config.rpb, provider_address, spec_digest, payload,
-            tx_hash=tx_hash, request_id=request_id,
-            client_address=client_addr, payer_key=payer_key)
-
-    # Channel path (docs/services_market.md: settlement is the prepaid
-    # channel; #45): a voucher for this one request, counted only if the
-    # provider served it, or if it may have reached the provider and no
-    # answer says otherwise. A provider that never gets it can never
-    # collect it, and one that refuses or fails it keeps nothing.
-    from .on_chain import ServiceMarketClient
-    from .service_channels import channel_lock, settle_voucher, voucher_for
-
-    ask = entry if entry is not None else await service_client.lookup_service_ask(
-        runtime._config.rpb, provider_address, spec_digest)
-    if ask.get("error"):
-        return ask
-    if not ask.get("active"):
-        return {"error": "that service is retired"}
-    amount = int(ask.get("ask_amount") or 0)
-    # Every external session pays from the operator's one channel per
-    # provider (Decision 2026-11-08), and so does the daemon-level `service`
-    # model provider: one voucher at a time, or two requests would sign the
-    # same running total.
-    import contextlib
+            config, provider, digest, payload, client_address=payer, payer_key=key)
+    if isinstance(buyer, dict):
+        return buyer
+    payer, key = buyer
     book = getattr(runtime, "channel_book", None)
-    guard = (channel_lock(book, client_addr, provider_address)
-             if amount > 0 and book is not None else contextlib.nullcontext())
-    async with guard:
-        voucher = None
-        if amount > 0:
-            if not payer_key or not client_addr:
-                return {"error": "paying for a service needs an agent with its own "
-                                 "key (call as an agent, not the owner)"}
-            smc = ServiceMarketClient(runtime._config.rpb)
-            if not smc.channel_available or book is None:
-                return {"error": "PaymentChannel not configured on this daemon"}
-            try:
-                deposit = int(input.get("deposit") or 0)
-            except (TypeError, ValueError):
-                return {"error": "deposit must be an integer (ATN base units)"}
-            voucher = await voucher_for(book, smc, payer_key, client_addr,
-                                        provider_address, amount, deposit)
-            if voucher.get("error"):
-                return voucher
-            # Written down before it goes out: a daemon stopped mid-request
-            # counts it at start, since the provider may hold it.
-            book.reserve(client_addr, provider_address,
-                         voucher["channel_id"], voucher["cumulative_amount"])
-        try:
-            reply = await service_client.request_service(
-                runtime._config.rpb, provider_address, spec_digest, payload,
-                request_id=service_client.new_request_id(),
-                client_address=client_addr, payer_key=payer_key, voucher=voucher)
-        except BaseException:
-            if voucher is not None:
-                # Unknown whether it left: count it (never behind the provider).
-                book.commit(client_addr, provider_address,
-                            voucher["channel_id"], voucher["cumulative_amount"])
-            raise
-        if voucher is not None:
-            paid = settle_voucher(book, client_addr, provider_address,
-                                  voucher, reply)
-            reply["paid"] = amount if paid else 0
-            reply["channel_id"] = voucher["channel_id"]
-        return reply
+    smc = ServiceMarketClient(config)
+    pay = str(input.get("pay") or "").strip()
+    credits = book.get(payer, provider) if book is not None else None
+    if pay == "credits" and credits is None:
+        return {"error": "no credits with this provider: open_credits first"}
+    if credits is not None and pay != "direct":
+        if not smc.channel_available:
+            return {"error": "PaymentChannel not configured on this daemon"}
+        return await request_on_credits(book, smc, config, key, payer, provider, digest,
+                                        payload, price=price,
+                                        voucher=voucher_size(price_list))
+    resend = input.get("paid_directly")
+    if isinstance(resend, dict) and resend.get("tx_hash") and resend.get("request_id"):
+        # A request paid directly that was not served: its payment stays good
+        # for that request id, so it is sent again with the same payload.
+        paid = {"tx_hash": str(resend["tx_hash"]), "request_id": str(resend["request_id"])}
+    else:
+        request_id = service_client.new_request_id()
+        paid = await service_client.pay_for_service(config, key, provider, price,
+                                                    request_id=request_id)
+        if paid.get("error"):
+            return {"error": paid["error"]}
+        paid["request_id"] = str(paid.get("request_id") or request_id)
+    reply = await service_client.request_service(
+        config, provider, digest, payload, tx_hash=str(paid.get("tx_hash") or ""),
+        request_id=paid["request_id"], client_address=payer, payer_key=key)
+    reply["paid_directly"] = {"tx_hash": paid.get("tx_hash"),
+                              "request_id": paid["request_id"], "amount": price}
+    return reply
 
 
-async def _open_service_stream(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Buyer: a paid stream to a stream service, handed to a local program
-    on a 127.0.0.1 port (atn/service_streams.py; docs/services_market.md,
-    Decision 2026-11-10 "a stream between buyer and seller")."""
-    from . import service_client
-    from .service_streams import open_local_stream
+async def _open_session(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Open a session to a session service on the caller's credits and hand
+    it to a local port (atn/service_sessions.py)."""
+    from .service_sessions import open_local_session
 
-    provider_address = str(input.get("provider_address") or "").strip()
-    spec_digest = service_client.normalize_digest(str(input.get("spec_digest") or ""))
     args = input.get("args") if input.get("args") is not None else {}
     if not isinstance(args, dict):
         return {"error": "'args' must be an object"}
-    try:
-        units = max(1, int(input.get("units") or 1))
-        deposit = int(input.get("deposit") or 0)
-    except (TypeError, ValueError):
-        return {"error": "units and deposit must be integers"}
-    entry: dict[str, Any] | None = None
-    if input.get("service_id") not in (None, ""):
-        try:
-            number = int(str(input.get("service_id")).strip())
-        except (TypeError, ValueError):
-            return {"error": "'service_id' is the service's number from find_services"}
-        entry = await service_client.read_service(runtime._config.rpb, number)
-        if entry.get("error"):
-            return {"error": str(entry["error"])}
-        if not entry.get("active"):
-            return {"error": "that service is retired"}
-        spec_digest = service_client.normalize_digest(str(entry.get("spec_digest") or ""))
-        provider_address = str(entry.get("provider") or "")
-    elif not (spec_digest and provider_address):
-        return {"error": "Name the service: 'service_id', or 'spec_digest' with "
-                         "'provider_address'"}
-    blocked = await _sanctioned(runtime, provider_address, "buy services from")
+    ref = await _service_ref(runtime, input)
+    if ref.get("error"):
+        return ref
+    if not ref.get("active"):
+        return {"error": "that service is retired"}
+    blocked = await _sanctioned(runtime, ref["provider"], "buy services from")
     if blocked:
         return blocked
-    caller_id = input.get("_caller_id")
-    defn = runtime.get_agent(caller_id) if caller_id else None
-    payer = defn.identity.address if defn and defn.identity else ""
-    payer_key = ""
-    if caller_id and not is_owner_caller(caller_id):
-        payer_key = runtime.registry.get_agent_key(caller_id) or ""
-    return await open_local_stream(
-        runtime, payer_key=payer_key, payer=payer,
-        provider_address=provider_address, spec_digest=spec_digest, args=args,
-        units=units, deposit=deposit,
-        ask=int(entry.get("ask_amount") or 0) if entry is not None else None)
+    spec, price_list = await _service_terms(runtime, ref["spec_digest"], ref["provider"])
+    if spec.get("mode") == "request":
+        return {"error": "this is a request service: use request_service"}
+    if price_list is None:
+        return {"error": _NO_PRICE_LIST}
+    buyer = _buyer(runtime, input.get("_caller_id"))
+    if any(int(v or 0) > 0 for v in (price_list.get("prices") or {}).values()):
+        # A priced session is paid from credits only, never directly.
+        if isinstance(buyer, dict):
+            return buyer
+        book = getattr(runtime, "channel_book", None)
+        if book is None or book.get(buyer[0], ref["provider"]) is None:
+            return {"error": "a session is paid from your credits with its provider: "
+                             "open_credits first (a deposit in ATN base units), then "
+                             "open the session"}
+    payer, key = buyer if isinstance(buyer, tuple) else ("", "")
+    return await open_local_session(
+        runtime, payer_key=key, payer=payer, provider_address=ref["provider"],
+        spec_digest=ref["spec_digest"], args=args)
 
 
-async def _close_service_channel(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Start closing this agent's payment channel to a provider; the unspent
-    deposit is withdrawn automatically once the challenge window passes."""
+async def _credits(runtime: Runtime, input: dict[str, Any], kind: str) -> dict[str, Any]:
     from .on_chain import ServiceMarketClient
-    from .service_channels import close_channel
-
-    caller_id = input.get("_caller_id")
-    resolved = _caller_identity(runtime, caller_id)
-    if isinstance(resolved, dict):
-        return resolved
-    _defn, identity, key = resolved
+    from . import service_channels as sc
+    buyer = _buyer(runtime, input.get("_caller_id"))
+    if isinstance(buyer, dict):
+        return buyer
+    payer, key = buyer
+    book = getattr(runtime, "channel_book", None)
+    if kind == "list":
+        return {"credits": [{"provider": ch["provider"], **sc.credits_view(ch)}
+                            for ch in (book.all_open() if book is not None else [])
+                            if str(ch.get("payer", "")).lower() == payer.lower()]}
     provider = str(input.get("provider_address") or "").strip()
     if not provider:
         return {"error": "Missing required field: 'provider_address'"}
-    book = getattr(runtime, "channel_book", None)
+    amount = 0
+    if kind != "close":
+        try:
+            amount = int(input.get("deposit") if kind == "open" else input.get("amount"))
+        except (TypeError, ValueError):
+            return {"error": "the amount must be ATN base units"}
+    if kind == "open":
+        blocked = await _sanctioned(runtime, provider, "buy services from")
+        if blocked:
+            return blocked
     smc = ServiceMarketClient(runtime._config.rpb)
     if book is None or not smc.channel_available:
         return {"error": "PaymentChannel not configured on this daemon"}
-    return await close_channel(book, smc, key, identity.address, provider)
+    if kind == "close":
+        return await sc.close_credits(book, smc, key, payer, provider)
+    if kind == "open":
+        return await sc.open_credits(book, smc, key, payer, provider, amount)
+    return await sc.top_up(book, smc, key, payer, provider, amount)
+
+
+async def _open_credits(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    return await _credits(runtime, input, "open")
+
+
+async def _top_up_credits(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    return await _credits(runtime, input, "top_up")
+
+
+async def _close_credits(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    return await _credits(runtime, input, "close")
+
+
+async def _list_credits(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    return await _credits(runtime, input, "list")
 
 
 async def _review_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """The payer's review of a paid service request (Decision 2026-11-10),
-    signed with the key that paid: the caller's (the operator's for an
-    external agent), the operator's for the owner surface. Sent to the open
-    epoch's batch by the daemon's receipt store."""
-    from .service_receipts import receipts_for
-
-    store = receipts_for(runtime)
+    """A buyer's review of a service, signed with the key it pays with
+    (the operator's for an external Agent and the owner surface). It counts
+    once the reviewer has paid the provider on chain."""
+    store = getattr(runtime, "service_reviews", None)
     if store is None:
-        return {"error": "this daemon keeps no service receipts"}
-    caller_id = input.get("_caller_id")
-    if is_owner_caller(caller_id):
-        key = str(runtime.registry.daemon_operator_key() or "")
-    else:
-        key = str(runtime.registry.get_agent_key(caller_id) or "")
-    receipt = input.get("receipt")
-    request_id = str(input.get("request_id") or "").strip()
-    if receipt is None and not request_id:
-        return {"error": "Name the request: 'request_id' (from request_service) "
-                         "or its 'receipt'"}
+        return {"error": "this daemon keeps no service reviews"}
+    ref = await _service_ref(runtime, input)
+    if ref.get("error"):
+        return ref
+    buyer = _buyer(runtime, input.get("_caller_id"))
+    if isinstance(buyer, dict):
+        return buyer
     fields = {k: input.get(k) for k in ("correctness", "simplicity", "novelty", "malware")}
     return await asyncio.to_thread(
-        store.review, key, request_id=request_id,
-        receipt=receipt if isinstance(receipt, dict) else None,
+        store.review, buyer[1], provider=ref["provider"], spec_digest=ref["spec_digest"],
         fields=fields, axes=input.get("axes"), note=str(input.get("note") or ""),
         evidence=str(input.get("evidence") or ""))
 
@@ -4647,18 +4537,18 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # every external agent whatever its bundles (execute_tool); refused
     # to native agents by the executor.
     "transactions": {"send_transaction"},
-    # Services rail (docs/services_market.md): its own case-by-case bundle.
-    # find_services is read-only discovery; register_service authors a paid
-    # remote API under the agent's key; pay_for_service + request_service are
-    # the consumer half (sign a payForService transfer, then cross-daemon
-    # invoke with the proof). Kept off the progressive surface.
-    "services": {"find_services", "register_service",
-                 "pay_for_service", "request_service", "close_service_channel",
-                 "open_service_stream", "review_service"},
+    # Services (docs/services_market.md): its own case-by-case bundle.
+    # find_services is read-only discovery; register_service and
+    # set_service_prices sell; the rest buy (requests, sessions, credits,
+    # reviews). Kept off the progressive surface.
+    "services": {"find_services", "register_service", "set_service_prices",
+                 "request_service", "open_session", "open_credits",
+                 "top_up_credits", "close_credits", "list_credits",
+                 "review_service"},
     # The buying half alone, granted to external agents by default.
-    "services_buy": {"find_services", "pay_for_service", "request_service",
-                     "close_service_channel", "open_service_stream",
-                     "review_service"},
+    "services_buy": {"find_services", "request_service", "open_session",
+                     "open_credits", "top_up_credits", "close_credits",
+                     "list_credits", "review_service"},
     # User-memory bundle: read + write the dossier (USER.md). One grant —
     # an agent trusted to know the user is trusted to keep the record
     # current. Assignable to ANY agent; nothing about it is Kevin-specific.
@@ -5905,10 +5795,13 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     # Services rail (docs/services_market.md)
     "find_services": _find_services,
     "register_service": _register_service,
-    "pay_for_service": _pay_for_service,
+    "set_service_prices": _set_service_prices,
     "request_service": _request_service,
-    "open_service_stream": _open_service_stream,
-    "close_service_channel": _close_service_channel,
+    "open_session": _open_session,
+    "open_credits": _open_credits,
+    "top_up_credits": _top_up_credits,
+    "close_credits": _close_credits,
+    "list_credits": _list_credits,
     "review_service": _review_service,
     # Manual compaction (§15)
     "compact_agent": _compact_agent,

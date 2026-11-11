@@ -133,51 +133,57 @@ class TestReviews:
 # Services: the household's sessions share the operator's channel
 # ---------------------------------------------------------------------------
 
-async def test_sessions_sign_one_voucher_at_a_time(tmp_path, monkeypatch):
+async def test_sessions_share_the_operators_credits(tmp_path, monkeypatch):
     """Two sessions paying the same provider at once use the operator's one
-    channel: each request's voucher carries its own running total."""
+    channel: vouchers are signed one at a time, so each carries its own
+    running total, and a request the provider finds unpaid is sent once
+    more with the next voucher."""
     from atn import agent_tools, on_chain, service_client
     from atn.service_channels import ChannelBook
-    from tests.atn.test_service_channels import FakeMarket
+    from tests.atn.test_service_commands import _Market
 
     rt = _runtime(tmp_path)
     for aid in ("cc-a", "cc-b"):
         await _create_agent(rt, {"id": aid, "provider": "external",
                                  "tools": ["services"]})
     rt.channel_book = book = ChannelBook(tmp_path / "channels.json")
-    market = FakeMarket()
+    market = _Market()
+    price, provider = 100, "0x" + "56" * 20
+    held = {"consumed": 0, "cumulative": 0}
+    vouchers = []
 
-    class Market(FakeMarket):
-        channel_available = True
-
-        def __init__(self, cfg):
-            self.__dict__ = market.__dict__
-
-    async def ask(cfg, provider, service_id):
-        return {"active": True, "ask_amount": 100}
-
-    sent = []
-
-    async def request(cfg, provider, service_id, payload, **kw):
-        sent.append(kw["voucher"]["cumulative_amount"])
+    async def request(cfg, prov, digest, payload, **kw):
+        """The provider: serves while what it served stays within the
+        running total its vouchers reached."""
+        if kw.get("voucher"):
+            vouchers.append(kw["voucher"]["cumulative_amount"])
+            held["cumulative"] = max(held["cumulative"],
+                                     kw["voucher"]["cumulative_amount"])
         await asyncio.sleep(0.01)          # the provider takes a moment
-        return {"delivered": True, "result": {}}
+        credit = {"channel_id": 1, **held}
+        if held["consumed"] + price > held["cumulative"]:
+            return {"ok": False, "error": "Payment refused: voucher needed",
+                    "credit": credit}
+        held["consumed"] += price
+        return {"ok": True, "result": {}, "credit": {"channel_id": 1, **held}}
 
-    async def clear(runtime, address, what):
-        return None
+    async def terms(runtime, digest, prov):
+        return {"mode": "request"}, {"prices": {"requests": price}, "voucher": price}
 
-    monkeypatch.setattr(on_chain, "ServiceMarketClient", Market)
-    monkeypatch.setattr(service_client, "lookup_service_ask", ask)
+    monkeypatch.setattr(on_chain, "ServiceMarketClient", lambda cfg: market)
     monkeypatch.setattr(service_client, "request_service", request)
-    monkeypatch.setattr(agent_tools, "_sanctioned", clear)
-    provider = "0x" + "56" * 20
-    args = {"provider_address": provider, "spec_digest": "s", "payload": {}}
+    monkeypatch.setattr(agent_tools, "_service_terms", terms)
+    opened = await execute_tool("open_credits", {"provider_address": provider,
+                                                 "deposit": 1000}, rt, caller_id="cc-a")
+    assert opened.get("ok"), opened
+    args = {"provider_address": provider, "spec_digest": "ab" * 32, "payload": {}}
     out = await asyncio.gather(
         execute_tool("request_service", args, rt, caller_id="cc-a"),
         execute_tool("request_service", args, rt, caller_id="cc-b"))
-    assert [o["paid"] for o in out] == [100, 100], out
-    assert sorted(sent) == [100, 200] and len(market.opened) == 1
-    assert book.get(_operator_address(rt), provider)["cumulative"] == 200
+    assert [o["ok"] for o in out] == [True, True], out
+    assert vouchers == [100, 200] and len(market.opened) == 1
+    ch = book.get(_operator_address(rt), provider)
+    assert (ch["cumulative"], ch["consumed"]) == (200, 200)
 
 
 # ---------------------------------------------------------------------------

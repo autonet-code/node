@@ -1660,3 +1660,96 @@ class TestProbeToolsKeywordSearch:
             "probe_tools", {"query": "quaternion mesh decimation"},
             rt, caller_id="child")
         assert res["matches"] == []
+
+
+class TestServiceHooks:
+    """What the services rail uses of the tool store (Decision 2026-11-12):
+    the manifest's session block, the daemon's own environment variables for
+    a service's tool, and running a tool as a server."""
+
+    SESSION = {"protocol": {"id": "line/1", "spec": "ab" * 32},
+               "reports_usage": ["output_tokens"]}
+    SERVER_CODE = (
+        "import os, socket\n"
+        "s = socket.socket()\n"
+        "s.bind(('127.0.0.1', int(os.environ['AUTONET_SERVICE_PORT'])))\n"
+        "s.listen()\n"
+        "print('ready', os.environ.get('AUTONET_SERVICE_SETTINGS'), flush=True)\n"
+        "while True:\n"
+        "    c, _ = s.accept()\n"
+        "    c.sendall(b'hello\\n')\n"
+        "    c.close()\n"
+    )
+
+    def _register(self, rt, code, session=None, name="srv"):
+        return rt.tool_store.register(
+            name=name, description="d", input_schema={"type": "object"},
+            author="user", code=code, session=session)
+
+    def test_register_keeps_the_session_block(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        first = self._register(rt, self.SERVER_CODE, self.SESSION)
+        m = first["manifest"]
+        assert m["session"]["protocol"] == self.SESSION["protocol"]
+        assert m["session"]["process"] == "shared"
+        again = self._register(rt, self.SERVER_CODE, self.SESSION)
+        assert again["digest"] == first["digest"] and again.get("existing")
+        plain = self._register(rt, self.SERVER_CODE)
+        assert plain["digest"] != first["digest"] and "session" not in plain["manifest"]
+        with pytest.raises(ValueError, match="session"):
+            self._register(rt, self.SERVER_CODE, {"protocol": {"id": "bad"}})
+
+    @pytest.mark.asyncio
+    async def test_extra_env_reaches_a_pinned_tool(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        code = ("import os, sys, json\n"
+                "json.load(sys.stdin)\n"
+                "print(json.dumps({'s': os.environ.get('AUTONET_SERVICE_SETTINGS')}))\n")
+        record = rt.tool_store.get(self._register(rt, code)["digest"])
+        out = await rt.tool_store.call(
+            record, {}, extra_env={"AUTONET_SERVICE_SETTINGS": '{"model": "m"}'})
+        assert out == {"result": {"s": '{"model": "m"}'}}
+        assert await rt.tool_store.call(record, {}) == {"result": {"s": None}}
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop_a_server(self, tmp_path):
+        import asyncio
+        import socket
+
+        from atn import contained_pids
+
+        rt = _make_runtime(tmp_path)
+        record = rt.tool_store.get(
+            self._register(rt, self.SERVER_CODE, self.SESSION)["digest"])
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        log_path = tmp_path / "logs" / "srv.log"
+        proc, session = await rt.tool_store.start_server(
+            record, extra_env={"AUTONET_SERVICE_PORT": str(port),
+                               "AUTONET_SERVICE_SETTINGS": "{}"},
+            log_path=log_path)
+        try:
+            assert session is None and proc.pid in contained_pids._PIDS
+            reply = None
+            for _ in range(100):
+                try:
+                    r, w = await asyncio.open_connection("127.0.0.1", port)
+                except OSError:
+                    await asyncio.sleep(0.1)
+                    continue
+                reply = await r.readline()
+                w.close()
+                break
+            assert reply == b"hello\n"
+        finally:
+            await rt.tool_store.stop_server(proc, session)
+        assert proc.returncode is not None
+        assert proc.pid not in contained_pids._PIDS
+        assert proc._autonet_log.closed
+        assert "ready {}" in log_path.read_text()
+
+        attested = type("R", (), {"manifest": {}, "name": "x"})()
+        with pytest.raises(ValueError, match="no code"):
+            await rt.tool_store.start_server(attested, extra_env={},
+                                             log_path=log_path)

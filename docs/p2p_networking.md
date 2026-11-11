@@ -2,10 +2,10 @@
 
 Most daemons run on home or cloud machines that cannot accept inbound
 connections. This page covers how they still find each other, connect
-directly where they can, gossip, fetch blobs and open service streams to
+directly where they can, gossip, fetch blobs and open service sessions to
 each other. Code: `nodes/common/p2p.py` (AutonetHost),
 `nodes/common/p2p_mesh.py`, `nodes/common/ws_proxy.py`, `nodes/relay.py`,
-`nodes/common/blob_resolver.py`, `nodes/common/service_stream.py`,
+`nodes/common/blob_resolver.py`, `nodes/common/service_session.py`,
 `nodes/common/config.py`. Library: py-libp2p 0.8.1 (pinned).
 
 ## The shape
@@ -281,16 +281,16 @@ connected to says it is reachable. Answers are cached for 10 minutes
 (`AutonetHost.peer_reachable`, which asks in the background on a miss);
 service listings show it (`reachable`).
 
-## Service streams
+## Service sessions
 
-`/autonet/service-stream/1.0.0` gives a buyer's and a provider's daemons a
-two-way stream for a stream service (`nodes/common/service_stream.py`;
-the handshake, payment and receipts are in `docs/services_market.md`,
-Decision 2026-11-10 "a stream between buyer and seller"). Frames are
+`/autonet/service-session/1.0.0` gives a buyer's and a provider's daemons a
+two-way session for a session service (`nodes/common/service_session.py`;
+the opening, the credits and the vouchers are in
+`docs/services_market.md`, Decision 2026-11-12). Frames are
 `[kind][4-byte length][payload]`, kind `C` (JSON control) or `D`
 (application bytes).
 
-The stream rides the mesh's connections (`AutonetHost.route_to`): one
+The session rides the mesh's connections (`AutonetHost.route_to`): one
 already open to the provider; else the mesh dialer (`reach_peer`: the
 provider's direct addresses first, its relay circuits racing them 2 s
 later, the DHT when no address is known). Between two NAT'd daemons DCUtR
@@ -302,9 +302,10 @@ both NATs allow it. Nothing here opens or closes a circuit of its own.
 - `tests/test_p2p_mesh.py`: both transports, reservations and circuit
   dials, DHT provider fetch over a circuit, gossip after the relayed leg
   closes, no blob forwarding, the mesh dialer, the peer cache, the
-  connection cap, SOCKS5. `tests/test_service_stream.py`: paid streams
+  connection cap, SOCKS5. `tests/test_service_session.py`: paid sessions
   direct and through a relay circuit on TCP and WebSocket, megabytes each
-  way, the relay's operator caps ending circuits, the payment handshake.
+  way, the relay's operator caps ending circuits, the credits and
+  vouchers.
   `tests/test_search_model_mesh.py`: the search
   model's files provided by a NAT'd holder and fetched by a daemon that
   joins later, through the DHT record. `tests/test_evidence_mesh.py`: a

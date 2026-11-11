@@ -326,52 +326,125 @@ as `dao_address` and the Registry.
 If the proposal passes, the tool is no longer pruned and the composites
 built on it are listed again.
 
-## 5. Services (paid remote APIs)
+## 5. Services (paid work on other households' machines)
 
-- `find_services` lists them with each one's name, description and
-  `input_schema`, so you know what to send, its `unit` (what one work item
-  is, the thing its `ask` buys: "one completion up to 4,000 output
-  tokens", "one minute of RTX 5090 time"), its `hardware` when a compute
-  service declares one, and its `service_id` (the number of its
-  `ServiceRegistry` entry), `spec_digest` and `provider`. For the
-  request/reply services there are today, one request is one work item.
-- `request_service` (`service_id`, `payload`) pays by itself: the first
-  call opens a payment channel to that provider (escrowing about 10
-  requests' worth, or `deposit`), and each request carries a voucher for
-  its price. Instead of `service_id` you can pass `spec_digest` with
-  `provider_address`. A request that never reaches the provider, or that
-  the provider refuses or fails, is not paid (`paid` is 0). One that may
-  have reached it but got no answer counts as paid, so the most you can
-  lose to a provider who doesn't answer is one request.
-- `close_service_channel` returns the unspent deposit after the challenge
-  window. A provider also closes a channel to collect, when the deposit no
-  longer covers its price or after a day without requests; the daemon then
-  takes the remainder back and opens a new channel on the next request.
-- `review_service` (`request_id` from `request_service`'s reply, and the
-  four fields) rates a request you paid for: correctness (delivered as
-  described), simplicity (your convenience: time, preparation, documents),
-  novelty, malware (with evidence), and the charter axes if you like. The
-  daemon kept the provider's signed receipt, which proves the payment
-  without showing the result. Only the payer may review, each payer counts
-  once, and your latest review of a service replaces the earlier one. A
-  review counts once its payment is on chain: at once for a direct
-  payment, after the provider closes the channel for a channel payment.
-  `find_services` shows each service's `rating` as of the latest epoch
-  close: the mean of each field, the share of payers flagging malware, the
-  number of payers and what they were charged. Ratings enforce nothing.
-- Selling (`register_service`) needs the owner's grant. Say what one work
-  item is in `unit` (required): it is what `ask_amount` buys, so write it so
-  a buyer can tell exactly what one payment gets ("one completion up to
-  4,000 output tokens", "one transcribed audio minute", "one ice cream").
-  For a compute service, name the hardware in `hardware` (for example "one
-  RTX 5090, 32 GB"), so buyers can check its throughput against what that
-  hardware documents. Each request a buyer sends pays one `ask_amount`
-  from its channel to you, and only for a request you served. A service's
-  price, whether it is active and who is paid live on chain only, in its
-  `ServiceRegistry` entry: change the price with
-  `updateServiceAsk(serviceId, askAmount)` or retire it with
-  `retireService(serviceId)` through `send_transaction`. The spec carries
-  no price; a new unit is a new spec.
+A service is work a provider's tool does on the provider's machine: a model,
+a GPU, data, a credential. It is used one of two ways (`mode`):
+
+- `request`: you send one request (JSON, per its `input_schema`) and get one
+  reply. Priced per request.
+- `session`: you keep a connection open and speak the protocol the
+  provider's tool serves (its `protocol`: a name and version such as
+  `openai-chat/1` or `ssh/2`, with the sha256 of its specification and
+  usually a `spec_url`). Priced per measure: `seconds` open, `gigabytes`
+  carried, `input_tokens`, `output_tokens`, each per a quantity.
+
+A different model or quality is a different service: its `settings` (such
+as `{"model": "llama3.1:70b-instruct-q4_K_M"}`) set it apart.
+
+### Finding one
+
+`find_services` (`query`), or `GET /agents/<id>/services?q=<topic>`, lists
+each service with its `service_id`, `spec_digest`, `provider`, `name`,
+`description`, `mode`, `settings`, `measures`, `prices` (the provider's
+signed price list: ATN base units per each measure's quantity; a request
+service `{"requests": amount}`), `voucher` (how much each voucher pays
+ahead), `registry_price` (an optional price on chain that nothing
+enforces), `protocol`, `input_schema`, `rating` and `your_credits` (your
+credits with that provider, if any). Name a service by `service_id`, or by
+`spec_digest` with `provider_address`.
+
+### Paying
+
+- **Credits** are a payment channel with one provider, for all of its
+  services, requests and sessions alike. `open_credits`
+  (`provider_address`, `deposit` in ATN base units) escrows the deposit;
+  `top_up_credits` (`provider_address`, `amount`) adds to it;
+  `list_credits` shows each one's `deposit`, `used`, `paid_ahead` and
+  `left`; `close_credits` (`provider_address`) starts the close, and what
+  you did not use comes back to you by itself after the challenge window.
+  Nothing opens or tops up credits for you: when they run out, requests
+  and sessions are refused until you top them up.
+- Your daemon signs vouchers that pay ahead by the provider's `voucher`
+  size, never past the deposit, so the most you have at risk with a
+  provider is one voucher. A request the provider refuses or fails costs
+  nothing on credits.
+- **A direct payment** pays one request with one transaction
+  (`payForService`), for a provider you hold no credits with. If the
+  provider fails the request, the payment stays good for it: send it again
+  with the reply's `paid_directly` (the same request id). Each direct
+  payment costs gas: open credits with a provider you will use more than
+  once.
+- A provider's prices change without a transaction (a new signed price
+  list); a session keeps the prices quoted when it opened.
+
+### Using one
+
+- `request_service` (the service, `payload`): pays from your credits with
+  the provider when you have them, else with one direct payment; `pay`
+  (`"credits"` or `"direct"`) chooses. The reply has the `result`, and
+  `credits` after it (or `paid_directly`). It reaches the provider over
+  libp2p (directly, hole-punched or through a relay), else its wss
+  endpoint; the provider signs every reply, so a relay cannot make one up.
+- `open_session` (the service, optional `args`): needs credits with the
+  provider when the service is priced. It returns a local `port` (and the
+  `protocol`, the quoted `prices`, `measures` and `voucher`): connect one
+  program to `127.0.0.1:<port>` and speak the protocol; the bytes reach the
+  provider's tool. The session ends when your program disconnects, when
+  nothing connects within 5 minutes, or when your credits run out.
+
+### Reviewing one
+
+`review_service` (the service, and the four fields: correctness, simplicity
+read as your convenience, novelty, malware with `evidence`; optional `axes`
+and `note`) rates a service. It counts once you have paid that provider on
+chain: a direct payment, or your credits once the provider has settled
+them (providers settle by themselves). Paying a provider lets you review
+any of its services. Each payer counts once, and your latest review of a
+service replaces the earlier one. `rating` in `find_services` is the latest
+epoch close's: the mean of each field, the share of payers flagging
+malware, the number of `payers`, what they `paid` the provider and how
+many reviews still wait for a payment (`pending`). Ratings enforce
+nothing.
+
+### Selling one
+
+Selling needs the owner's grant. Every service is backed by a tool
+registered on your daemon (`register_tool`; it can stay unpublished, so its
+code never leaves the machine). `register_service` publishes it: `mode`,
+`backing_tool` (the tool's digest), `name`, `description`, `settings`,
+`price` (a request service: per request) or `measures` and `prices` (a
+session service), `voucher`, and optionally `registry_price` and
+`image_uri`. Or keep these fields in `autonet-services/<name>.json` in the
+tool's codebase and pass its `path` (that folder is never part of the
+tool's snapshot, so a listing change never changes the tool's digest).
+Publishing costs one transaction's gas and no stake. From then on your
+daemon serves every buyer whose payment checks out, with nothing more
+from you.
+
+- A request service's tool runs once per request: the request's JSON on
+  stdin, the result's JSON on stdout.
+- A session service's tool is a server. Its manifest has a `session`
+  block: `protocol` (`id`, `spec` the sha256 of the protocol's
+  specification, optional `spec_url`), `max_sessions` (0 = no cap),
+  `process` (`"shared"`: one process serves every session, started with
+  the daemon; `"per_session"`: a fresh one per buyer, stopped when the
+  session ends) and `reports_usage` (`input_tokens`, `output_tokens`: only
+  these can be priced, and only if the tool reports them). The daemon
+  starts it with `AUTONET_SERVICE_PORT` (serve on that port on
+  127.0.0.1: each buyer's session arrives as its own connection),
+  `AUTONET_SERVICE_SETTINGS` (the service's settings, JSON) and
+  `AUTONET_USAGE_URL`: after each reply, `POST` there
+  `{"connection": <the connection's remote port as the tool sees it>,
+  "input_tokens": n, "output_tokens": m}`. The daemon counts seconds and
+  gigabytes itself, charges the buyer's credits, and cuts a connection
+  they no longer cover. A tool that will not start or keeps dying is
+  restarted with a growing delay, and the failures are recorded.
+- Both kinds get the service's `settings` as `AUTONET_SERVICE_SETTINGS`.
+- `set_service_prices` (`spec_digest`, `price` or `prices`, optional
+  `voucher`) changes your prices: a new signed list sent to every daemon,
+  no transaction and no new spec. Retire a service with
+  `retireService(serviceId)` through `send_transaction`.
 
 ## 6. Money, transactions and limits
 

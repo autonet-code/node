@@ -1,30 +1,35 @@
-"""Service spec — the services-market's primary artifact kind.
+"""Service spec: how a tool is sold as a service (docs/services_market.md,
+Decision 2026-11-12).
 
-Design: ``docs/services_market.md``. A Service is a remote API published
-by an agent (ultimately by its human benefactor): general-purpose,
-priced per work item in ATN. The price is NOT in the spec: the chain is
-the only reference for it (Decision 2026-11-10, ``ServiceRegistry``'s
-``askAmount``, changed in place by ``updateServiceAsk``), as it is for
-whether the service is active and who is paid. Unlike a tool manifest, a
-service spec carries NO substrate standing, NO verdict-layer claims, NO
-mint — the trust basis is purely behavioral (signed identity, atomic
-payment, receipt-gated reviews). It rides the same sha256-addressed blob
-rail as tool manifests.
+Every service is backed by a tool registered on the provider's daemon (it
+can stay unpublished, so its code never leaves the machine). The spec is a
+separate document from the tool's manifest: it describes how the tool is
+sold, not what it is, so a changed listing never changes the tool's digest,
+and one tool can back several services (an inference server that serves
+several models, one service per model).
 
-This module is the atn-side analogue of
-``nodes.common.library.tool_manifest``, but deliberately
-carries NO ``nodes.*`` dependency: ``canonical_service_bytes`` is
-implemented locally so the ATN daemon can build/validate/sign a spec on
-a standalone install. Identity is the digest; a revision is a NEW spec
-whose ``version_of`` points at its predecessor. A new price is not a
-revision: it changes on chain under the same digest.
+A service is used one of two ways (``mode``):
 
-The spec declares the unit of work (Decision 2026-11-10, "the unit of work;
-metered on channels"): ``unit`` (required) says what one work item is, for
-example "one completion up to 4,000 output tokens" or "one minute of RTX
-5090 time". It is the meaning of the on-chain price, never a price itself.
-``hardware`` (optional) names the hardware a compute service runs on, so a
-buyer can check throughput against what that hardware documents.
+- ``request``: each request gets one reply. The tool runs once per request
+  (JSON on stdin, JSON on stdout). Priced per request.
+- ``session``: the buyer keeps a two-way connection open and speaks the
+  protocol the tool serves; the daemon runs the tool as a server. Priced
+  per measure (``measures``: seconds open, gigabytes transferred, input
+  tokens, output tokens), each per a quantity of it.
+
+The spec carries what buyers rely on and search reads: name, description,
+``settings`` (values the daemon passes to the tool for this service and
+that set it apart, such as the model), what the buyer sends (the tool's
+input schema for a request service, the tool's protocol for a session
+service), and the measures. Prices are not in it: they are in the
+provider's signed price list (``atn/service_prices.py``), which changes
+without a new spec or a transaction. The registry's ``askAmount`` is an
+optional price nothing enforces. A service carries no substrate standing,
+no verdict claims and no mint; trust in it is behavioral.
+
+Identity is the digest; a revision is a new spec whose ``version_of``
+points at its predecessor. This module has no ``nodes.*`` dependency, so
+the daemon can build and verify specs on a standalone install.
 """
 
 from __future__ import annotations
@@ -35,109 +40,66 @@ from typing import Any, Dict, List, Optional
 
 SERVICE_SPEC_KIND = "service_spec"
 
-# Fields excluded from the canonical signing payload: the signature
-# itself. Everything else — including author_pubkey — is covered so a
-# spec cannot be re-attributed after signing.
+MODE_REQUEST = "request"
+MODE_SESSION = "session"
+MODES = (MODE_REQUEST, MODE_SESSION)
+
+# What a session service can charge for. Requests are what a request
+# service charges for, one price per request.
+MEASURES = ("seconds", "gigabytes", "input_tokens", "output_tokens")
+MEASURE_REQUESTS = "requests"
+# Measures the tool reports (the daemon cannot count them itself).
+REPORTED_MEASURES = ("input_tokens", "output_tokens")
+# How much of a measure the daemon counts itself, in its own units.
+BYTES_PER_GIGABYTE = 1_000_000_000
+
+# Fields excluded from the canonical signing payload: the signature itself.
 _SIG_FIELD = "author_sig"
 
-_REQUIRED_FIELDS = ("kind", "name", "description", "input_schema", "author",
-                    "unit")
+_REQUIRED_FIELDS = ("kind", "name", "description", "mode", "input_schema", "author")
+_ALLOWED_FIELDS = frozenset(_REQUIRED_FIELDS + (
+    "output_schema", "author_pubkey", "author_sig", "settings", "measures",
+    "protocol", "image_uri", "version_of", "created_ts"))
 
-# Bounds on the unit-of-work texts: a sentence each, shown on every listing.
-MAX_UNIT_CHARS = 200
-MAX_HARDWARE_CHARS = 200
+MAX_SETTINGS = 32
+MAX_SETTING_KEY = 64
+MAX_SETTING_VALUE = 500
+SETTING_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 
-# Default output-token ceiling for an inference-backed service when the
-# author names a model but no cap. Bounds the provider's own upstream
-# spend per paid call (the on-chain price is set against the cap).
-DEFAULT_MAX_TOKENS_CAP = 4096
-
-# Default input bound of an inference-backed service: the characters of a
-# request's messages (as compact JSON) plus its system prompt, about 16k
-# tokens of text. A daemon cannot count every upstream model's tokens
-# itself, so the bound is in characters. Written into the spec when the
-# author names none, so a buyer reads the bound it is held to.
-DEFAULT_MAX_INPUT_CHARS = 64_000
-
-# Upstream providers an inference service cannot be served on: they are not
-# this daemon's own provider stack (``service`` resells a purchase, ``rpb``
-# a sponsor's grant) or generate no text (``jev``).
-NOT_UPSTREAM_PROVIDERS = frozenset({"service", "rpb", "jev", "external"})
-
-# A stream service's application protocol: a name and a version number,
-# "openai-chat/1", "webrtc-sdp/1" (Decision 2026-11-10, a stream between
-# buyer and seller). The network carries the bytes; what they mean is this
-# protocol, the parties' business.
+# A protocol: a name and a version ("openai-chat/1", "ssh/2"), its
+# specification pinned by sha256 (copied from the tool's manifest).
 PROTOCOL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}/[0-9]{1,9}$")
-MAX_PROTOCOL_DESCRIPTION = 2000
-
-
-def inference_input_chars(messages: Any, system: str = "") -> int:
-    """The size an inference request is bounded by: its messages as compact
-    JSON plus its system prompt, in characters."""
-    body = json.dumps(messages, separators=(",", ":"), ensure_ascii=False,
-                      default=str)
-    return len(body) + len(system or "")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def build_service_spec(
     *,
     name: str,
     description: str,
+    mode: str,
     input_schema: Dict[str, Any],
     author: str,
-    unit: str = "",
-    hardware: str = "",
-    output_schema: Optional[Dict[str, Any]] = None,
     author_pubkey: str = "",
-    endpoint_hint: str = "",
+    output_schema: Optional[Dict[str, Any]] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    measures: Optional[List[Dict[str, Any]]] = None,
+    protocol: Optional[Dict[str, Any]] = None,
     image_uri: str = "",
-    inference: Optional[Dict[str, Any]] = None,
     version_of: Optional[str] = None,
     created_ts: int = 0,
-    protocol: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Assemble and validate a service-spec payload.
-
-    Raises ValueError with all problems joined if validation fails.
-    ``created_ts`` is caller-supplied (no wall-clock reads here; the
-    store stamps it).
-
-    The spec carries no price (Decision 2026-11-10): the provider sets
-    it on chain when registering and changes it there. ``unit`` (required)
-    says what one work item is, the thing that price buys; ``hardware``
-    (optional) names the hardware a compute service runs on. Both are
-    stripped, and ``hardware`` is left out of the spec when empty.
-
-    ``image_uri`` is display-plane only (a listing card banner), like
-    ``endpoint_hint``: advisory, unvalidated, inside the signed payload
-    so it cannot be swapped after signing, and deliberately NOT part of
-    ``service_embedding_text`` — presentation is not semantics.
-
-    ``inference`` (``{provider, model, max_tokens_cap, max_input_chars}``,
-    decision 2026-07-26) declares that the service is backed by the
-    provider daemon's OWN provider stack rather than a backing tool: a paid
-    request is a chat completion served by exactly that upstream provider
-    and model. It sits INSIDE the signed payload (the served model and the
-    bounds are commitments to the buyer, so they must not be swappable
-    post-signature) but, like ``image_uri``, is NOT part of
-    ``service_embedding_text`` — the name/description carry the
-    semantics, a model id is plumbing.
-
-    ``protocol`` (``{id, description}``, Decision 2026-11-10) makes the
-    service a stream: buyers open ``/autonet/service-stream/1.0.0`` to the
-    provider and speak the named application protocol on it (``id`` is a
-    name and a version, "openai-chat/1"; ``description`` is free text).
-    """
+    """Assemble and validate a service spec. Raises ValueError with all
+    problems joined. ``created_ts`` is caller-supplied (no wall-clock reads
+    here; the store stamps it)."""
     spec: Dict[str, Any] = {
         "kind": SERVICE_SPEC_KIND,
-        "name": name,
-        "description": description,
+        "name": str(name or "").strip(),
+        "description": str(description or "").strip(),
+        "mode": str(mode or "").strip(),
         "input_schema": input_schema,
         "author": author,
-        "unit": unit.strip() if isinstance(unit, str) else unit,
-        "endpoint_hint": endpoint_hint,
-        "image_uri": image_uri,
+        "settings": normalize_settings(settings),
+        "image_uri": str(image_uri or "").strip(),
         "version_of": version_of,
         "created_ts": int(created_ts),
     }
@@ -145,191 +107,175 @@ def build_service_spec(
         spec["output_schema"] = output_schema
     if author_pubkey:
         spec["author_pubkey"] = author_pubkey
-    if isinstance(hardware, str) and hardware.strip():
-        spec["hardware"] = hardware.strip()
-    elif hardware and not isinstance(hardware, str):
-        spec["hardware"] = hardware
-    if inference is not None:
-        spec["inference"] = normalize_inference(inference)
+    if measures is not None:
+        spec["measures"] = normalize_measures(measures)
     if protocol is not None:
         spec["protocol"] = normalize_protocol(protocol)
-
     errors = validate_service_spec(spec)
     if errors:
         raise ValueError("invalid service spec: " + "; ".join(errors))
     return spec
 
 
-def validate_service_spec(payload: Dict[str, Any]) -> List[str]:
-    """Return a list of validation problems (empty = valid)."""
-    errors: List[str] = []
-    if not isinstance(payload, dict):
-        return ["service spec must be a dict"]
+def normalize_settings(settings: Any) -> Any:
+    """Settings as ``{name: text}``, both trimmed. Non-dicts pass through
+    for the validator to refuse."""
+    if settings is None:
+        return {}
+    if not isinstance(settings, dict):
+        return settings
+    return {str(k).strip(): (v.strip() if isinstance(v, str) else v)
+            for k, v in settings.items()}
 
-    if payload.get("kind") != SERVICE_SPEC_KIND:
-        errors.append(f"kind must be {SERVICE_SPEC_KIND!r}")
 
-    for field in _REQUIRED_FIELDS:
-        if field == "kind":
+def normalize_measures(measures: Any) -> Any:
+    """Measures as ``[{measure, quantity}]`` in the order given; quantity
+    defaults to 1. Non-lists pass through for the validator to refuse."""
+    if not isinstance(measures, list):
+        return measures
+    out = []
+    for m in measures:
+        if not isinstance(m, dict):
+            out.append(m)
             continue
-        value = payload.get(field)
-        if value in (None, "", {}):
-            errors.append(f"missing required field {field!r}")
-
-    schema = payload.get("input_schema")
-    if schema is not None and not isinstance(schema, dict):
-        errors.append("input_schema must be a JSON-schema dict")
-
-    output_schema = payload.get("output_schema")
-    if output_schema is not None and not isinstance(output_schema, dict):
-        errors.append("output_schema must be a JSON-schema dict or absent")
-
-    unit = payload.get("unit")
-    if unit not in (None, "", {}):
-        if not isinstance(unit, str) or not unit.strip():
-            errors.append("unit must be a text saying what one work item is")
-        elif len(unit) > MAX_UNIT_CHARS:
-            errors.append(f"unit must be at most {MAX_UNIT_CHARS} characters")
-
-    hardware = payload.get("hardware")
-    if hardware is not None:
-        if not isinstance(hardware, str) or not hardware.strip():
-            errors.append("hardware must be a non-empty text naming the "
-                          "hardware, or absent")
-        elif len(hardware) > MAX_HARDWARE_CHARS:
-            errors.append(f"hardware must be at most {MAX_HARDWARE_CHARS} "
-                          "characters")
-
-    if "ask" in payload:
-        errors.append("a service spec carries no price: the asking price "
-                      "lives on chain (ServiceRegistry askAmount)")
-
-    version_of = payload.get("version_of")
-    if version_of is not None and not isinstance(version_of, str):
-        errors.append("version_of must be a digest string or null")
-
-    inference = payload.get("inference")
-    if inference is not None:
-        errors.extend(validate_inference(inference))
-
-    if "protocol" in payload:
-        errors.extend(validate_protocol(payload.get("protocol")))
-
-    return errors
-
-
-def validate_protocol(protocol: Any) -> List[str]:
-    """Shape-check a ``protocol`` block: ``{id, description}``, ``id`` a
-    name and a version number ("openai-chat/1"), ``description`` free text
-    (may be empty)."""
-    if not isinstance(protocol, dict):
-        return ["protocol must be a dict of {id, description}"]
-    errors: List[str] = []
-    pid = protocol.get("id")
-    if not isinstance(pid, str) or not PROTOCOL_ID_RE.match(pid):
-        errors.append("protocol.id must be a name and a version number, "
-                      "e.g. 'openai-chat/1' or 'webrtc-sdp/1'")
-    desc = protocol.get("description", "")
-    if not isinstance(desc, str):
-        errors.append("protocol.description must be text")
-    elif len(desc) > MAX_PROTOCOL_DESCRIPTION:
-        errors.append(f"protocol.description is longer than "
-                      f"{MAX_PROTOCOL_DESCRIPTION} characters")
-    extra = sorted(set(protocol) - {"id", "description"})
-    if extra:
-        errors.append(f"protocol has unknown keys {extra}")
-    return errors
+        row = {"measure": str(m.get("measure") or "").strip(),
+               "quantity": m.get("quantity", 1)}
+        if isinstance(row["quantity"], str) and row["quantity"].strip().isdigit():
+            row["quantity"] = int(row["quantity"])
+        out.append(row)
+    return out
 
 
 def normalize_protocol(protocol: Any) -> Any:
-    """Trim a protocol block's ``id`` and ``description`` and default the
-    description to "". Other keys are kept, so the validator refuses them
-    instead of the digest silently dropping them."""
+    """A protocol block ``{id, spec, spec_url?}`` trimmed, the digest
+    lower-case without 0x."""
     if not isinstance(protocol, dict):
         return protocol
     out = dict(protocol)
     if isinstance(out.get("id"), str):
         out["id"] = out["id"].strip()
-    desc = out.get("description", "")
-    out["description"] = desc.strip() if isinstance(desc, str) else desc
+    if isinstance(out.get("spec"), str):
+        out["spec"] = out["spec"].strip().lower().removeprefix("0x")
+    if isinstance(out.get("spec_url"), str):
+        out["spec_url"] = out["spec_url"].strip()
+        if not out["spec_url"]:
+            del out["spec_url"]
     return out
 
 
-def stream_protocol(payload: Any) -> Dict[str, Any]:
-    """A stream service's application protocol block, or ``{}``."""
-    block = payload.get("protocol") if isinstance(payload, dict) else None
-    return block if isinstance(block, dict) else {}
-
-
-def _positive_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
-
-
-def validate_inference(inference: Any) -> List[str]:
-    """Shape-check an ``inference`` block:
-    ``{provider, model, max_tokens_cap, max_input_chars}``.
-
-    ``provider`` and ``model`` must be non-empty strings: the upstream that
-    serves the buyer is a commitment chosen by the seller, never inferred
-    from a model's name or defaulted (no default provider, decision
-    2026-10-06). ``provider`` is a provider id of the seller's daemon, and
-    not one in ``NOT_UPSTREAM_PROVIDERS``. ``max_tokens_cap`` (output
-    tokens every request is clamped to) and ``max_input_chars`` (the input
-    bound, see ``inference_input_chars``) are positive ints, defaulted when
-    absent."""
+def validate_protocol(protocol: Any) -> List[str]:
+    if not isinstance(protocol, dict):
+        return ["protocol must be an object {id, spec, spec_url?}"]
     errors: List[str] = []
-    if not isinstance(inference, dict):
-        return ["inference must be a dict of {provider, model, "
-                "max_tokens_cap, max_input_chars}"]
-    provider = inference.get("provider")
-    if not provider or not isinstance(provider, str) or not provider.strip():
-        errors.append("inference.provider must name the upstream provider the "
-                      "service is served on (a provider id of this daemon, "
-                      "e.g. 'ollama' or 'anthropic')")
-    elif provider.strip() in NOT_UPSTREAM_PROVIDERS:
-        errors.append(f"inference.provider {provider.strip()!r} cannot serve "
-                      "an inference service: it is not this daemon's own "
-                      "provider stack, or it generates no text")
-    model = inference.get("model")
-    if not model or not isinstance(model, str) or not model.strip():
-        errors.append("inference.model must be a non-empty model-id string")
-    cap = inference.get("max_tokens_cap", DEFAULT_MAX_TOKENS_CAP)
-    if cap in (None, ""):
-        cap = DEFAULT_MAX_TOKENS_CAP
-    if not _positive_int(cap):
-        errors.append("inference.max_tokens_cap must be a positive int")
-    limit = inference.get("max_input_chars", DEFAULT_MAX_INPUT_CHARS)
-    if limit in (None, ""):
-        limit = DEFAULT_MAX_INPUT_CHARS
-    if not _positive_int(limit):
-        errors.append("inference.max_input_chars must be a positive int")
+    extra = sorted(set(protocol) - {"id", "spec", "spec_url"})
+    if extra:
+        errors.append(f"protocol has unknown keys {extra}")
+    if not isinstance(protocol.get("id"), str) or not PROTOCOL_ID_RE.match(protocol["id"]):
+        errors.append("protocol.id must be a name and a version number, "
+                      "e.g. 'openai-chat/1' or 'ssh/2'")
+    if not isinstance(protocol.get("spec"), str) or not _HEX64.match(protocol["spec"]):
+        errors.append("protocol.spec must be the sha256 of the protocol's "
+                      "published specification")
+    url = protocol.get("spec_url")
+    if url is not None and (not isinstance(url, str) or not url.startswith("https://")):
+        errors.append("protocol.spec_url must be an https address")
     return errors
 
 
-def normalize_inference(inference: Dict[str, Any]) -> Dict[str, Any]:
-    """Canonicalize an inference block: exactly four keys, the bounds
-    defaulted.
+def validate_service_spec(payload: Dict[str, Any]) -> List[str]:
+    """Return a list of validation problems (empty = valid)."""
+    if not isinstance(payload, dict):
+        return ["service spec must be a dict"]
+    errors: List[str] = []
+    if payload.get("kind") != SERVICE_SPEC_KIND:
+        errors.append(f"kind must be {SERVICE_SPEC_KIND!r}")
+    for field in _REQUIRED_FIELDS:
+        if field != "kind" and payload.get(field) in (None, "", {}):
+            errors.append(f"missing required field {field!r}")
+    extra = sorted(set(payload) - _ALLOWED_FIELDS)
+    if extra:
+        errors.append(f"unknown fields {extra} (a spec carries no price: prices "
+                      "are in the provider's price list)")
 
-    Keeping the shape closed means the signed bytes (and so the digest)
-    don't drift on incidental extra keys a caller happened to pass."""
-    provider = inference.get("provider")
-    model = inference.get("model")
-    cap = inference.get("max_tokens_cap", DEFAULT_MAX_TOKENS_CAP)
-    if cap in (None, ""):
-        cap = DEFAULT_MAX_TOKENS_CAP
-    limit = inference.get("max_input_chars", DEFAULT_MAX_INPUT_CHARS)
-    if limit in (None, ""):
-        limit = DEFAULT_MAX_INPUT_CHARS
-    out: Dict[str, Any] = {"provider": provider, "model": model,
-                           "max_tokens_cap": cap, "max_input_chars": limit}
-    if isinstance(provider, str):
-        out["provider"] = provider.strip()
-    if isinstance(model, str):
-        out["model"] = model.strip()
-    for key in ("max_tokens_cap", "max_input_chars"):
-        if isinstance(out[key], int) and not isinstance(out[key], bool):
-            out[key] = int(out[key])
-    return out
+    if payload.get("input_schema") is not None and not isinstance(payload.get("input_schema"), dict):
+        errors.append("input_schema must be a JSON-schema object")
+    out_schema = payload.get("output_schema")
+    if out_schema is not None and not isinstance(out_schema, dict):
+        errors.append("output_schema must be a JSON-schema object or absent")
+
+    settings = payload.get("settings", {})
+    if not isinstance(settings, dict):
+        errors.append("settings must be an object of {name: text}")
+    else:
+        if len(settings) > MAX_SETTINGS:
+            errors.append(f"at most {MAX_SETTINGS} settings")
+        for k, v in settings.items():
+            if not isinstance(k, str) or not SETTING_KEY_RE.match(k):
+                errors.append(f"setting name {k!r} must be a short identifier")
+            if not isinstance(v, str) or not v or len(v) > MAX_SETTING_VALUE:
+                errors.append(f"setting {k!r} must be a text of 1 to "
+                              f"{MAX_SETTING_VALUE} characters")
+
+    mode = payload.get("mode")
+    if mode not in MODES:
+        errors.append(f"mode must be one of {MODES}")
+    elif mode == MODE_REQUEST:
+        if "measures" in payload:
+            errors.append("a request service is priced per request: it has no measures")
+        if "protocol" in payload:
+            errors.append("a request service has no protocol (its tool answers "
+                          "one request per run)")
+    else:
+        errors.extend(_measure_errors(payload.get("measures")))
+        if "protocol" not in payload:
+            errors.append("a session service names the protocol its tool serves")
+        else:
+            errors.extend(validate_protocol(payload.get("protocol")))
+
+    version_of = payload.get("version_of")
+    if version_of is not None and not isinstance(version_of, str):
+        errors.append("version_of must be a digest string or null")
+    return errors
+
+
+def _measure_errors(measures: Any) -> List[str]:
+    if not isinstance(measures, list) or not measures:
+        return [f"a session service lists what it charges for: measures from "
+                f"{MEASURES}, each with a quantity"]
+    errors: List[str] = []
+    seen = set()
+    for m in measures:
+        if not isinstance(m, dict) or set(m) - {"measure", "quantity"}:
+            errors.append("each measure is {measure, quantity}")
+            continue
+        name = m.get("measure")
+        if name not in MEASURES:
+            errors.append(f"unknown measure {name!r} (one of {MEASURES})")
+        elif name in seen:
+            errors.append(f"measure {name!r} is listed twice")
+        else:
+            seen.add(name)
+        qty = m.get("quantity")
+        if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:
+            errors.append(f"measure {name!r} needs a whole quantity above 0")
+    return errors
+
+
+def spec_measures(payload: Any) -> List[Dict[str, Any]]:
+    """What a service charges for: ``[{measure, quantity}]``; a request
+    service charges per request."""
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("mode") == MODE_REQUEST:
+        return [{"measure": MEASURE_REQUESTS, "quantity": 1}]
+    m = payload.get("measures")
+    return list(m) if isinstance(m, list) else []
+
+
+def session_protocol(payload: Any) -> Dict[str, Any]:
+    """A session service's protocol block, or ``{}``."""
+    block = payload.get("protocol") if isinstance(payload, dict) else None
+    return block if isinstance(block, dict) else {}
 
 
 def spec_signer(payload: Dict[str, Any]) -> str:
@@ -349,8 +295,7 @@ def spec_signer(payload: Dict[str, Any]) -> str:
 
 
 def signed_by_author(payload: Dict[str, Any]) -> bool:
-    """Whether the spec is signed by the address it names
-    (``author_pubkey``)."""
+    """Whether the spec is signed by the address it names (``author_pubkey``)."""
     author = str(payload.get("author_pubkey") or "").lower()
     return bool(author) and spec_signer(payload).lower() == author
 
@@ -360,40 +305,35 @@ def is_service_spec(payload: Any) -> bool:
 
 
 def service_embedding_text(payload: Dict[str, Any]) -> str:
-    """Text a discovery index would embed for a spec: name + description
-    + the unit of work and the hardware + sorted input-schema property
-    names, so services are discoverable by what they do, what one work
-    item is, what they run on, and their interface vocabulary."""
-    name = str(payload.get("name") or "")
-    description = str(payload.get("description") or "")
-    unit = str(payload.get("unit") or "")
-    hardware = str(payload.get("hardware") or "")
-    props = payload.get("input_schema") or {}
-    prop_names: List[str] = []
+    """Text the search model embeds for a spec: name, description, the
+    settings' values (the model, a language), the protocol and the
+    input-schema property names."""
+    parts = [str(payload.get("name") or ""), str(payload.get("description") or "")]
+    settings = payload.get("settings")
+    if isinstance(settings, dict):
+        parts.append(" ".join(str(v) for _, v in sorted(settings.items())))
+    proto = session_protocol(payload)
+    if proto.get("id"):
+        parts.append(str(proto["id"]))
+    schema = payload.get("input_schema") or {}
+    props = schema.get("properties") if isinstance(schema, dict) else None
     if isinstance(props, dict):
-        prop_names = sorted((props.get("properties") or {}).keys())
-    parts = [name, description, unit, hardware]
-    if prop_names:
-        parts.append(" ".join(prop_names))
+        names = sorted(str(k) for k in props)
+        if names:
+            parts.append(" ".join(names))
     return "\n".join(p for p in parts if p)
 
 
 def canonical_service_bytes(payload: Dict[str, Any]) -> bytes:
-    """Deterministic byte serialization for signing/verification.
-
-    Excludes only ``author_sig``. Key-sorted, compact separators — the
-    same spec dict always produces the same bytes on every daemon. Local
-    twin of ``canonical_manifest_bytes`` (kept dependency-free on
-    purpose; see module docstring)."""
+    """Deterministic bytes for signing and verifying: everything but
+    ``author_sig``, key-sorted, compact."""
     body = {k: v for k, v in payload.items() if k != _SIG_FIELD}
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def service_lineage(blob_store: Any, digest: str, max_depth: int = 64) -> List[str]:
-    """Walk ``version_of`` links back through predecessors.
-
-    Returns [digest, parent_digest, ...] oldest-last. Stops at missing
-    blobs, non-spec payloads, cycles, or ``max_depth``."""
+    """Walk ``version_of`` links back: [digest, parent, ...], oldest last.
+    Stops at missing blobs, non-spec payloads, cycles, or ``max_depth``."""
     chain: List[str] = []
     seen: set[str] = set()
     current: Optional[str] = digest

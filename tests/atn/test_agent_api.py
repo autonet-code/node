@@ -88,6 +88,11 @@ def test_index_guide_and_commands(api_run):
         assert "export_agent_key" not in names and "create_agent" not in names
         # Any transaction from the operator the agent acts as (2026-11-08).
         assert [c["name"] for c in cmds["groups"]["chain"]] == ["send_transaction"]
+        # Services: find, request, sessions, credits, reviews, selling.
+        assert {c["name"] for c in cmds["groups"]["services"]} == {
+            "find_services", "request_service", "open_session", "open_credits",
+            "top_up_credits", "close_credits", "list_credits", "review_service",
+            "register_service", "set_service_prices"}
         assert "export_operator_key" not in names
         s, one = await _request(port, "GET", "/commands/use_tool")
         assert s == 200 and one["input_schema"]["type"] == "object"

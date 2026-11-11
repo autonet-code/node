@@ -279,8 +279,9 @@ async def test_external_agents_can_buy_services_by_default(tmp_path):
     default; selling one is a separate grant."""
     from atn.agent_tools import _TOOL_CATEGORIES, EXTERNAL_DEFAULT_TOOLS
     granted = set().union(*(_TOOL_CATEGORIES[b] for b in EXTERNAL_DEFAULT_TOOLS))
-    assert {"find_services", "request_service", "close_service_channel"} <= granted
-    assert "register_service" not in granted
+    assert {"find_services", "request_service", "open_session", "open_credits",
+            "top_up_credits", "close_credits", "list_credits", "review_service"} <= granted
+    assert not {"register_service", "set_service_prices"} & granted
 
 
 # ---------------------------------------------------------------------------

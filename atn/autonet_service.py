@@ -916,9 +916,16 @@ class AutonetBridge:
             return
         from .service_client import host_service_handler
         host.set_service_handler(host_service_handler(serve, loop))
-        # Service streams (/autonet/service-stream/1.0.0) pass the same gate.
-        from .service_streams import stream_handler_for
-        host.set_service_stream_handler(stream_handler_for(serve, loop))
+        # Service sessions (/autonet/service-session/1.0.0): the same bridge
+        # checks the buyer's credits; the service runner serves the tools.
+        from .service_sessions import session_handler_for
+        host.set_service_session_handler(
+            session_handler_for(getattr(serve, "__self__", None), loop))
+        runtime = self._runtime
+        if runtime is not None:
+            from .service_runner import runner_for
+            runner = runner_for(runtime)
+            asyncio.run_coroutine_threadsafe(runner.start(), loop)
 
     async def _emit(self, event_type_name: str, data: dict[str, Any] | None = None) -> None:
         """Emit an event if the event bus is available."""
@@ -1427,7 +1434,7 @@ class AutonetBridge:
             tool_store.rating_provider = _rating
             # Service reviews (Decision 2026-11-10): a payer's signed review
             # rides the open epoch's batch, for this jurisdiction.
-            receipts = getattr(self._runtime, "service_receipts", None)
+            receipts = getattr(self._runtime, "service_reviews", None)
             if receipts is not None:
                 receipts.attach(
                     str(library.rpb_address),
@@ -1503,10 +1510,13 @@ class AutonetBridge:
             h = self._p2p_host
             if h is not None and record.service_id is not None:
                 h.publish_topic_threadsafe(
-                    topic, sc.announcement(record.spec, record.service_id))
+                    topic, sc.announcement(record.spec, record.service_id,
+                                           record.price_list))
 
         if store is not None:
+            # A registration and a price change are both announced at once.
             store.on_registered = _announce
+            store.on_prices = _announce
         last_announce: float | None = None
         try:
             while True:
@@ -1534,6 +1544,8 @@ class AutonetBridge:
             service_client.clear_catalog(catalog)
             if store is not None and store.on_registered is _announce:
                 store.on_registered = None
+            if store is not None and store.on_prices is _announce:
+                store.on_prices = None
 
     async def _pull_remote_manifests(self, library, tool_store,
                                      interval: float = 10.0,
