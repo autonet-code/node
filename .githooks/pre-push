@@ -1,0 +1,28 @@
+#!/bin/sh
+# Scan the commits about to be pushed for secrets with gitleaks.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Install gitleaks: https://github.com/gitleaks/gitleaks (winget install Gitleaks.Gitleaks,
+# brew install gitleaks, or a release binary). A reviewed false positive goes in
+# .gitleaks.toml (by pattern) or .gitleaksignore (by fingerprint).
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-push: gitleaks is not installed, so the secret scan can't run." >&2
+  echo "Install it (https://github.com/gitleaks/gitleaks), or push with --no-verify to skip." >&2
+  exit 1
+fi
+
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue          # deleting a branch
+  if [ "$remote_sha" = "$zero" ]; then
+    range="$local_sha --not --remotes"            # a new branch: what no remote has
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  if ! gitleaks git --redact --no-banner --log-level warn --log-opts="$range" .; then
+    echo "pre-push: gitleaks found secrets in $local_ref; push refused." >&2
+    status=1
+  fi
+done
+exit $status

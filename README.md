@@ -336,6 +336,8 @@ python scripts/local_e2e_robot.py                                   # robots aga
 1. Fork the repo.
 2. Make changes on a short topic branch off `master`.
 3. Run targeted tests, plus the end-to-end scripts for the areas you touched.
+   Enable the secret scan once per clone with `git config core.hooksPath .githooks`
+   (needs [gitleaks](https://github.com/gitleaks/gitleaks)); CI runs the same scan.
 4. Open a PR. Merges rebase onto `master` and fast-forward, with docs updated in the same change.
 
 The chapter above is generated from the paper's source by

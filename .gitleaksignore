@@ -1,0 +1,13 @@
+# Findings in this repo's history that were reviewed (2026-11-12). They stay
+# in history; the scans skip them so that only new findings fail.
+#
+# Shadownet (testnet) wallet keys, committed 2026-05 and 2026-07, removed
+# from the tree since. Treat them as public: never fund or reuse them.
+26a6fea465e124e42ea3968b9361b3d99937532c:deployments/shadownet-smoke-throwaway.json:generic-api-key:3
+26a6fea465e124e42ea3968b9361b3d99937532c:deployments/shadownet-dao-deployer.json:generic-api-key:3
+606b7af348520314b0dddd7d75bd85034a6a585f:deployments/shadownet-smoke-wallet.json:generic-api-key:6
+# A Google OAuth client secret, since read from GOOGLE_CLIENT_SECRET instead.
+cb61cb5c4362af64b87bf75e2be9c20027c9253c:atn/connectors/google_calendar/server.py:generic-api-key:49
+cb61cb5c4362af64b87bf75e2be9c20027c9253c:atn/oauth.py:generic-api-key:31
+# Not a secret: a Registry key name (jurisdiction.parity.<token>).
+e6321266c2a76aa667d57ad88dc5bd32fd40b4e3:deployments/shadownet-autonet-dao-e2e.json:generic-api-key:109
