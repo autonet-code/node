@@ -65,7 +65,7 @@ For ServiceMarket.sol:
 
 - Challenge window. How long a service provider has, after a buyer closes its credits, to collect what the service provider has served. The buyer then takes back the rest of the deposit. The suggested value is one hour.
 
-Apart from the genesis root, every parameter can be changed later by proposal: the charter by constitutional proposal, effective from the next epoch, and the others by ordinary proposal. The settings that govern the length of an epoch are not part of the installation. They are Registry entries the DAO sets by proposal, and until it does, every epoch lasts one proposal life cycle (see Epochs below).
+Apart from the genesis root, every parameter can be changed later by proposal: the charter by constitutional proposal, effective from the next epoch, and the others by ordinary proposal. The settings that govern the length of an epoch are not part of the installation. They are Registry entries the DAO sets by proposal, and until it does, every epoch lasts one proposal life cycle (see [Epochs](#epochs)).
 
 ## Joining as a household
 
@@ -93,7 +93,7 @@ When an Agent works out how to do something, it publishes the solution to the li
 
 The main claim to value of the tool library is that it cuts the jurisdiction’s reliance on centralized inference providers for a growing number of routine tasks, by allowing cheap local models to perform close or on par with frontier ones.
 
-A tool (its author) is paid from the tool pool, only if and when households with enough REP have reviewed it. Its reviewers receive a fixed part of the payment, whatever the rating. The author receives the rest, scaled by the tool's score, and a tool built on others passes the part of the author's share that is not new to the tools it imports. The tool pool is funded by the burned share of the service fee (see Services).
+A tool (its author) is paid from the tool pool, only if and when households with enough REP have reviewed it. Its reviewers receive a fixed part of the payment, whatever the rating. The author receives the rest, scaled by the tool's score, and a tool built on others passes the part of the author's share that is not new to the tools it imports. The tool pool is funded by the burned share of the service fee (see [The Services Market](#the-services-market)).
 
 Households review each tool, weighted by their REP, on its correctness, simplicity and novelty, on the values in the jurisdiction's charter, and on whether it is malware. The resulting ratings are shown with every search result, and a malware verdict denies a tool earnings, takes REP from its author and removes the tool from the library of every daemon. The framework rates tools; it does not protect a household from them.
 
@@ -229,6 +229,55 @@ Authority over a rating comes from payment, not REP. A review counts only once i
 A service review travels to the other daemons with the household's events of the epoch. The epoch-close keeps each payer's latest review of each service and records the service's rating in the anchored state: the mean of each field and of each value of the charter, the share of payers that flagged the service as malware, the number of payers, and what the payers have paid the service provider. Reviews from the service provider's own household and from sanctioned households are not counted.
 
 The rating is shown with every search result, for buyers to weigh. Unlike the reviews of a tool, the reviews of a service mint no ATN, move no REP and slash nothing.
+
+## Epochs
+
+An Autonet epoch is one settlement period. During the epoch, households publish, use and review tools, buy and sell services, and their daemons gossip the events of that work to one another. When the epoch ends, every daemon of a registered household computes the epoch-close from those events, and the jurisdiction elects one epoch-close to anchor on Substrate.sol. The anchor settles what the epoch earned.
+
+Settlement is the only activity that waits on the chain. While an election is undecided, households keep working, and the epochs behind it are settled in order once it is decided. A daemon never drops an epoch that has not been anchored.
+
+### The length of an epoch
+
+An epoch ends when the service fees burned since the previous cutoff reach a set share of the ATN supply, as the supply stood at the last anchor. Every daemon reads the burned fees from checkpoints kept by Substrate.sol, and therefore every daemon finds the same cutoff. More activity makes for shorter epochs.
+
+An epoch is never shorter than one proposal life cycle (the voting delay, the voting period and the execution delay), since its election is a proposal. An epoch is never longer than a set number of voting periods, ten by default, and a quiet jurisdiction still settles. The share and the ceiling are Registry entries of the epoch rules, changed by constitutional proposal. Until the DAO sets the share, every epoch lasts one proposal life cycle.
+
+A daemon closes the epoch two minutes after the cutoff by default, so that events signed just before the cutoff can still arrive. Each batch of events carries the time its daemon signed it. A batch that arrives more than a minute away from that time (by default) is refused, and no daemon can date events back into a closing epoch.
+
+### Computing the epoch-close
+
+Every daemon of a registered household computes the epoch-close on its own. The inputs are the batches the daemons gossiped during the epoch, holding the tool registrations and the reviews of services, and the reviews of tools committed on-chain in ToolBond.sol. Before closing, a daemon asks its peers for any batch of the epoch that it has not received, so that a daemon that joined late or lost its connections closes the same set of events as the others. Everything the epoch-close reads from the chain, such as REP balances, the charter, sanctions and the epoch rules, is read as of the previous anchor, and every daemon reads the same values.
+
+Daemons that saw the same events compute the same epoch-close, to the bit. The epoch-close holds:
+
+- the ATN each household earned from the tool pool, as a Merkle tree of amounts, with the earnings of sanctioned households withheld;
+- the ratings of every tool and service, and the tools whose reviews concluded;
+- the tools that every daemon prunes;
+- the state the next epoch starts from.
+
+The epoch-close goes on-chain as eight fields: the epoch's identifier and cutoff, the roots of its state and of the earnings tree, and the hashes that link it to the previous anchor. The full state is a file that daemons offer to one another and to the relays after each anchor. A daemon without a registered household computes nothing: it installs the state of each anchor, as a daemon that joins the jurisdiction later does.
+
+### The election
+
+Each epoch-close is anchored by an election: a single-choice proposal of the DAO, run through AnchorElection.sol. Any daemon can submit the proposal. Every daemon derives the same proposal from the epoch's number, and a second submission of it fails.
+
+While the proposal is pending or active, Agents drawn by REP register options. Each drawn Agent registers the epoch-close its own daemon computed, and identical epoch-closes register once. The draw is a lottery weighted by REP and checked on-chain, and the DAO sets how many Agents are drawn per epoch on average, three by default. From the third attempt at an epoch on, every Agent with REP can register an option, and an epoch never stalls for lack of options.
+
+REP then votes as on any proposal, with one more option: reject, meaning none of the registered epoch-closes. Each daemon votes with the REP delegated to its operator, for the option equal to its own epoch-close, or for reject when none is equal. Members and delegates vote as well.
+
+When an epoch-close wins, the timelock anchors it on Substrate.sol. Each anchor refers to the one before it, and the anchors form a chain: an epoch can't be anchored before the epoch preceding it. When reject wins, nothing is anchored and the next attempt opens. Elections overlap, and the next epoch closes and holds its election while the previous election is still running.
+
+### After the anchor
+
+Once an epoch-close is anchored:
+
+- reviewers reveal the reviews they committed during the epoch, within the reveal window;
+- each household's operator claims the household's ATN with a proof against the earnings tree, and the ATN is paid to the owner's wallet;
+- the operator also claims one REP for each ATN earned from the tool pool, through AutonetRepClaim.sol, paid to the owner's wallet and already delegated, unless the owner has chosen a delegate;
+- ToolBond.sol settles the tools whose reviews concluded, including their malware verdicts;
+- every daemon prunes the tools the epoch-close lists.
+
+Each anchor adds to the tool pool the service fees burned in the epoch before it. The claims of all households together can never exceed the tool pool, and whatever an epoch-close leaves unminted remains in the pool for the epochs that follow.
 
 ## Public Services
 
