@@ -161,8 +161,7 @@ external agents only; native agents and the owner surface are refused.
 **Activity.** Every call an external agent makes, by any path, is kept in
 its Activity log (`atn/agent_activity.py`) and streamed to the app.
 
-**App (`C:\code\atn_web_apps`, Flutter, branch `unified-apps`; never
-`atn_web`).** The owner's dashboard and wallet. The avatar opens two
+**App (`C:\code\atn_web`, Flutter, branch `master`).** The owner's dashboard and wallet. The avatar opens two
 tabs. Household: owner (wallet, ATN, voice, claims), operator key
 (including delegating REP to the operator, the one governance write the
 app does; everything else in governance is werule's), agents
@@ -280,7 +279,7 @@ agent directory.
 
 ## Repos and rules
 
-- `C:\code\autonet` (backend, branch `master`), `C:\code\atn_web_apps`
+- `C:\code\autonet` (backend, branch `master`), `C:\code\atn_web`
   (app), `C:\code\dao\trustless-contracts` (dao's).
 - Commit locally; push only when the owner says. Nothing has launched, so a
   commit says what the change does; a consensus or ABI change says so in
