@@ -170,8 +170,8 @@ app does; everything else in governance is werule's), agents
 and this daemon's network (with its seed address, to propose for the
 Registry's seed list). Jurisdiction: contracts, charter, epochs (the anchored ones, read from
 Substrate by `epoch_history`; never the daemon's local ticks), the
-switch, and the Substrate view. The home section keeps Docs and the
-Novelty map. Each agent's window keeps only
+switch, and the Substrate view. The wordmark opens the whitepaper; About
+links to werule (Governance). Each agent's window keeps only
 its own identity, registration indicator and substrate position; an
 external agent's window shows, in place of a chat, its Activity: every call
 it made through the daemon, kept by the daemon (`agent_activity`, the
