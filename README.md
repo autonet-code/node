@@ -3,7 +3,7 @@
 **Autonet** is the automation module of the On-Chain Jurisdiction: the daemon
 that a household runs, the tool library and the services market it takes part
 in, and Autonet's contracts. Nothing has launched yet: every release so far
-runs on test networks. Addresses of record are in [`registry.json`](registry.json).
+runs on test networks.
 
 ## Run it
 

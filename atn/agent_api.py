@@ -85,13 +85,17 @@ _NETWORK_READS: dict[str, dict[str, Any]] = {
         "input_schema": {"type": "object", "required": ["address"],
                          "properties": {"address": {"type": "string"}}},
     },
-    "join_recommended_jurisdiction": {
-        "description": "Join the recommended jurisdiction (the network this "
-                       "daemon's agents work in) and restart the daemon. "
-                       "Needed once: until a daemon joins one, it is on no "
-                       "network and only sees local tools. The choice is "
-                       "pinned; it changes only when someone switches.",
-        "input_schema": {"type": "object", "properties": {}},
+    "join_jurisdiction": {
+        "description": "Join a jurisdiction (the network this daemon's "
+                       "agents work in) by its DAO Registry address and an "
+                       "RPC URL of its chain, then restart the daemon. Only "
+                       "while the daemon is on no jurisdiction: the human "
+                       "chooses which one, and switching later is theirs "
+                       "(the app or `atn jurisdiction`).",
+        "input_schema": {"type": "object",
+                         "required": ["dao_registry", "rpc_url"],
+                         "properties": {"dao_registry": {"type": "string"},
+                                        "rpc_url": {"type": "string"}}},
     },
     "tool_reviews": {
         "description": "The reviews a published tool has received.",
@@ -168,9 +172,10 @@ class AgentAPI:
         return {
             "name": "Autonet daemon",
             "jurisdiction": joined or (
-                "none: this daemon is on no network yet. Join the recommended "
-                "one with POST /agents/<id>/join_recommended_jurisdiction "
-                "(the daemon restarts; wait a few seconds)."),
+                "none: this daemon is on no network yet. Ask the human which "
+                "jurisdiction to join, then POST "
+                "/agents/<id>/join_jurisdiction with its dao_registry and "
+                "rpc_url (the daemon restarts; wait a few seconds)."),
             "about": (
                 "This daemon belongs to one household (one owner wallet) on "
                 "an Autonet jurisdiction: a shared library of tools that "
@@ -402,12 +407,23 @@ class AgentAPI:
             if sub == "tools" and len(parts) == 5 and parts[4] == "reviews":
                 return 200, await self._call(session, "tool_reviews",
                                              {"digest": parts[3]})
-            if sub == "join_recommended_jurisdiction" and len(parts) == 3:
+            if sub == "join_jurisdiction" and len(parts) == 3:
                 # Saving the jurisdiction is the owner's surface; an agent
-                # may take only this one step, to the recommended one.
+                # may take only the first step, from no jurisdiction to the
+                # one the human named. Switching stays the owner's.
+                if self._jurisdiction():
+                    raise _HTTPError(
+                        409, "this daemon is already in a jurisdiction; "
+                        "switching is the owner's (the app or `atn "
+                        "jurisdiction`)", jurisdiction=self._jurisdiction())
+                dao_registry = str(body.get("dao_registry") or "").strip()
+                rpc_url = str(body.get("rpc_url") or "").strip()
+                if not dao_registry or not rpc_url:
+                    raise _HTTPError(400, "send dao_registry and rpc_url")
                 return 200, await self._call(
                     self._owner_session(), "autonet_switch",
-                    {"recommended": True, "caller_id": agent_id})
+                    {"dao_registry": dao_registry, "rpc_url": rpc_url,
+                     "caller_id": agent_id})
             if sub == "services" and len(parts) == 3 and method == "GET":
                 args: dict[str, Any] = {}
                 if query.get("q"):

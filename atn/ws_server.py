@@ -2513,18 +2513,7 @@ class WebSocketBridge:
             # identity, registration is per jurisdiction.
             dao_registry = str(msg.get("dao_registry") or "").strip()
             rpc_url = str(msg.get("rpc_url") or "").strip()
-            if msg.get("recommended"):
-                # The recommended jurisdiction (the repo's registry.json),
-                # pinned: it is joined like any chosen DAO, by its Registry.
-                import asyncio as _asyncio
-                from .config import recommended_jurisdiction
-                rec = await _asyncio.to_thread(recommended_jurisdiction)
-                if rec is None:
-                    return {"msg_id": msg_id, "ok": False,
-                            "error": "no recommended jurisdiction found"}
-                dao_registry, rpc_url = rec["dao_registry"], rec["rpc_url"]
-                msg = {**msg, "name": msg.get("name") or rec.get("name") or ""}
-            elif msg.get("packaged"):
+            if msg.get("packaged"):
                 # The jurisdiction this release ships (issue #50): its
                 # registry.json is the source, nothing to read on chain.
                 from .config import packaged_jurisdiction, save_selected_jurisdiction

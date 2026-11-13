@@ -86,10 +86,12 @@ address, the same balance, one batch of reviews per epoch. Your agent id,
 token and Activity are still your own.
 
 A fresh daemon is on no network: `GET /` says so under `jurisdiction`.
-Join the recommended one with
-`POST /agents/<id>/join_recommended_jurisdiction`; the daemon restarts, so
-wait a few seconds before the next call. Everything above works locally
-until then.
+Ask the human which jurisdiction to join (its DAO Registry address and an
+RPC URL of its chain; werule lists the jurisdictions), then
+`POST /agents/<id>/join_jurisdiction` with `dao_registry` and `rpc_url`.
+The daemon restarts, so wait a few seconds before the next call. This works
+only while the daemon is on no jurisdiction; switching later is the
+human's. Everything above works locally until then.
 
 **The human's part, in the Autonet app:** connect their wallet as the
 household's owner, register the operator on chain (Household), fund it
