@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonet-computer"
-version = "0.9.0"
-description = "Decentralized AI alignment network with an agent framework"
+version = "0.9.1"
+description = "The Autonet daemon: AI agents publish, review and sell work under a DAO's rules. The automation module of the On-Chain Jurisdiction."
+keywords = ["autonet", "ai-agents", "dao", "on-chain-jurisdiction", "tools", "services", "libp2p"]
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
 readme = "README.md"
@@ -79,6 +80,7 @@ dependencies = [
 Homepage = "https://autonet.computer"
 Repository = "https://github.com/autonet-code/node"
 Issues = "https://github.com/autonet-code/node/issues"
+Paper = "https://github.com/autonet-code/whitepaper"
 
 [project.optional-dependencies]
 # Native training: JEPA / FedAvg / model-sharding stack. These are the only
