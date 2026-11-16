@@ -152,6 +152,7 @@ def test_join_jurisdiction_is_logged_as_the_agent(api_run):
         bridge.runtime.jurisdiction = ""
         s, index = await _request(port, "GET", "/")
         assert "join_jurisdiction" in index["jurisdiction"]
+        assert "/networks" in index["jurisdiction"]
         s, r = await _request(port, "POST", "/agents/ext/join_jurisdiction",
                               {"dao_registry": reg, "rpc_url": rpc}, headers=bridge.auth)
         assert s == 200
@@ -166,9 +167,85 @@ def test_join_jurisdiction_needs_both_fields(api_run):
     async def go(port, bridge):
         bridge.runtime.jurisdiction = ""
         n = len(bridge.calls)
-        s, r = await _request(port, "POST", "/agents/ext/join_jurisdiction",
-                              {"rpc_url": "http://x"}, headers=bridge.auth)
-        assert s == 400 and len(bridge.calls) == n
+        for body in ({"rpc_url": "http://x"}, {"network": "Test-Net"},
+                     {"dao": "0x" + "11" * 20, "rpc_url": "http://x"}):
+            s, r = await _request(port, "POST", "/agents/ext/join_jurisdiction",
+                                  body, headers=bridge.auth)
+            assert s == 400 and r["networks"] == "/networks"
+        assert len(bridge.calls) == n
+    api_run(go)
+
+
+def test_join_a_listed_jurisdiction_by_network_and_dao(api_run):
+    dao = "0x" + "11" * 20
+    async def go(port, bridge):
+        bridge.runtime.jurisdiction = ""
+        s, r = await _request(
+            port, "POST", "/agents/ext/join_jurisdiction",
+            {"network": "Test-Net", "dao": dao, "data_url": "http://evil"},
+            headers=bridge.auth)
+        assert s == 200
+        msg, session = bridge.calls[-1]
+        assert msg["type"] == "autonet_switch" and session.owner
+        assert msg["network"] == "Test-Net" and msg["dao"] == dao
+        # Where the lists come from is the owner's setting, not the agent's.
+        assert "data_url" not in msg and "dao_registry" not in msg
+    api_run(go)
+
+
+def test_join_an_unlisted_jurisdiction_passes_the_facts_given(api_run):
+    reg = "0x" + "22" * 20
+    async def go(port, bridge):
+        bridge.runtime.jurisdiction = ""
+        s, r = await _request(
+            port, "POST", "/agents/ext/join_jurisdiction",
+            {"dao_registry": reg, "rpc_url": "http://x", "gas_symbol": "MYC"},
+            headers=bridge.auth)
+        assert s == 200
+        msg, _ = bridge.calls[-1]
+        assert msg["gas_symbol"] == "MYC" and "network_name" not in msg
+    api_run(go)
+
+
+def test_networks_and_their_jurisdictions(api_run, monkeypatch):
+    from atn import network_directory as nd
+    nets = [{"name": "Test-Net", "chain_id": 31337, "rpc_url": "http://rpc",
+             "gas_symbol": "TST", "explorer": ""}]
+    rows = [{"name": f"DAO {i:02d}", "dao": "0x" + f"{i:02x}" * 20,
+             "dao_registry": "0x" + "ee" * 20} for i in range(45)]
+    monkeypatch.setattr(nd, "list_networks", lambda base="": nets)
+
+    def listing(network, base="", *, query="", limit=20, offset=0):
+        if network != "Test-Net":
+            raise nd.DirectoryError(f"no network '{network}'")
+        kept = [r for r in rows if query.lower() in r["name"].lower()]
+        return {"network": network, "total": len(kept), "offset": offset,
+                "limit": limit, "jurisdictions": kept[offset:offset + limit]}
+    monkeypatch.setattr(nd, "list_jurisdictions", listing)
+
+    async def go(port, bridge):
+        # No token: a session reads these before it has an agent.
+        s, r = await _request(port, "GET", "/networks")
+        assert s == 200 and r["networks"] == [{
+            "name": "Test-Net", "chain_id": 31337, "gas_symbol": "TST",
+            "jurisdictions": "/networks/Test-Net/jurisdictions"}]
+        s, r = await _request(port, "GET", "/networks/Test-Net/jurisdictions")
+        assert s == 200 and len(r["jurisdictions"]) == 20 and r["total"] == 45
+        assert r["next"] == "/networks/Test-Net/jurisdictions?offset=20"
+        assert '"network": "Test-Net"' in r["join"]
+        s, r = await _request(port, "GET", "/networks/Test-Net/jurisdictions?offset=40")
+        assert len(r["jurisdictions"]) == 5 and "next" not in r
+        s, r = await _request(port, "GET",
+                              "/networks/Test-Net/jurisdictions?q=DAO%200&limit=5")
+        assert r["total"] == 10
+        assert r["next"] == "/networks/Test-Net/jurisdictions?offset=5&limit=5&q=DAO%200"
+        s, r = await _request(port, "GET", "/networks/Nope/jurisdictions")
+        assert s == 404 and r["networks"] == "/networks"
+        s, r = await _request(port, "GET", "/networks/Test-Net/jurisdictions?limit=x")
+        assert s == 400
+        assert not bridge.calls
+        s, index = await _request(port, "GET", "/")
+        assert index["links"]["networks"] == "/networks"
     api_run(go)
 
 
@@ -188,9 +265,10 @@ def test_switch_pins_the_dao(tmp_path, monkeypatch):
     from atn.ws_auth import ClientSession
     rec = {"rpc_url": "http://x", "dao_registry": "0x" + "22" * 20,
            "dao": "0x" + "11" * 20}
-    monkeypatch.setattr(config, "check_jurisdiction", lambda reg, rpc: {
+    monkeypatch.setattr(config, "check_jurisdiction", lambda reg, rpc, network=None: {
         "ok": True, "errors": [], "chain_id": 31337, "rpc_url": rpc,
-        "dao_registry": reg, "dao": rec["dao"], "key": "31337:" + rec["dao"]})
+        "dao_registry": reg, "dao": rec["dao"], "key": "31337:" + rec["dao"],
+        "network": config.network_facts(network)})
     bridge = ws_server.WebSocketBridge.__new__(ws_server.WebSocketBridge)
     bridge.runtime = SimpleNamespace(
         jurisdiction="", registry=SimpleNamespace(_agents={}),
@@ -202,7 +280,37 @@ def test_switch_pins_the_dao(tmp_path, monkeypatch):
     assert resp["ok"] and resp["result"]["switched"]
     saved = json.loads((tmp_path / "jurisdiction.json").read_text())
     assert saved["dao"] == rec["dao"] and saved["name"] == "Repo DAO"
-    assert "packaged" not in saved
+    assert "packaged" not in saved and saved["network"] == {}
+
+    # A listed jurisdiction: the daemon looks it up where the owner's
+    # surface says, and saves the network's facts with the choice.
+    looked = {}
+
+    def resolve(network, dao, source):
+        looked.update(network=network, dao=dao, source=source)
+        return {"ok": True, "errors": [], "chain_id": 31337, "rpc_url": "http://x",
+                "dao_registry": rec["dao_registry"], "dao": dao, "key": "31337:" + dao,
+                "name": "Listed DAO",
+                "network": {"name": "Test-Net", "gas_symbol": "TST"}}
+    monkeypatch.setattr(config, "resolve_jurisdiction", resolve)
+    bridge.runtime.autonet = SimpleNamespace(config=SimpleNamespace(data_url="http://own"))
+    other = "0x" + "33" * 20
+    resp = asyncio.run(bridge._handle_message(
+        {"type": "autonet_switch", "network": "Test-Net", "dao": other,
+         "restart": False}, owner))
+    assert resp["ok"] and resp["result"]["switched"]
+    assert looked == {"network": "Test-Net", "dao": other, "source": "http://own"}
+    saved = json.loads((tmp_path / "jurisdiction.json").read_text())
+    assert saved["network"] == {"name": "Test-Net", "gas_symbol": "TST"}
+    assert saved["name"] == "Listed DAO"
+    asyncio.run(bridge._handle_message(
+        {"type": "autonet_switch", "network": "Test-Net", "dao": other,
+         "data_url": "http://127.0.0.1:8788", "restart": False}, owner))
+    assert looked["source"] == "http://127.0.0.1:8788"
+
+    resp = asyncio.run(bridge._handle_message(
+        {"type": "autonet_switch", "network": "Test-Net", "restart": False}, owner))
+    assert not resp["ok"] and "'network' and 'dao'" in resp["error"]
 
 
 def test_tokens_guard_every_agent_call(api_run):

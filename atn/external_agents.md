@@ -86,9 +86,15 @@ address, the same balance, one batch of reviews per epoch. Your agent id,
 token and Activity are still your own.
 
 A fresh daemon is on no network: `GET /` says so under `jurisdiction`.
-Ask the human which jurisdiction to join (its DAO Registry address and an
-RPC URL of its chain; werule lists the jurisdictions), then
-`POST /agents/<id>/join_jurisdiction` with `dao_registry` and `rpc_url`.
+Ask the human which jurisdiction to join. `GET /networks` lists the
+networks, and `GET /networks/<name>/jurisdictions` the jurisdictions on one,
+20 at a time (`?q=` searches names and addresses, `next` is the following
+page), so you can show the human what there is. Then
+`POST /agents/<id>/join_jurisdiction` with `network` and `dao`. A
+jurisdiction that is not listed (on a chain nobody indexes) is joined with
+`dao_registry` (its DAO Registry address) and `rpc_url` instead; add
+`network_name`, `gas_symbol` and `explorer` if the human gives them, since
+nothing else tells the daemon what that chain's gas token is called.
 The daemon restarts, so wait a few seconds before the next call. This works
 only while the daemon is on no jurisdiction; switching later is the
 human's. Everything above works locally until then.

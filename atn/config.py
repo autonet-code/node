@@ -180,10 +180,17 @@ class RPBConfig:
     # Blockchain connection — defaults from atn.jurisdiction
     rpc_url: str = ""                   # Defaults to jurisdiction.RPC_URL
     chain_id: int = 0                   # Defaults to jurisdiction.CHAIN_ID
-    # Native gas token — published so the UI can label balances correctly
-    # without hardcoding "ETH". Defaults match Etherlink Shadownet.
-    gas_symbol: str = ""                # "" = derived from chain_id (gas_symbol_for_chain)
+    # The network's facts, for labels only: its name, its gas token and its
+    # block explorer. They come with the jurisdiction (the data source's
+    # networks.json, or whoever named the Registry directly); the daemon
+    # keeps no table of chains. "" = not given.
+    network_name: str = ""
+    gas_symbol: str = ""
     gas_decimals: int = 18
+    block_explorer: str = ""
+    # Where the published list of networks and jurisdictions lives
+    # (atn/network_directory.py). "" = ATN_DATA_URL or the project's own.
+    data_url: str = ""
     private_key: str = ""               # Hex private key for signing attestation txns
     # Wallet is managed externally (MetaMask etc.) — we just track the address
     wallet_address: str = ""            # Connected wallet address (empty = not connected)
@@ -562,20 +569,6 @@ NOT_JOINED_MESSAGE = "Not joined: register an agent to join the network."
 _REGISTRY_FETCH_TIMEOUT = 4.0
 
 
-# The native gas token per chain id, for jurisdictions whose registry names
-# none. Every one of these uses 18 decimals.
-_GAS_SYMBOLS = {31337: "ETH", 127823: "XTZ", 42793: "XTZ", 137: "POL",
-                42161: "ETH"}
-
-
-def gas_symbol_for_chain(chain_id: Any) -> str:
-    """The native gas token's symbol on ``chain_id``; "gas" when unknown."""
-    try:
-        return _GAS_SYMBOLS.get(int(chain_id or 0), "gas")
-    except (TypeError, ValueError):
-        return "gas"
-
-
 def not_joined_state() -> dict[str, Any]:
     """The payload a read-only chain call returns before the daemon joined."""
     return {"joined": False, "status": "not_joined",
@@ -613,6 +606,10 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
         seed["chain_id"] = net["chain_id"]
     if net.get("gas_symbol"):
         seed["gas_symbol"] = net["gas_symbol"]
+    if net.get("name"):
+        seed["network_name"] = str(net["name"])
+    if net.get("explorer"):
+        seed["block_explorer"] = str(net["explorer"])
     if net.get("gas_decimals") is not None:
         seed["gas_decimals"] = int(net["gas_decimals"])
     contracts = entry.get("contracts", {})
@@ -725,14 +722,36 @@ def charter_text_error(text: str) -> tuple[bool, str]:
     return charter.hash == DEFAULT_CHARTER.hash, ""
 
 
+_FACT_KEYS = ("name", "gas_symbol", "explorer")
+
+
+def network_facts(source: Any = None) -> dict[str, str]:
+    """A network's label facts ({name, gas_symbol, explorer}) as a selection
+    stores them: only the ones ``source`` gives."""
+    src = source if isinstance(source, dict) else {}
+    facts = {k: str(src.get(k) or "").strip() for k in _FACT_KEYS}
+    return {k: v for k, v in facts.items() if v}
+
+
 def check_jurisdiction(dao_registry: str, rpc_url: str,
-                       jurisdiction_id: str = "autonet") -> dict[str, Any]:
+                       jurisdiction_id: str = "autonet", *,
+                       network: dict[str, Any] | None = None,
+                       expect_chain_id: int = 0,
+                       expect_dao: str = "") -> dict[str, Any]:
     """Read a candidate jurisdiction's Registry and say whether this daemon
-    can join it: {ok, errors, chain_id, dao, name, rpc_url, dao_registry}.
-    Network read; used before switching."""
+    can join it: {ok, errors, chain_id, dao, name, rpc_url, dao_registry,
+    network}. Network read; used before switching.
+
+    The chain id is always the RPC's own answer. ``expect_chain_id`` and
+    ``expect_dao`` are what a data source said about the jurisdiction
+    (resolve_jurisdiction): a different answer on chain is an error.
+    ``network`` is the network's label facts (network_facts), passed
+    through to the result."""
+    facts = network_facts(network)
     data = _fetch_onchain_registry(dao_registry, rpc_url, jurisdiction_id)
     if data is None:
         return {"ok": False, "dao_registry": dao_registry, "rpc_url": rpc_url,
+                "network": facts,
                 "errors": [f"no autonet jurisdiction readable at {dao_registry}"]}
     seed = _parse_registry_data(data, jurisdiction_id)
     an = RPBConfig()
@@ -750,10 +769,37 @@ def check_jurisdiction(dao_registry: str, rpc_url: str,
         _match, charter = charter_text_error(an.charter_text)
         if charter:
             errors.append(charter)
+    if expect_chain_id and int(an.chain_id or 0) != int(expect_chain_id):
+        errors.append(f"the RPC answers for chain {an.chain_id}, but the "
+                      f"network is listed as chain {expect_chain_id}")
+    if expect_dao and str(an.dao_address or "").lower() != str(expect_dao).lower():
+        errors.append(f"the Registry at {dao_registry} belongs to DAO "
+                      f"{an.dao_address or '(none)'}, not {expect_dao}")
     return {"ok": not errors, "errors": errors, "chain_id": an.chain_id,
             "dao": an.dao_address, "dao_registry": dao_registry,
-            "rpc_url": rpc_url, "key": jurisdiction_key(an),
+            "rpc_url": rpc_url, "key": jurisdiction_key(an), "network": facts,
             "name": seed.get("name", "") or dao_name(an.dao_address, rpc_url)}
+
+
+def resolve_jurisdiction(network: str, dao: str, data_url: str = "") -> dict[str, Any]:
+    """"This DAO on this network", looked up in the data source
+    (atn/network_directory.py) and then checked on chain like any other
+    candidate. Same result as check_jurisdiction; the data source supplies
+    the Registry address, the RPC and the network's label facts, and the
+    chain has to agree on the chain id and the DAO. Network reads."""
+    from . import network_directory as nd
+    try:
+        found = nd.find_jurisdiction(network, dao, data_url)
+    except nd.DirectoryError as exc:
+        return {"ok": False, "errors": [str(exc)],
+                "network": network_facts({"name": network}), "dao": str(dao or "")}
+    net = found["network"]
+    check = check_jurisdiction(
+        found["dao_registry"], net["rpc_url"], network=net,
+        expect_chain_id=net["chain_id"], expect_dao=found["dao"])
+    if not check.get("name"):
+        check["name"] = found["name"]
+    return check
 
 
 _DAO_NAMES: dict[tuple[str, str], str] = {}
@@ -848,7 +894,9 @@ _REGISTRY_READ_ABI = [
 #
 # A daemon participates in one jurisdiction at a time. The owner's choice is
 # saved as <data_dir>/jurisdiction.json: {chain_id, rpc_url, dao_registry,
-# dao, name}, or {packaged: true} for the jurisdiction this release ships
+# dao, name, network: {name, gas_symbol, explorer}} (the network's label
+# facts, whichever were given), or {packaged: true} for the jurisdiction
+# this release ships
 # (registry.json). Switching rewrites it and restarts the daemon. Without it
 # (and without ATN_JURISDICTION_REGISTRY / ATN_REGISTRY_URL) the daemon has no
 # jurisdiction: agents and tools work locally, nothing joins a network, and
@@ -904,7 +952,7 @@ def packaged_jurisdiction() -> dict[str, Any] | None:
 NO_JURISDICTION_MESSAGE = (
     "No jurisdiction configured. Agents and tools work locally, but nothing "
     "joins a network until you choose one: the app's Jurisdiction tab, or "
-    "`atn jurisdiction <dao_registry> <rpc_url>`, then restart.")
+    "`atn jurisdiction networks` to see what there is, then restart.")
 
 
 def jurisdiction_configured(data_dir: Path | None = None) -> bool:
@@ -955,6 +1003,7 @@ def save_selected_jurisdiction(sel: dict[str, Any], data_dir: Path | None = None
         "dao_registry": str(sel["dao_registry"]),
         "dao": str(sel.get("dao") or ""),
         "name": str(sel.get("name") or ""),
+        "network": network_facts(sel.get("network")),
     }, indent=2), encoding="utf-8")
     os.replace(tmp, path)
     return path
@@ -1134,9 +1183,12 @@ def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:
             else:
                 source = f"chain:{reg_addr}"
                 sel = load_selected_jurisdiction(_selection_data_dir())
-                contracts = data["jurisdictions"][jurisdiction_id]["contracts"]
+                entry = data["jurisdictions"][jurisdiction_id]
                 if sel is not None and sel.get("dao"):
-                    contracts.setdefault("dao", sel["dao"])
+                    entry["contracts"].setdefault("dao", sel["dao"])
+                if sel is not None:
+                    # The network's label facts were saved with the choice.
+                    entry["network"].update(network_facts(sel.get("network")))
     if data is None:
         path = _packaged_registry_path()
         try:
@@ -1198,11 +1250,13 @@ def _seed_defaults() -> dict[str, Any]:
     from .jurisdiction import RPC_URL, CHAIN_ID
     return {"rpc_url": RPC_URL, "chain_id": CHAIN_ID,
             "dao_address": _default_dao(), "gas_symbol": "",
+            "network_name": "", "block_explorer": "",
             "gas_decimals": 18, "jurisdiction_id": "autonet"}
 
 
 # Registry fields that describe the chain, not a DAO's contracts.
 _NETWORK_SEED_FIELDS = frozenset({"rpc_url", "chain_id", "gas_symbol", "gas_decimals",
+                                  "network_name", "block_explorer",
                                   "jurisdiction_id", "bootstrap_peers"})
 
 
@@ -1421,8 +1475,11 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         config_path=resolved.get("config_path", ""),
         rpc_url=resolved.get("rpc_url", ""),
         chain_id=resolved.get("chain_id", 0),
+        network_name=resolved.get("network_name", ""),
         gas_symbol=resolved.get("gas_symbol", ""),
         gas_decimals=int(resolved.get("gas_decimals", 18)),
+        block_explorer=resolved.get("block_explorer", ""),
+        data_url=resolved.get("data_url", ""),
         private_key=resolved.get("private_key", ""),
         wallet_address=resolved.get("wallet_address", ""),
         dao_address=resolved.get("dao_address", ""),

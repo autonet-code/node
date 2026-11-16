@@ -2492,6 +2492,36 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
+        if msg_type == "autonet_networks":
+            # The networks the data source lists (atn/network_directory.py).
+            import asyncio as _asyncio
+            from . import network_directory as _nd
+            source = (str(msg.get("data_url") or "").strip()
+                      or getattr(self.runtime.autonet.config, "data_url", ""))
+            try:
+                nets = await _asyncio.to_thread(_nd.list_networks, source)
+            except _nd.DirectoryError as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"data_url": _nd.data_url(source), "networks": nets}}
+
+        if msg_type == "autonet_network_jurisdictions":
+            # One page of a network's Autonet jurisdictions, by name.
+            import asyncio as _asyncio
+            from . import network_directory as _nd
+            source = (str(msg.get("data_url") or "").strip()
+                      or getattr(self.runtime.autonet.config, "data_url", ""))
+            try:
+                page = await _asyncio.to_thread(
+                    lambda: _nd.list_jurisdictions(
+                        str(msg.get("network") or ""), source,
+                        query=str(msg.get("query") or ""),
+                        limit=int(msg.get("limit") or 20),
+                        offset=int(msg.get("offset") or 0)))
+            except (_nd.DirectoryError, ValueError) as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            return {"msg_id": msg_id, "ok": True, "result": page}
+
         if msg_type == "autonet_jurisdictions":
             return {"msg_id": msg_id, "ok": True,
                     "result": self._jurisdictions_view()}
@@ -2511,8 +2541,16 @@ class WebSocketBridge:
             # save the selection, restart. Substrate data of the current
             # jurisdiction stays parked under its key; agents keep their
             # identity, registration is per jurisdiction.
+            #
+            # Two ways to name it (docs/architecture.md): {network, dao},
+            # looked up in the data source, which supplies the Registry, the
+            # RPC and the network's facts; or {dao_registry, rpc_url} named
+            # directly, for a jurisdiction no data source lists, with the
+            # network's facts optional (network_name, gas_symbol, explorer).
             dao_registry = str(msg.get("dao_registry") or "").strip()
             rpc_url = str(msg.get("rpc_url") or "").strip()
+            network = str(msg.get("network") or "").strip()
+            dao = str(msg.get("dao") or "").strip()
             if msg.get("packaged"):
                 # The jurisdiction this release ships (issue #50): its
                 # registry.json is the source, nothing to read on chain.
@@ -2535,22 +2573,45 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": True,
                         "result": {**pk, "key": key, "switched": True,
                                    "restarting": bool(msg.get("restart", True))}}
-            if not dao_registry or not rpc_url:
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "autonet_switch needs 'dao_registry' and 'rpc_url'"}
             import asyncio as _asyncio
-            from .config import check_jurisdiction, save_selected_jurisdiction
-            check = await _asyncio.to_thread(check_jurisdiction, dao_registry, rpc_url)
+            from .config import (check_jurisdiction, resolve_jurisdiction,
+                                 save_selected_jurisdiction)
+            if network and dao:
+                # The owner's surface may say where to look (a local
+                # publisher next to a local chain); otherwise the daemon's own.
+                source = (str(msg.get("data_url") or "").strip()
+                          or getattr(self.runtime.autonet.config, "data_url", ""))
+                check = await _asyncio.to_thread(
+                    resolve_jurisdiction, network, dao, source)
+            elif dao_registry and rpc_url:
+                check = await _asyncio.to_thread(
+                    lambda: check_jurisdiction(
+                        dao_registry, rpc_url,
+                        network={"name": msg.get("network_name"),
+                                 "gas_symbol": msg.get("gas_symbol"),
+                                 "explorer": msg.get("explorer")}))
+            else:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "autonet_switch needs 'network' and 'dao' (a "
+                                 "listed jurisdiction), or 'dao_registry' and "
+                                 "'rpc_url'"}
             if not check["ok"]:
                 return {"msg_id": msg_id, "ok": False,
                         "error": "; ".join(check["errors"]), "result": check}
+            chosen = {**check, "name": str(msg.get("name") or check.get("name") or "")}
+            data_dir = getattr(self.runtime._config, "data_dir", None)
             if check["key"] == self.runtime.jurisdiction:
+                # Naming the current jurisdiction again changes nothing but
+                # the network's facts, when this call brought some.
+                from .config import load_selected_jurisdiction
+                saved = load_selected_jurisdiction(data_dir) or {}
+                if (check.get("network") and not saved.get("packaged")
+                        and check["network"] != (saved.get("network") or {})):
+                    save_selected_jurisdiction(chosen, data_dir)
                 return {"msg_id": msg_id, "ok": True,
                         "result": {**check, "switched": False,
                                    "note": "already in this jurisdiction"}}
-            save_selected_jurisdiction(
-                {**check, "name": str(msg.get("name") or check.get("name") or "")},
-                getattr(self.runtime._config, "data_dir", None))
+            save_selected_jurisdiction(chosen, data_dir)
             if msg.get("restart", True):
                 from . import cli as _cli_module
                 _cli_module._restart_requested = True

@@ -12,18 +12,39 @@ household. It joins one jurisdiction at a time (switching restarts it).
 With none chosen it still starts: agents and tools work locally, nothing
 joins a network, and the CLI banner and the app say so. Nobody recommends
 a jurisdiction (the project deploys none; households join whichever they
-like). The app lists the network's jurisdictions from the werule indexer's
-published data (`data.autonet.computer`, every DAO with an Autonet
-substrate in its Registry), by name; the owner chooses, and the daemon
-reads the chosen one's Registry at every start. Joining starts its network
-at once (gossip, the tool substrate, tool use, the seed address);
-registering an agent is optional and only adds consensus (closes,
-elections, claims), which is how a household earns. Headless: `atn
-jurisdiction <dao_registry> <rpc_url>`, or an agent's `POST
-/agents/<id>/join_jurisdiction` with the same two, which works only while
-the daemon is on no jurisdiction (switching is the owner's). Also `atn
-jurisdiction packaged` (the release's copy, unpinned). A data dir whose agents were already
-registered in the packaged jurisdiction keeps it. It:
+like). What can be joined is listed in a data source: the files an
+indexer publishes (`atn/network_directory.py`; the werule indexer's, at
+`data.autonet.computer`, unless `ATN_DATA_URL` or `autonet.data_url` names
+another, such as someone's own deployment). `networks.json` gives each
+network's name, chain id, RPC, gas token and explorer, and each network
+lists its DAOs; the ones with an Autonet substrate in their Registry are
+its jurisdictions. The daemon keeps no table of chains. A jurisdiction is
+named to it in one of two ways, on every surface:
+
+- **listed**: a network's name and the DAO's address. The daemon looks
+  both up in the data source, which supplies the DAO Registry's address,
+  the RPC and the network's facts (name, gas token, explorer).
+- **not listed** (a chain no indexer covers, a local test chain): the DAO
+  Registry's address and an RPC URL, with the network's facts optional.
+  Without them the daemon labels gas "gas"; it never guesses.
+
+Either way the daemon then reads the Registry on chain and refuses a
+jurisdiction it cannot join; the chain id is always the RPC's own answer,
+and a listed jurisdiction whose chain id or DAO differs from what the data
+source says is refused. The choice is saved with the network's facts, and
+the daemon reads the chosen Registry again at every start. The app lists
+the networks and jurisdictions by name and the owner chooses. Headless:
+`atn jurisdiction networks`, `atn jurisdiction list <network>`, then `atn
+jurisdiction <network> <dao>` (or `<dao_registry> <rpc_url>`); an agent
+reads `GET /networks` and `GET /networks/<name>/jurisdictions` (20 a page,
+`?q=` searches) and joins with `POST /agents/<id>/join_jurisdiction`, which
+works only while the daemon is on no jurisdiction (switching is the
+owner's). Also `atn jurisdiction packaged` (the release's copy, unpinned).
+A data dir whose agents were already registered in the packaged
+jurisdiction keeps it. Joining starts its network at once (gossip, the
+tool substrate, tool use, the seed address); registering an agent is
+optional and only adds consensus (closes, elections, claims), which is how
+a household earns. It:
 
 - hosts agents and keeps their keys (age-encrypted vault);
 - runs tools (`use_tool`) as subprocesses that get only the environment

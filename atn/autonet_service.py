@@ -115,10 +115,13 @@ class AutonetState:
     dao_address: str = ""
     rpb_contract_address: str = ""    # Legacy: pre-substrate RPB; empty post-redeploy
     substrate_address: str = ""        # Phase 12: deployed Substrate.sol
-    # Native gas token metadata (mirrored from config so the UI can label
-    # balances without hardcoding 'ETH').
+    # The network's label facts, as they came with the jurisdiction (the
+    # data source, or whoever named the Registry): the app labels with
+    # these. Without a gas symbol, balances are labelled "gas".
+    network_name: str = ""
     gas_symbol: str = "gas"
     gas_decimals: int = 18
+    block_explorer: str = ""
     # The jurisdiction's token symbols, read from its RepToken and
     # Substrate; the app labels with these and falls back to REP / ATN.
     rep_symbol: str = ""
@@ -177,8 +180,10 @@ class AutonetState:
             "dao_address": self.dao_address,
             "rpb_contract_address": self.rpb_contract_address,
             "substrate_address": self.substrate_address,
+            "network_name": self.network_name,
             "gas_symbol": self.gas_symbol,
             "gas_decimals": self.gas_decimals,
+            "block_explorer": self.block_explorer,
             "rep_symbol": self.rep_symbol,
             "atn_symbol": self.atn_symbol,
             "registry_address": self.registry_address,
@@ -318,13 +323,14 @@ class AutonetBridge:
         it can't start, if it can't (docs/multi_jurisdiction.md decisions
         3-5). Every address comes from one resolution of the chosen DAO's
         Registry (or the packaged registry.json that names it)."""
-        from .config import (epoch_rules_error, gas_symbol_for_chain,
-                             jurisdiction_key, missing_prerequisites)
+        from .config import (epoch_rules_error, jurisdiction_key,
+                             missing_prerequisites)
 
         c = self.config
         st = self.state
-        st.gas_symbol = (getattr(c, "gas_symbol", "") or
-                         gas_symbol_for_chain(getattr(c, "chain_id", 0)))
+        st.gas_symbol = getattr(c, "gas_symbol", "") or "gas"
+        st.network_name = getattr(c, "network_name", "") or ""
+        st.block_explorer = getattr(c, "block_explorer", "") or ""
         st.gas_decimals = int(getattr(c, "gas_decimals", 18) or 18)
         st.dao_address = c.dao_address
         st.rpb_contract_address = c.rpb_contract_address

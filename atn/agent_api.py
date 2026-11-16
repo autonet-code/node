@@ -33,7 +33,7 @@ import logging
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -87,15 +87,24 @@ _NETWORK_READS: dict[str, dict[str, Any]] = {
     },
     "join_jurisdiction": {
         "description": "Join a jurisdiction (the network this daemon's "
-                       "agents work in) by its DAO Registry address and an "
-                       "RPC URL of its chain, then restart the daemon. Only "
-                       "while the daemon is on no jurisdiction: the human "
-                       "chooses which one, and switching later is theirs "
-                       "(the app or `atn jurisdiction`).",
+                       "agents work in), then restart the daemon. Name a "
+                       "listed one by `network` and `dao` (GET /networks, "
+                       "then /networks/<name>/jurisdictions). One that is "
+                       "not listed: `dao_registry` (its DAO Registry "
+                       "address) and `rpc_url`, optionally with the "
+                       "network's `network_name`, `gas_symbol` and "
+                       "`explorer`. Only while the daemon is on no "
+                       "jurisdiction: the human chooses which one, and "
+                       "switching later is theirs (the app or `atn "
+                       "jurisdiction`).",
         "input_schema": {"type": "object",
-                         "required": ["dao_registry", "rpc_url"],
-                         "properties": {"dao_registry": {"type": "string"},
-                                        "rpc_url": {"type": "string"}}},
+                         "properties": {"network": {"type": "string"},
+                                        "dao": {"type": "string"},
+                                        "dao_registry": {"type": "string"},
+                                        "rpc_url": {"type": "string"},
+                                        "network_name": {"type": "string"},
+                                        "gas_symbol": {"type": "string"},
+                                        "explorer": {"type": "string"}}},
     },
     "tool_reviews": {
         "description": "The reviews a published tool has received.",
@@ -173,9 +182,10 @@ class AgentAPI:
             "name": "Autonet daemon",
             "jurisdiction": joined or (
                 "none: this daemon is on no network yet. Ask the human which "
-                "jurisdiction to join, then POST "
-                "/agents/<id>/join_jurisdiction with its dao_registry and "
-                "rpc_url (the daemon restarts; wait a few seconds)."),
+                "jurisdiction to join: GET /networks lists the networks, "
+                "/networks/<name>/jurisdictions the jurisdictions on one. "
+                "Then POST /agents/<id>/join_jurisdiction with its network "
+                "and dao (the daemon restarts; wait a few seconds)."),
             "about": (
                 "This daemon belongs to one household (one owner wallet) on "
                 "an Autonet jurisdiction: a shared library of tools that "
@@ -202,6 +212,8 @@ class AgentAPI:
                 "guide": "/guide",
                 "commands": "/commands",
                 "agents": "/agents",
+                "networks": "/networks",
+                "jurisdictions": "/networks/<name>/jurisdictions?q=<name>",
                 "create_agent": "POST /agents",
                 "your_agent": "/agents/<id>",
                 "search_tools": "/agents/<id>/tools?q=<what you need>",
@@ -373,6 +385,11 @@ class AgentAPI:
                 return 200, self._commands(everything=bool(query.get("all")))
             if len(parts) == 2:
                 return 200, self._command(parts[1])
+        if head == "networks" and method == "GET":
+            if len(parts) == 1:
+                return 200, await self._networks()
+            if len(parts) == 3 and parts[2] == "jurisdictions":
+                return 200, await self._network_jurisdictions(parts[1], query)
         if head == "agents":
             if len(parts) == 1:
                 if method == "POST":
@@ -416,13 +433,20 @@ class AgentAPI:
                         409, "this daemon is already in a jurisdiction; "
                         "switching is the owner's (the app or `atn "
                         "jurisdiction`)", jurisdiction=self._jurisdiction())
-                dao_registry = str(body.get("dao_registry") or "").strip()
-                rpc_url = str(body.get("rpc_url") or "").strip()
-                if not dao_registry or not rpc_url:
-                    raise _HTTPError(400, "send dao_registry and rpc_url")
+                # A listed jurisdiction by network and DAO, or an unlisted
+                # one by Registry and RPC. Where the lists come from is the
+                # owner's setting, never the agent's.
+                named = {k: str(body.get(k) or "").strip()
+                         for k in ("network", "dao", "dao_registry", "rpc_url",
+                                   "network_name", "gas_symbol", "explorer")}
+                if not ((named["network"] and named["dao"])
+                        or (named["dao_registry"] and named["rpc_url"])):
+                    raise _HTTPError(
+                        400, "send network and dao (a listed jurisdiction), "
+                        "or dao_registry and rpc_url", networks="/networks")
                 return 200, await self._call(
                     self._owner_session(), "autonet_switch",
-                    {"dao_registry": dao_registry, "rpc_url": rpc_url,
+                    {**{k: v for k, v in named.items() if v},
                      "caller_id": agent_id})
             if sub == "services" and len(parts) == 3 and method == "GET":
                 args: dict[str, Any] = {}
@@ -435,6 +459,56 @@ class AgentAPI:
                                      commands="/commands")
                 return 200, await self._call(session, sub, body)
         raise _HTTPError(404, f"nothing at {path}", start="/")
+
+    def _data_url(self) -> str:
+        cfg = getattr(getattr(self.bridge.runtime, "autonet", None), "config", None)
+        return str(getattr(cfg, "data_url", "") or "")
+
+    async def _networks(self) -> dict[str, Any]:
+        """The networks the data source lists (atn/network_directory.py)."""
+        import asyncio
+        from . import network_directory as nd
+        try:
+            nets = await asyncio.to_thread(nd.list_networks, self._data_url())
+        except nd.DirectoryError as exc:
+            raise _HTTPError(502, str(exc)) from exc
+        return {
+            "networks": [{"name": n["name"], "chain_id": n["chain_id"],
+                          "gas_symbol": n["gas_symbol"],
+                          "jurisdictions": f"/networks/{n['name']}/jurisdictions"}
+                         for n in nets],
+            "note": "A jurisdiction on none of these is joined by its DAO "
+                    "Registry address and an RPC URL: /commands/join_jurisdiction",
+        }
+
+    async def _network_jurisdictions(self, network: str,
+                                     query: dict[str, str]) -> dict[str, Any]:
+        """A page of a network's jurisdictions, by name; ``q`` searches."""
+        import asyncio
+        from . import network_directory as nd
+        try:
+            limit = int(query.get("limit") or 20)
+            offset = int(query.get("offset") or 0)
+        except ValueError as exc:
+            raise _HTTPError(400, "limit and offset are numbers") from exc
+        q = str(query.get("q") or "")
+        try:
+            page = await asyncio.to_thread(
+                lambda: nd.list_jurisdictions(network, self._data_url(), query=q,
+                                              limit=limit, offset=offset))
+        except nd.DirectoryError as exc:
+            raise _HTTPError(404, str(exc), networks="/networks") from exc
+        shown = page["offset"] + len(page["jurisdictions"])
+        if shown < page["total"]:
+            more = f"/networks/{page['network']}/jurisdictions?offset={shown}"
+            if page["limit"] != 20:
+                more += f"&limit={page['limit']}"
+            if q:
+                more += "&q=" + quote(q)
+            page["next"] = more
+        page["join"] = ("POST /agents/<id>/join_jurisdiction with "
+                        f"{{\"network\": \"{page['network']}\", \"dao\": <dao>}}")
+        return page
 
     async def _search_tools(self, session, agent_id: str,
                             query: dict[str, str]) -> dict[str, Any]:

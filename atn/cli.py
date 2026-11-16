@@ -974,32 +974,102 @@ def _jurisdiction_main(argv: list[str]) -> int:
     without the app (issue #50). Takes effect at the next start.
 
         atn jurisdiction                          show the choice
+        atn jurisdiction networks                 the networks that are listed
+        atn jurisdiction list <network> [search] [--offset N] [--limit N]
+                                                  a network's jurisdictions
+        atn jurisdiction <network> <dao>          join a listed jurisdiction
+        atn jurisdiction <dao_registry> <rpc_url> [--network-name NAME]
+                [--gas-symbol SYMBOL] [--explorer URL]
+                                                  join one that is not listed,
+                                                  by its DAO Registry and an RPC
         atn jurisdiction packaged                 the one this release ships
-        atn jurisdiction <dao_registry> <rpc_url> a launched jurisdiction
+
+    The lists come from the published data source: ATN_DATA_URL, else
+    autonet.data_url in config.yaml, else the project's own. --data-url
+    names another for one call.
     """
+    from . import network_directory as nd
     from .config import (_DEFAULT_DIR, NO_JURISDICTION_MESSAGE, check_jurisdiction,
-                         load_selected_jurisdiction, save_selected_jurisdiction)
-    if not argv:
+                         load_selected_jurisdiction, resolve_jurisdiction,
+                         save_selected_jurisdiction)
+    args, opts = [], {}
+    it = iter(argv)
+    for a in it:
+        if a.startswith("--"):
+            name, _, value = a[2:].partition("=")
+            opts[name.replace("-", "_")] = value if value else next(it, "")
+        else:
+            args.append(a)
+    unknown = set(opts) - {"data_url", "network_name", "gas_symbol", "explorer",
+                           "offset", "limit"}
+    if unknown:
+        print("unknown option: --" + ", --".join(sorted(unknown)).replace("_", "-"),
+              file=sys.stderr)
+        return 2
+
+    def source() -> str:
+        if opts.get("data_url"):
+            return opts["data_url"]
+        try:
+            return load_config().autonet.data_url
+        except Exception:
+            return ""
+
+    if not args:
         sel = load_selected_jurisdiction(_DEFAULT_DIR)
         if sel is None:
             print(NO_JURISDICTION_MESSAGE)
         else:
-            print(f"{sel.get('name') or 'jurisdiction'}: chain {sel['chain_id']}, "
+            net = (sel.get("network") or {}).get("name")
+            print(f"{sel.get('name') or 'jurisdiction'}: "
+                  f"{net + ', ' if net else ''}chain {sel['chain_id']}, "
                   f"DAO {sel.get('dao')}{' (packaged)' if sel.get('packaged') else ''}")
         return 0
-    if argv[0] == "packaged":
+    if args[0] == "packaged":
         save_selected_jurisdiction({"packaged": True}, _DEFAULT_DIR)
         print("Saved: the packaged jurisdiction. Restart the daemon to join it.")
         return 0
-    if len(argv) != 2:
+    try:
+        if args[0] == "networks" and len(args) == 1:
+            nets = nd.list_networks(source())
+            for n in nets:
+                print(f"{n['name']}: chain {n['chain_id']}, gas {n['gas_symbol'] or '?'}")
+            if not nets:
+                print(f"{nd.data_url(source())} lists no networks.")
+            return 0
+        if args[0] == "list" and len(args) in (2, 3):
+            page = nd.list_jurisdictions(
+                args[1], source(), query=args[2] if len(args) == 3 else "",
+                limit=int(opts.get("limit") or 20), offset=int(opts.get("offset") or 0))
+            for j in page["jurisdictions"]:
+                print(f"{j['name'] or '(unnamed)'}: {j['dao']}")
+            if not page["total"]:
+                print(f"No jurisdictions on {page['network']}"
+                      + (f" match '{args[2]}'." if len(args) == 3 else " yet."))
+                return 0
+            shown = page["offset"] + len(page["jurisdictions"])
+            print(f"{shown} of {page['total']} on {page['network']}"
+                  + (f"; more with --offset {shown}" if shown < page["total"] else ""))
+            return 0
+    except (nd.DirectoryError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if len(args) != 2:
         print(_jurisdiction_main.__doc__ or "", file=sys.stderr)
         return 2
-    check = check_jurisdiction(argv[0], argv[1])
+    if "://" in args[1]:
+        check = check_jurisdiction(args[0], args[1], network={
+            "name": opts.get("network_name"), "gas_symbol": opts.get("gas_symbol"),
+            "explorer": opts.get("explorer")})
+    else:
+        check = resolve_jurisdiction(args[0], args[1], source())
     if not check["ok"]:
         print("can't join: " + "; ".join(check["errors"]), file=sys.stderr)
         return 1
     save_selected_jurisdiction(check, _DEFAULT_DIR)
-    print(f"Saved: DAO {check.get('dao')} on chain {check.get('chain_id')}. "
+    net = (check.get("network") or {}).get("name")
+    print(f"Saved: {check.get('name') or 'DAO'} ({check.get('dao')}) on "
+          f"{net or 'chain ' + str(check.get('chain_id'))}. "
           "Restart the daemon to join it.")
     return 0
 
