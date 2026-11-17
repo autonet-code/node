@@ -126,11 +126,12 @@ def test_register_vote_and_anchor_the_winner(env):
     assert _send(w3, el.functions.registerOption(1, 0, opt_b), a1).status == 1
     # No REP: never drawn while the election is not open to all.
     assert _reverts(w3, el.functions.registerOption(1, 0, _option(env, "c")), a2)
-    assert el.functions.optionCount(pid).call() == 2
-    _, proposer = el.functions.getOption(pid, 1).call()
+    # Index 0 is reject, so two registered options count as three.
+    assert el.functions.optionCount(pid).call() == 3
+    _, proposer = el.functions.getOption(pid, 2).call()
     assert proposer == a1
 
-    # Voting started: the option set is frozen.
+    # Registration stays open while voting runs, but still needs REP.
     _send(w3, gov.functions.setProposal(pid, ACTIVE, _ts(w3)), env["acc"][0])
     assert _reverts(w3, el.functions.registerOption(1, 0, _option(env, "d")), a2)
 
@@ -138,7 +139,7 @@ def test_register_vote_and_anchor_the_winner(env):
     call = el.encode_abi("anchorWinner", args=[1, 0])
     assert _reverts(w3, el.functions.anchorWinner(1, 0), a0)
     assert _reverts(w3, gov.functions.exec(el.address, call), env["acc"][0])
-    _send(w3, gov.functions.setWinner(pid, True, 1), env["acc"][0])
+    _send(w3, gov.functions.setWinner(pid, True, 2), env["acc"][0])
     assert _send(w3, gov.functions.exec(el.address, call), env["acc"][0]).status == 1
 
     assert sub.functions.anchorCount().call() == 1
@@ -166,10 +167,14 @@ def test_next_election_waits_for_the_previous_anchor(env):
 
 def test_open_after_attempts_lets_any_live_agent_register(env):
     w3, el = env["w3"], env["el"]
-    a2, outsider = env["agents"][2], env["acc"][7]
+    a2, a3, outsider = env["agents"][2], env["agents"][3], env["acc"][7]
+    _give_rep(env, a2, 1)
     _open(env, 1, attempt=2)
+    # Open to every live agent that holds REP, however little.
     assert _send(w3, el.functions.registerOption(1, 2, _option(env, "o")),
                  a2).status == 1
+    # A live agent with no REP still cannot register.
+    assert _reverts(w3, el.functions.registerOption(1, 2, _option(env, "q")), a3)
     # Still agents only.
     assert _reverts(w3, el.functions.registerOption(1, 2, _option(env, "p")),
                     outsider)
