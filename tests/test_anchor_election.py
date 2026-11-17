@@ -152,6 +152,24 @@ def test_register_vote_and_anchor_the_winner(env):
     assert _reverts(w3, gov.functions.exec(el.address, call), env["acc"][0])
 
 
+def test_only_the_anchoring_call_is_an_election_call(env):
+    """The governor runs a proposal as an election only when its one action
+    is the election's own call; anything else on this contract (setParams)
+    is an ordinary For/Against proposal."""
+    el = env["el"]
+    assert el.functions.isElectionCall(el.functions.callOf(1, 0).call()).call()
+    assert el.functions.isElectionCall(
+        el.encode_abi("anchorWinner", args=[7, 3])).call()
+    assert not el.functions.isElectionCall(
+        el.encode_abi("setParams", args=[1, 1_000_000, 1, 2])).call()
+    assert not el.functions.isElectionCall(b"").call()
+    assert not el.functions.isElectionCall(
+        bytes.fromhex(el.encode_abi("anchorWinner", args=[1, 0])[2:8])).call()
+    # The selector alone is enough: the arguments are checked on execution.
+    assert el.functions.isElectionCall(
+        bytes.fromhex(el.encode_abi("anchorWinner", args=[1, 0])[2:10])).call()
+
+
 def test_next_election_waits_for_the_previous_anchor(env):
     w3, el, gov = env["w3"], env["el"], env["gov"]
     a0 = env["agents"][0]

@@ -170,6 +170,15 @@ contract AnchorElection is Initializable {
         return abi.encodeCall(AnchorElection.anchorWinner, (epochNumber, attempt));
     }
 
+    /// @notice IOptionSource: whether `data` is this source's election call.
+    ///         The governor counts a proposal as a single-choice election
+    ///         only when its one action is such a call; any other call on
+    ///         this contract (setParams) is voted For, Against or Abstain
+    ///         like any proposal. True only for a call to anchorWinner.
+    function isElectionCall(bytes calldata data) external pure returns (bool) {
+        return data.length >= 4 && bytes4(data[:4]) == AnchorElection.anchorWinner.selector;
+    }
+
     function proposalIdOf(uint256 epochNumber, uint256 attempt)
         public view returns (uint256)
     {
