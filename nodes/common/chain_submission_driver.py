@@ -171,6 +171,8 @@ class ChainSubmissionDriver:
         self._elections_path = Path(elections_path) if elections_path else None
         self._load_elections()
         self._verdict_submitter: Optional[Any] = None
+        if getattr(self.config, "anchor_election_address", ""):
+            self._ensure_ticker()   # the election watch runs from the start
 
     def governed_anchorer(self) -> Optional[GovernedAnchorer]:
         if self._governed is None and self._anchorer is not None:
@@ -484,7 +486,21 @@ class ChainSubmissionDriver:
                     election.epoch_id, election.attempt, state)
         return state
 
+    def _watch_elections(self) -> None:
+        """Vote reject in elections opened for epochs this daemon has not
+        closed (ElectionAnchorer.watch)."""
+        ea = self.election_anchorer()
+        if ea is None:
+            return
+        with self._lock:
+            own = {e.epoch_number for e in self._elections.values()}
+        try:
+            ea.watch(self._voters(), own)
+        except Exception as e:
+            logger.warning("election watch failed: %s", e)
+
     def _tick_elections(self) -> None:
+        self._watch_elections()
         with self._lock:
             elections = list(self._elections.items())
         for epoch_id, election in elections:
@@ -594,7 +610,10 @@ class ChainSubmissionDriver:
             except Exception:
                 logger.warning("anchor proposal tick failed", exc_info=True)
             with self._lock:
-                if not self._pending and not self._elections:
+                # With an election contract the ticker never stops: it also
+                # watches for elections opened for epochs not closed here.
+                if (not self._pending and not self._elections
+                        and not self.config.anchor_election_address):
                     self._ticker = None
                     return
 

@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 _RETRY = {DEFEATED, EXPIRED, CANCELED}
 REJECT_OPTION = 0   # voting index 0 is "none of these"; real options start at 1
+# A daemon votes reject only in the last part of the vote: this share of the
+# time between the snapshot and the deadline. Until then it waits for its own
+# close to reach the ballot (a drawn agent may register late, and this daemon
+# may not have closed the epoch yet). A vote cannot be changed, so an early
+# reject would lock the daemon out of voting for its own close.
+REJECT_AFTER_SHARE = 2 / 3
 # A queued election whose winner still hasn't executed this long after its
 # eta can't anchor (the winning option is one Substrate rejects): re-post
 # as a new attempt instead of waiting out the driver's give-up.
@@ -231,13 +237,25 @@ class ElectionAnchorer:
                                    v.private_key):
                 return
 
+    def _reject_time(self, pid: int) -> bool:
+        """Whether the vote is in its last part, when a daemon whose close
+        is not on the ballot votes reject."""
+        try:
+            start = int(self._governor.functions.proposalSnapshot(pid).call())
+            end = int(self._governor.functions.proposalDeadline(pid).call())
+        except Exception:
+            return False
+        return self._now() >= start + (end - start) * REJECT_AFTER_SHARE
+
     def _vote(self, e: Election, voters: List[Voter]) -> None:
         index = self._option_index(e)
+        pid = self.proposal_id(e)
         if index is None:
+            if not self._reject_time(pid):
+                return   # still time for this daemon's close to be registered
             logger.info("epoch %s: no registered option matches this daemon's "
                         "close; voting reject", e.epoch_id)
             index = REJECT_OPTION
-        pid = self.proposal_id(e)
         snap = int(self._governor.functions.proposalSnapshot(pid).call())
         for v in voters:
             acct = self._w3.to_checksum_address(v.address)
@@ -251,6 +269,62 @@ class ElectionAnchorer:
             self._try(e, f"vote {acct[:10]} for option {index}",
                       self._governor.functions.castVote(pid, index),
                       v.private_key)
+
+    # -- elections this daemon has no close for ----------------------------
+
+    def watch(self, voters: List[Voter], own_epochs) -> List[int]:
+        """Vote reject, late in the vote, in every open election for an
+        epoch this daemon has not closed (``own_epochs`` are the epoch
+        numbers it has an election of its own for, which ``step`` handles).
+
+        An election can be opened before its epoch is due. No honest daemon
+        has a close for it then, so without this nobody would vote, and a
+        made-up result with the quorum behind it would win unopposed. Any
+        result on the ballot of an epoch this daemon could not close yet is
+        one it cannot vouch for, so its vote is reject. Returns the epoch
+        numbers it voted reject in."""
+        rejected: List[int] = []
+        try:
+            anchored = int(self._substrate.functions.anchorCount().call())
+        except Exception:
+            return rejected
+        # The contract opens the next epoch and, at most, the one after.
+        for number in (anchored + 1, anchored + 2):
+            if number in own_epochs:
+                continue
+            try:
+                opened = int(self._election.functions.attemptsOpened(number).call())
+                if opened == 0:
+                    continue
+                pid = int(self._election.functions.proposalIdOf(
+                    number, opened - 1).call())
+                if int(self._governor.functions.state(pid).call()) != ACTIVE:
+                    continue
+            except Exception:
+                continue
+            if not self._reject_time(pid):
+                continue
+            watched = Election(epoch_id=f"epoch-{number}", epoch_number=number,
+                               option=(), attempt=opened - 1)
+            snap = int(self._governor.functions.proposalSnapshot(pid).call())
+            for v in voters:
+                acct = self._w3.to_checksum_address(v.address)
+                try:
+                    if self._governor.functions.hasVoted(pid, acct).call():
+                        continue
+                    if int(self._governor.functions.getVotes(acct, snap).call()) == 0:
+                        continue
+                except Exception:
+                    continue
+                if self._try(watched, f"vote {acct[:10]} reject (epoch not "
+                             f"closed here)", self._governor.functions.castVote(
+                                 pid, REJECT_OPTION), v.private_key):
+                    if number not in rejected:
+                        rejected.append(number)
+            if number in rejected:
+                logger.warning("epoch %d: an election is open for an epoch this "
+                               "daemon has not closed; voted reject", number)
+        return rejected
 
     # -- tx plumbing ------------------------------------------------------
 

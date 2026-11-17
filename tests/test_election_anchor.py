@@ -249,3 +249,66 @@ def test_reject_wins_when_no_option_matches(stack):
         _travel(w3, 20)
     assert e_a.attempt == attempt0 + 1
     assert stack["substrate"].functions.anchorCount().call() == 0
+
+
+def _mine_after(w3, seconds: int) -> None:
+    _travel(w3, seconds)
+    w3.provider.ethereum_tester.mine_block()
+
+
+def test_election_for_an_epoch_nobody_closed_is_voted_down(stack):
+    """An election can be opened before its epoch is due. One agent opens
+    epoch 1's, registers a made-up result and votes for it; no daemon has
+    closed epoch 1, so none has an election of its own. Their watch votes
+    reject late in the vote, reject wins, and nothing is anchored."""
+    w3, sub = stack["w3"], stack["substrate"]
+    el, gov = stack["election"], stack["governor"]
+    (ea_a, v_a), (ea_b, v_b) = stack["daemon_a"], stack["daemon_b"]
+    everyone = v_a + v_b
+
+    _tx(w3, el.functions.open(1), everyone[0].address)
+    pid = el.functions.proposalIdOf(1, 0).call()
+    _mine_after(w3, 61)                       # the vote is running
+    tp = el.functions.drawTimepoint(pid).call()
+    attacker = next(v for v in everyone
+                    if el.functions.isDrawn(1, 0, v.address, tp).call())
+    honest = [v for v in everyone if v is not attacker]
+    _tx(w3, el.functions.registerOption(1, 0, _option(stack, "made-up")),
+        attacker.address)
+    _tx(w3, gov.functions.castVote(pid, 1), attacker.address)
+
+    # Early in the vote the honest daemons wait: nothing is cast.
+    assert ea_a.watch(honest, set()) == []
+    assert not any(gov.functions.hasVoted(pid, v.address).call() for v in honest)
+    # A daemon that has its own election for the epoch leaves it to step().
+    _mine_after(w3, 125)                      # the last third of the vote
+    assert ea_a.watch(honest, {1}) == []
+    assert ea_a.watch(honest, set()) == [1]
+    assert all(gov.functions.hasVoted(pid, v.address).call() for v in honest)
+    # Voting again is a no-op.
+    assert ea_a.watch(honest, set()) == []
+
+    _mine_after(w3, 120)                      # the vote is over
+    decided, index = gov.functions.winningOption(pid).call()
+    assert decided and index == 0             # reject won
+    assert sub.functions.anchorCount().call() == 0
+
+
+def test_a_daemon_waits_before_rejecting_its_own_epochs_ballot(stack):
+    """A daemon whose close is not on the ballot yet does not vote reject
+    at once (a vote cannot be changed): it waits for the last part of the
+    vote, so a close registered late still gets its votes."""
+    w3 = stack["w3"]
+    el, gov = stack["election"], stack["governor"]
+    (ea_a, v_a), _ = stack["daemon_a"], stack["daemon_b"]
+    option = _option(stack, "mine")
+    e = ea_a.open(option[0], option)
+    _tx(w3, el.functions.open(1), v_a[0].address)
+    pid = el.functions.proposalIdOf(1, 0).call()
+    _mine_after(w3, 61)
+    # Nobody has registered: voting now would have to be reject.
+    ea_a._vote(e, v_a)
+    assert not any(gov.functions.hasVoted(pid, v.address).call() for v in v_a)
+    _mine_after(w3, 125)
+    ea_a._vote(e, v_a)
+    assert all(gov.functions.hasVoted(pid, v.address).call() for v in v_a)

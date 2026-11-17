@@ -65,6 +65,7 @@ GOVERNOR_ABI = [
     _fn("hasVoted", [_PID, {"internalType": "address", "name": "account",
                             "type": "address"}],
         [{"internalType": "bool", "name": "", "type": "bool"}]),
+    _fn("proposalDeadline", [_PID], _U256_OUT),
     _fn("proposalSnapshot", [_PID], _U256_OUT),
     _fn("proposalEta", [_PID], _U256_OUT),
     _fn("proposalThreshold", [], _U256_OUT),
