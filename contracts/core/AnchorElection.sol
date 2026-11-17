@@ -93,14 +93,20 @@ contract AnchorElection is Initializable {
     IOptionGovernor public governor;
     IPastVotes public repToken;
 
-    /// @notice Expected number of drawn proposers per epoch (3 at setup).
+    /// @notice Expected number of drawn proposers in an epoch's first
+    ///         attempt (3 at setup); it doubles with each further attempt.
     uint256 public proposers;
+    /// @dev Past this many doublings the draw is everyone (and the shift
+    ///      below stays far from overflow).
+    uint256 private constant MAX_DOUBLINGS = 64;
     uint8 private constant ACTIVE_STATE = 1;
     /// @notice Minimum REP share (parts per million) to be drawn (0 at setup).
     uint256 public proposerFloorPpm;
     /// @notice Most options one election may hold (8 at setup).
     uint256 public maxOptions;
-    /// @notice The attempt from which any live agent may register (2 at setup).
+    /// @notice The attempt from which every live agent above the floor is
+    ///         drawn, whatever its REP (16 at setup: by then the doubling
+    ///         has reached anyone holding a 200,000th of all REP).
     uint256 public openAfterAttempts;
 
     mapping(uint256 => Option[]) private _options;
@@ -178,7 +184,7 @@ contract AnchorElection is Initializable {
         repToken = IPastVotes(repToken_);
         proposers = 3;
         maxOptions = 8;
-        openAfterAttempts = 2;
+        openAfterAttempts = 16;
     }
 
     modifier onlyTimelock() {
@@ -248,11 +254,19 @@ contract AnchorElection is Initializable {
         if (supply == 0) return false;
         uint256 votes = repToken.getPastVotes(account, timepoint);
         if (votes == 0 || votes * PPM < proposerFloorPpm * supply) return false;
-        if (attempt >= openAfterAttempts) return true;
+        // The draw widens with every failed attempt: the expected number of
+        // proposers doubles each time, and an agent's chance stays
+        // proportional to its REP throughout, so splitting REP over many
+        // agents gains nothing and a ballot cannot be filled by slivers.
+        // From openAfterAttempts on (or once the doubling would overflow),
+        // every live agent above the floor is drawn, so an epoch whose
+        // larger holders are all away still gets a ballot.
+        if (attempt >= openAfterAttempts || attempt >= MAX_DOUBLINGS) return true;
         uint256 h = uint256(keccak256(abi.encode(
             block.chainid, address(this), epochNumber, attempt, account)));
-        // h / 2^256 < proposers * votes / supply, without overflow.
-        return Math.mulDiv(h, supply, type(uint256).max) < proposers * votes;
+        // h / 2^256 < proposers * 2^attempt * votes / supply, without overflow.
+        return Math.mulDiv(h, supply, type(uint256).max)
+            < (proposers << attempt) * votes;
     }
 
     // ---------------------------------------------------------------------
@@ -432,7 +446,8 @@ contract AnchorElection is Initializable {
     {
         // A vote names its option in a uint8 and index 0 is reject, so at
         // most 255 registered options can be voted for.
-        if (proposers_ == 0 || maxOptions_ == 0 || maxOptions_ > 255
+        if (proposers_ == 0 || proposers_ > type(uint64).max
+                || maxOptions_ == 0 || maxOptions_ > 255
                 || proposerFloorPpm_ > PPM) {
             revert BadParams();
         }

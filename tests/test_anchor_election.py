@@ -194,9 +194,14 @@ def test_next_election_waits_for_the_previous_anchor(env):
 
 
 def test_open_after_attempts_lets_any_live_agent_register(env):
-    w3, el = env["w3"], env["el"]
-    a2, a3, outsider = env["agents"][2], env["agents"][3], env["acc"][7]
+    w3, el, gov = env["w3"], env["el"], env["gov"]
+    a0, a2, a3, outsider = (env["agents"][0], env["agents"][2],
+                            env["agents"][3], env["acc"][7])
+    # a2 holds a millionth of all REP: far below any draw at attempt 2.
+    _give_rep(env, a0, 10 ** 6)
     _give_rep(env, a2, 1)
+    call = el.encode_abi("setParams", args=[3, 0, 8, 2])
+    _send(w3, gov.functions.exec(el.address, call), env["acc"][0])
     _open(env, 1, attempt=2)
     # Open to every live agent that holds REP, however little.
     assert _send(w3, el.functions.registerOption(1, 2, _option(env, "o")),
@@ -218,6 +223,40 @@ def test_draw_size_tracks_proposers(env):
     mean = sum(counts) / len(counts)
     # 5 equal holders, 3 expected proposers: each drawn with p = 0.6.
     assert 2.4 <= mean <= 3.6, mean
+
+
+def test_the_draw_doubles_with_each_attempt_and_stays_proportional(env):
+    """Small holders are reached gradually: the expected number of proposers
+    doubles each attempt, each agent's chance stays its share of REP times
+    that number, and only from openAfterAttempts is everyone drawn."""
+    w3, el = env["w3"], env["el"]
+    whale, small = env["agents"][0], env["agents"][1:5]
+    _give_rep(env, whale, 9600)
+    for a in small:
+        _give_rep(env, a, 100)          # 1% of all REP each
+    # Read at a timepoint after every balance above was written.
+    w3.provider.ethereum_tester.time_travel(_ts(w3) + 5)
+    w3.provider.ethereum_tester.mine_block()
+    tp = _ts(w3) - 1
+    assert el.functions.openAfterAttempts().call() == 16
+
+    def rate(attempt, n=400):
+        hits = sum(el.functions.isDrawn(e, attempt, a, tp).call()
+                   for e in range(1, n // len(small) + 1) for a in small)
+        return hits / n
+
+    # A 1% holder: 3% at attempt 0, 6%, 12%, 24%, 48%, then certain.
+    r0, r2, r4 = rate(0), rate(2), rate(4)
+    assert 0.005 <= r0 <= 0.07, r0
+    assert 0.06 <= r2 <= 0.19, r2
+    assert 0.38 <= r4 <= 0.58, r4
+    assert rate(6, n=40) == 1.0
+    # The whale (96%) is always drawn; an agent with no REP never is.
+    assert all(el.functions.isDrawn(e, 0, whale, tp).call() for e in range(1, 20))
+    assert not any(el.functions.isDrawn(1, k, env["acc"][7], tp).call()
+                   for k in (0, 5, 16, 80))
+    # From openAfterAttempts, a sliver is enough.
+    assert el.functions.isDrawn(1, 16, small[0], tp).call()
 
 
 def test_params_are_governed(env):
