@@ -18,6 +18,24 @@ const _ctx = {};
 const ctxOf = async (substrate) =>
   _ctx[(await substrate.getAddress()).toLowerCase()] || {};
 
+// The implementation behind every proxied Substrate: deployed directly
+// with placeholder arguments, which also locks it against initialize().
+// One per hardhat network state (a snapshot revert drops it, so it is
+// looked up by code, not cached blindly).
+let _impl = null;
+async function substrateImplementation() {
+  if (_impl && (await ethers.provider.getCode(await _impl.getAddress())) !== "0x") {
+    return _impl;
+  }
+  const Substrate = await ethers.getContractFactory("Substrate");
+  const one = "0x0000000000000000000000000000000000000001";
+  _impl = await Substrate.deploy(
+    one, ethers.ZeroAddress, one, ethers.ZeroAddress, ethers.ZeroHash,
+    "implementation", "IMPL", 250, 5000);
+  await _impl.waitForDeployment();
+  return _impl;
+}
+
 // Deploy Substrate(treasury, vaultMinter, governor). Defaults: treasury =
 // signers[0], vaultMinter = signers[19] (test faucet), governor =
 // signers[18] (anchors via anchorEpoch).
@@ -30,13 +48,28 @@ async function deploySubstrateWith(opts = {}) {
   const governor =
     opts.governor !== undefined ? opts.governor : signers[SLOT_GOVERNOR].address;
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy(
+  const args = [
     treasury, vaultMinter, governor, ethers.ZeroAddress,
     opts.genesisRoot !== undefined ? opts.genesisRoot : ethers.ZeroHash,
     "Test ATN", "REPATN",
     opts.serviceFeeBps !== undefined ? opts.serviceFeeBps : 250,
-    opts.feeTreasuryBps !== undefined ? opts.feeTreasuryBps : 5000);
-  await substrate.waitForDeployment();
+    opts.feeTreasuryBps !== undefined ? opts.feeTreasuryBps : 5000];
+  let substrate;
+  if (opts.direct) {
+    // A plain contract, set up by its constructor.
+    substrate = await Substrate.deploy(...args);
+    await substrate.waitForDeployment();
+  } else {
+    // As a jurisdiction gets it: an ERC-1967 proxy over the shared
+    // implementation, set up by initialize() in the creating transaction.
+    const impl = await substrateImplementation();
+    const Proxy = await ethers.getContractFactory("SubstrateProxy");
+    const proxy = await Proxy.deploy(
+      await impl.getAddress(),
+      Substrate.interface.encodeFunctionData("initialize", args));
+    await proxy.waitForDeployment();
+    substrate = Substrate.attach(await proxy.getAddress());
+  }
   _ctx[(await substrate.getAddress()).toLowerCase()] = {
     vaultFaucet: vaultMinter === vaultSigner.address ? vaultSigner : null,
     governor:

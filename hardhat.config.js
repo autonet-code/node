@@ -15,16 +15,26 @@ module.exports = {
     // 0.8.20 is the production compiler. 0.8.24 exists only for the
     // test-only DAO stand-in (contracts/test/AnchorTestGovernance.sol,
     // tests/test_governed_anchor.py): OZ 5.4's Governor needs >= 0.8.24.
-    // Every other source is pinned to 0.8.20 below so its bytecode does
-    // not change with the compiler list.
+    // Substrate is upgradeable (UUPS), and OZ 5.4's UUPSUpgradeable needs
+    // >= 0.8.22, so it compiles with 0.8.24 too. The sources listed below
+    // are pinned to 0.8.20 so their bytecode does not change with the
+    // compiler list.
     compilers: [
       { version: "0.8.20", settings: SOLC_SETTINGS },
       // OZ 5.4 utils/Bytes.sol uses mcopy (Cancun).
-      { version: "0.8.24", settings: { ...SOLC_SETTINGS, evmVersion: "cancun" } },
+      // storageLayout is emitted for the upgrade check on Substrate
+      // (test/storage_layout.test.js); it does not change the bytecode.
+      {
+        version: "0.8.24",
+        settings: {
+          ...SOLC_SETTINGS,
+          evmVersion: "cancun",
+          outputSelection: { "*": { "*": ["storageLayout"] } },
+        },
+      },
     ],
     overrides: Object.fromEntries(
       [
-        "contracts/core/Substrate.sol",
         "contracts/core/ServiceMarket.sol",
         "contracts/test/MockERC20.sol",
         "contracts/test/MockRepToken.sol",

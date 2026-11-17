@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 
 /// @dev The Substrate surface an election needs.
 interface ISubstrateAnchor {
@@ -64,7 +65,7 @@ interface IPastVotes {
 /// `proposers * s` of the hash range, so about `proposers` agents are
 /// drawn per epoch. From attempt `openAfterAttempts` on, any live agent with REP
 /// may register: an epoch never stalls because no drawn agent showed up.
-contract AnchorElection {
+contract AnchorElection is Initializable {
     struct Option {
         string epochId;
         bytes32 epochRoot;
@@ -79,19 +80,21 @@ contract AnchorElection {
     uint8 private constant PENDING = 0;
     uint256 private constant PPM = 1_000_000;
 
-    ISubstrateAnchor public immutable substrate;
-    IOptionGovernor public immutable governor;
-    IPastVotes public immutable repToken;
+    // Set once at setup (the constructor, or initialize() on a clone); no
+    // setters.
+    ISubstrateAnchor public substrate;
+    IOptionGovernor public governor;
+    IPastVotes public repToken;
 
-    /// @notice Expected number of drawn proposers per epoch.
-    uint256 public proposers = 3;
+    /// @notice Expected number of drawn proposers per epoch (3 at setup).
+    uint256 public proposers;
     uint8 private constant ACTIVE_STATE = 1;
-    /// @notice Minimum REP share (parts per million) to be drawn.
-    uint256 public proposerFloorPpm = 0;
-    /// @notice Most options one election may hold.
-    uint256 public maxOptions = 8;
-    /// @notice The attempt from which any live agent may register.
-    uint256 public openAfterAttempts = 2;
+    /// @notice Minimum REP share (parts per million) to be drawn (0 at setup).
+    uint256 public proposerFloorPpm;
+    /// @notice Most options one election may hold (8 at setup).
+    uint256 public maxOptions;
+    /// @notice The attempt from which any live agent may register (2 at setup).
+    uint256 public openAfterAttempts;
 
     mapping(uint256 => Option[]) private _options;
     mapping(uint256 => address[]) private _proposerOf;
@@ -119,10 +122,29 @@ contract AnchorElection {
     error Undecided(uint256 proposalId);
     error BadParams();
 
-    constructor(address substrate_, address governor_, address repToken_) {
+    /// @dev Sets up the instance it creates, so a directly deployed
+    ///      election works as a plain contract and can never be initialized
+    ///      again; that also locks the implementation behind the clones.
+    constructor(address substrate_, address governor_, address repToken_) initializer {
+        _init(substrate_, governor_, repToken_);
+    }
+
+    /// @notice Set up a clone (EIP-1167): the constructor's arguments, in
+    ///         the same order. Once per clone, in the transaction that
+    ///         creates it.
+    function initialize(address substrate_, address governor_, address repToken_)
+        external initializer
+    {
+        _init(substrate_, governor_, repToken_);
+    }
+
+    function _init(address substrate_, address governor_, address repToken_) private {
         substrate = ISubstrateAnchor(substrate_);
         governor = IOptionGovernor(governor_);
         repToken = IPastVotes(repToken_);
+        proposers = 3;
+        maxOptions = 8;
+        openAfterAttempts = 2;
     }
 
     modifier onlyTimelock() {

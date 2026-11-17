@@ -1,0 +1,963 @@
+[
+ {
+  "label": "_nameFallback",
+  "slot": "0",
+  "offset": 0,
+  "type": {
+   "label": "string",
+   "bytes": "32",
+   "encoding": "bytes"
+  }
+ },
+ {
+  "label": "_versionFallback",
+  "slot": "1",
+  "offset": 0,
+  "type": {
+   "label": "string",
+   "bytes": "32",
+   "encoding": "bytes"
+  }
+ },
+ {
+  "label": "anchors",
+  "slot": "2",
+  "offset": 0,
+  "type": {
+   "label": "struct Substrate.Anchor[]",
+   "bytes": "32",
+   "encoding": "dynamic_array",
+   "base": {
+    "label": "struct Substrate.Anchor",
+    "bytes": "448",
+    "encoding": "inplace",
+    "members": [
+     {
+      "label": "epochId",
+      "slot": "0",
+      "offset": 0,
+      "type": {
+       "label": "string",
+       "bytes": "32",
+       "encoding": "bytes"
+      }
+     },
+     {
+      "label": "epochRoot",
+      "slot": "1",
+      "offset": 0,
+      "type": {
+       "label": "bytes32",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "prevEpochRoot",
+      "slot": "2",
+      "offset": 0,
+      "type": {
+       "label": "bytes32",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "prevAnchorHash",
+      "slot": "3",
+      "offset": 0,
+      "type": {
+       "label": "bytes32",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "agentMintCid",
+      "slot": "4",
+      "offset": 0,
+      "type": {
+       "label": "string",
+       "bytes": "32",
+       "encoding": "bytes"
+      }
+     },
+     {
+      "label": "payloadHash",
+      "slot": "5",
+      "offset": 0,
+      "type": {
+       "label": "bytes32",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "submitter",
+      "slot": "6",
+      "offset": 0,
+      "type": {
+       "label": "address",
+       "bytes": "20",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "blockNumber",
+      "slot": "7",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "timestamp",
+      "slot": "8",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "agentMintRoot",
+      "slot": "9",
+      "offset": 0,
+      "type": {
+       "label": "bytes32",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "windowBurned",
+      "slot": "10",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "mintPool",
+      "slot": "11",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "minted",
+      "slot": "12",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "cutoff",
+      "slot": "13",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     }
+    ]
+   }
+  }
+ },
+ {
+  "label": "anchorIndexByEpochId",
+  "slot": "3",
+  "offset": 0,
+  "type": {
+   "label": "mapping(string => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "string",
+    "bytes": "32",
+    "encoding": "bytes"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "epochIdByHash",
+  "slot": "4",
+  "offset": 0,
+  "type": {
+   "label": "mapping(bytes32 => string)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "bytes32",
+    "bytes": "32",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "string",
+    "bytes": "32",
+    "encoding": "bytes"
+   }
+  }
+ },
+ {
+  "label": "latestAnchorHash",
+  "slot": "5",
+  "offset": 0,
+  "type": {
+   "label": "bytes32",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "latestEpochRoot",
+  "slot": "6",
+  "offset": 0,
+  "type": {
+   "label": "bytes32",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "deployedAt",
+  "slot": "7",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "anchorer",
+  "slot": "8",
+  "offset": 0,
+  "type": {
+   "label": "address",
+   "bytes": "20",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "latestCutoff",
+  "slot": "9",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "_burnedHistory",
+  "slot": "10",
+  "offset": 0,
+  "type": {
+   "label": "struct Checkpoints.Trace208",
+   "bytes": "32",
+   "encoding": "inplace",
+   "members": [
+    {
+     "label": "_checkpoints",
+     "slot": "0",
+     "offset": 0,
+     "type": {
+      "label": "struct Checkpoints.Checkpoint208[]",
+      "bytes": "32",
+      "encoding": "dynamic_array",
+      "base": {
+       "label": "struct Checkpoints.Checkpoint208",
+       "bytes": "32",
+       "encoding": "inplace",
+       "members": [
+        {
+         "label": "_key",
+         "slot": "0",
+         "offset": 0,
+         "type": {
+          "label": "uint48",
+          "bytes": "6",
+          "encoding": "inplace"
+         }
+        },
+        {
+         "label": "_value",
+         "slot": "0",
+         "offset": 6,
+         "type": {
+          "label": "uint208",
+          "bytes": "26",
+          "encoding": "inplace"
+         }
+        }
+       ]
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "label": "totalBurned",
+  "slot": "11",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "burnedAtLatestCutoff",
+  "slot": "12",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "agents",
+  "slot": "13",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => struct Substrate.Agent)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "struct Substrate.Agent",
+    "bytes": "128",
+    "encoding": "inplace",
+    "members": [
+     {
+      "label": "registeredAt",
+      "slot": "0",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "active",
+      "slot": "1",
+      "offset": 0,
+      "type": {
+       "label": "bool",
+       "bytes": "1",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "totalTrainingMint",
+      "slot": "2",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     },
+     {
+      "label": "trainingSubmissionCount",
+      "slot": "3",
+      "offset": 0,
+      "type": {
+       "label": "uint256",
+       "bytes": "32",
+       "encoding": "inplace"
+      }
+     }
+    ]
+   }
+  }
+ },
+ {
+  "label": "registeredAgentList",
+  "slot": "14",
+  "offset": 0,
+  "type": {
+   "label": "address[]",
+   "bytes": "32",
+   "encoding": "dynamic_array",
+   "base": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "agentPeerId",
+  "slot": "15",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => bytes)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "bytes",
+    "bytes": "32",
+    "encoding": "bytes"
+   }
+  }
+ },
+ {
+  "label": "agentEndpoint",
+  "slot": "16",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => string)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "string",
+    "bytes": "32",
+    "encoding": "bytes"
+   }
+  }
+ },
+ {
+  "label": "agentOwner",
+  "slot": "17",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => address)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "agentParent",
+  "slot": "18",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => address)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "bindingNonce",
+  "slot": "19",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "agentDepth",
+  "slot": "20",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "toolAuthor",
+  "slot": "21",
+  "offset": 0,
+  "type": {
+   "label": "mapping(bytes32 => address)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "bytes32",
+    "bytes": "32",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "toolRegisteredAt",
+  "slot": "22",
+  "offset": 0,
+  "type": {
+   "label": "mapping(bytes32 => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "bytes32",
+    "bytes": "32",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "toolCountByAgent",
+  "slot": "23",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "mintForEpoch",
+  "slot": "24",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => mapping(bytes32 => uint256))",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "mapping(bytes32 => uint256)",
+    "bytes": "32",
+    "encoding": "mapping",
+    "key": {
+     "label": "bytes32",
+     "bytes": "32",
+     "encoding": "inplace"
+    },
+    "value": {
+     "label": "uint256",
+     "bytes": "32",
+     "encoding": "inplace"
+    }
+   }
+  }
+ },
+ {
+  "label": "agentMintTotal",
+  "slot": "25",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "networkMintTotal",
+  "slot": "26",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "mintPoolTotal",
+  "slot": "27",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "genesisRoot",
+  "slot": "28",
+  "offset": 0,
+  "type": {
+   "label": "bytes32",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "genesisClaimed",
+  "slot": "29",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => bool)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "bool",
+    "bytes": "1",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "genesisMinted",
+  "slot": "30",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "name",
+  "slot": "31",
+  "offset": 0,
+  "type": {
+   "label": "string",
+   "bytes": "32",
+   "encoding": "bytes"
+  }
+ },
+ {
+  "label": "symbol",
+  "slot": "32",
+  "offset": 0,
+  "type": {
+   "label": "string",
+   "bytes": "32",
+   "encoding": "bytes"
+  }
+ },
+ {
+  "label": "_atnBalance",
+  "slot": "33",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "_atnAllowance",
+  "slot": "34",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => mapping(address => uint256))",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "mapping(address => uint256)",
+    "bytes": "32",
+    "encoding": "mapping",
+    "key": {
+     "label": "address",
+     "bytes": "20",
+     "encoding": "inplace"
+    },
+    "value": {
+     "label": "uint256",
+     "bytes": "32",
+     "encoding": "inplace"
+    }
+   }
+  }
+ },
+ {
+  "label": "atnTotalSupply",
+  "slot": "35",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "_atnBalanceHistory",
+  "slot": "36",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => struct Checkpoints.Trace208)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "struct Checkpoints.Trace208",
+    "bytes": "32",
+    "encoding": "inplace",
+    "members": [
+     {
+      "label": "_checkpoints",
+      "slot": "0",
+      "offset": 0,
+      "type": {
+       "label": "struct Checkpoints.Checkpoint208[]",
+       "bytes": "32",
+       "encoding": "dynamic_array",
+       "base": {
+        "label": "struct Checkpoints.Checkpoint208",
+        "bytes": "32",
+        "encoding": "inplace",
+        "members": [
+         {
+          "label": "_key",
+          "slot": "0",
+          "offset": 0,
+          "type": {
+           "label": "uint48",
+           "bytes": "6",
+           "encoding": "inplace"
+          }
+         },
+         {
+          "label": "_value",
+          "slot": "0",
+          "offset": 6,
+          "type": {
+           "label": "uint208",
+           "bytes": "26",
+           "encoding": "inplace"
+          }
+         }
+        ]
+       }
+      }
+     }
+    ]
+   }
+  }
+ },
+ {
+  "label": "_atnSupplyHistory",
+  "slot": "37",
+  "offset": 0,
+  "type": {
+   "label": "struct Checkpoints.Trace208",
+   "bytes": "32",
+   "encoding": "inplace",
+   "members": [
+    {
+     "label": "_checkpoints",
+     "slot": "0",
+     "offset": 0,
+     "type": {
+      "label": "struct Checkpoints.Checkpoint208[]",
+      "bytes": "32",
+      "encoding": "dynamic_array",
+      "base": {
+       "label": "struct Checkpoints.Checkpoint208",
+       "bytes": "32",
+       "encoding": "inplace",
+       "members": [
+        {
+         "label": "_key",
+         "slot": "0",
+         "offset": 0,
+         "type": {
+          "label": "uint48",
+          "bytes": "6",
+          "encoding": "inplace"
+         }
+        },
+        {
+         "label": "_value",
+         "slot": "0",
+         "offset": 6,
+         "type": {
+          "label": "uint208",
+          "bytes": "26",
+          "encoding": "inplace"
+         }
+        }
+       ]
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "label": "serviceFeeBps",
+  "slot": "38",
+  "offset": 0,
+  "type": {
+   "label": "uint16",
+   "bytes": "2",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "feeTreasuryBps",
+  "slot": "38",
+  "offset": 2,
+  "type": {
+   "label": "uint16",
+   "bytes": "2",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "treasury",
+  "slot": "38",
+  "offset": 4,
+  "type": {
+   "label": "address",
+   "bytes": "20",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "governor",
+  "slot": "39",
+  "offset": 0,
+  "type": {
+   "label": "address",
+   "bytes": "20",
+   "encoding": "inplace"
+  }
+ },
+ {
+  "label": "serviceEarnings",
+  "slot": "40",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "vaultMinter",
+  "slot": "41",
+  "offset": 0,
+  "type": {
+   "label": "address",
+   "bytes": "20",
+   "encoding": "inplace"
+  }
+ }
+]

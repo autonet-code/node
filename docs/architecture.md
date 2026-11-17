@@ -211,6 +211,16 @@ Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 **Chain.** In this repo (`contracts/core/`): `Substrate.sol` (ATN, epoch
 anchors, agent registry with owner binding, mint records, `payForService`
 with the burn, genesis claim), `AnchorElection.sol`, `ServiceMarket.sol`.
+Each jurisdiction's Substrate is an ERC-1967 proxy over one implementation
+deployed with the suite: its address is the jurisdiction's ATN for good,
+and only the DAO timelock can point it at new code (a constitutional
+proposal), which keeps every balance, anchor and registration. A later
+version may only add state (`test/storage_layout.test.js` holds the layout
+of record). AnchorElection, ServiceRegistry and PaymentChannel are
+EIP-1167 clones, replaced by attaching a new version of the module. All
+four are set up by `initialize` in the transaction that creates them; a
+directly deployed one (local chains, tests) is set up by its constructor
+with the same arguments.
 In `C:\code\dao\trustless-contracts` (dao owns it; coordinate through
 `chat.txt`): governor + timelock, Registry (every parameter lives here),
 RepToken, AutonetRepClaim, ToolBond, AutonetVault, and the AutonetSetup

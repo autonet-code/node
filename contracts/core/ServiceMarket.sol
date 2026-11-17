@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 
 /// @title ServiceMarket — decentralized monetizable APIs (services_market.md)
 ///
@@ -63,8 +64,10 @@ interface ISubstrate {
 // ServiceRegistry
 // =============================================================================
 
-contract ServiceRegistry {
-    ISubstrate public immutable substrate;
+contract ServiceRegistry is Initializable {
+    /// @notice The jurisdiction's Substrate. Set once at setup (the
+    ///         constructor, or initialize() on a clone); no setter.
+    ISubstrate public substrate;
 
     struct Service {
         address provider;      // the registered agent offering the service
@@ -99,7 +102,20 @@ contract ServiceRegistry {
     error NotServiceProvider();
     error ServiceNotActive();
 
-    constructor(address substrateAddr) {
+    /// @dev Sets up the instance it creates, so a directly deployed
+    ///      registry works as a plain contract and can never be initialized
+    ///      again; that also locks the implementation behind the clones.
+    constructor(address substrateAddr) initializer {
+        _init(substrateAddr);
+    }
+
+    /// @notice Set up a clone (EIP-1167): the constructor's argument. Once
+    ///         per clone, in the transaction that creates it.
+    function initialize(address substrateAddr) external initializer {
+        _init(substrateAddr);
+    }
+
+    function _init(address substrateAddr) private {
         require(substrateAddr != address(0), "substrate=0");
         substrate = ISubstrate(substrateAddr);
     }
@@ -250,12 +266,14 @@ contract ServiceRegistry {
 // needs no window: it collects in the same transaction and nothing can be
 // collected after it.
 
-contract PaymentChannel is ReentrancyGuard, EIP712 {
+contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
     using ECDSA for bytes32;
 
     /// @notice The ATN token / settlement contract (Substrate.sol). Deposits
     ///         are pulled here and payouts route through its payForService.
-    ISubstrate public immutable substrate;
+    ///         Set once at setup (the constructor, or initialize() on a
+    ///         clone); no setter.
+    ISubstrate public substrate;
 
     /// @notice Seconds after the client starts a close before its remainder
     ///         can be withdrawn, for channels opened from now on: the time
@@ -337,9 +355,30 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     error ZeroWindow();
     error NothingToSettle();
 
+    /// @dev Sets up the instance it creates, so a directly deployed channel
+    ///      contract works as a plain contract and can never be initialized
+    ///      again; that also locks the implementation behind the clones.
+    ///      The EIP-712 name and version are constants, so a clone's domain
+    ///      separator is computed for the clone's own address. A clone's
+    ///      reentrancy guard starts unset, which the guard treats as not
+    ///      entered.
     constructor(address substrateAddr, uint256 challengeWindow_)
         EIP712("AutonetPaymentChannel", "1")
+        initializer
     {
+        _init(substrateAddr, challengeWindow_);
+    }
+
+    /// @notice Set up a clone (EIP-1167): the constructor's arguments, in
+    ///         the same order. Once per clone, in the transaction that
+    ///         creates it.
+    function initialize(address substrateAddr, uint256 challengeWindow_)
+        external initializer
+    {
+        _init(substrateAddr, challengeWindow_);
+    }
+
+    function _init(address substrateAddr, uint256 challengeWindow_) private {
         require(substrateAddr != address(0), "substrate=0");
         require(challengeWindow_ > 0, "window=0");
         substrate = ISubstrate(substrateAddr);

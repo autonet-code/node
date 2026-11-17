@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title Substrate — chain surface for the world-model substrate.
 ///
@@ -71,19 +73,41 @@ import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol
 ///
 /// 3. Anytime: read ``agentMintTotal(address)`` for cumulative earnings
 ///    or ``mintForEpoch(address, bytes32)`` for per-epoch.
-contract Substrate is EIP712 {
+contract Substrate is EIP712, Initializable, UUPSUpgradeable {
     using ECDSA for bytes32;
+
+    // -------------------------------------------------------------------------
+    // Deployment: one implementation, one proxy per jurisdiction
+    //
+    // A jurisdiction's Substrate is an ERC-1967 proxy over an implementation
+    // deployed once, set up by initialize() in the transaction that creates
+    // the proxy. The proxy's address is the ATN token for the jurisdiction's
+    // whole life: its governor (the DAO timelock) can point it at new code
+    // (upgradeToAndCall), which keeps every balance, anchor, registration
+    // and earning. Nobody else can, and the values initialize() sets have
+    // no setter.
+    //
+    // The constructor takes the same arguments and sets up the instance it
+    // creates, so a Substrate deployed directly works as a plain contract
+    // (local chains, tests) and can never be initialized again: that is
+    // also what locks the implementation behind the proxies. A directly
+    // deployed Substrate cannot be upgraded (upgradeToAndCall only works
+    // through a proxy).
+    //
+    // The EIP-712 name and version are constants, so the domain separator
+    // of a proxy is computed for the proxy's own address.
+    // -------------------------------------------------------------------------
 
     /// @dev EIP712 domain: name + version. The domain separator folds in
     ///      chainId + this contract's address, so an owner-binding signature is
     ///      bound to THIS Substrate deployment on THIS chain — it cannot be
     ///      replayed against another Substrate instance or a fork.
     /// @param treasury_ The DAO treasury address receiving the treasury share
-    ///        of the service fee (see payForService). Immutable — there is
-    ///        no admin key to repoint it; changing it is a redeploy.
+    ///        of the service fee (see payForService). Set once, with no
+    ///        setter.
     /// @param vaultMinter_ The single privileged address (AutonetVault, from
     ///        the DAO repo) allowed to mint ATN for purchased funding via
-    ///        mintFromVault. Immutable — no admin key to repoint it.
+    ///        mintFromVault. Set once, with no setter.
     ///        Zero address = no vault: mintFromVault always reverts and the
     ///        purchased-money feature is off.
     /// @param governor_ The DAO timelock. The only address that may anchor
@@ -91,7 +115,8 @@ contract Substrate is EIP712 {
     ///        (setServiceFeeBps). Anchors arrive as ordinary DAO proposals
     ///        (Decision 2026-10-16), so the DAO's REP vote is the anchor
     ///        authority and the DAO can cancel a bad anchor in the timelock.
-    ///        Immutable and non-zero.
+    ///        Set once and non-zero. It is also the only address that may
+    ///        upgrade a proxied Substrate.
     /// @param anchorer_ The jurisdiction's AnchorElection, or address(0).
     ///        Set at construction so a jurisdiction launched in one go
     ///        (werule's JurisdictionFactory, which predicts the election's
@@ -100,7 +125,7 @@ contract Substrate is EIP712 {
     /// @param genesisRoot_ Merkle root of carried-over ATN balances for a
     ///        jurisdiction fork or split (see claimGenesis), or bytes32(0)
     ///        for a fresh network: zero means no genesis and every
-    ///        claimGenesis reverts. Immutable, no setter.
+    ///        claimGenesis reverts. Set once, no setter.
     constructor(
         address treasury_,
         address vaultMinter_,
@@ -113,7 +138,47 @@ contract Substrate is EIP712 {
         uint16 feeTreasuryBps_
     )
         EIP712("AutonetSubstrate", "1")
+        initializer
     {
+        _init(treasury_, vaultMinter_, governor_, anchorer_, genesisRoot_,
+              name_, symbol_, serviceFeeBps_, feeTreasuryBps_);
+    }
+
+    /// @notice Set up a proxy's Substrate: the constructor's arguments, in
+    ///         the same order. Once per proxy; reverts on an instance that
+    ///         was already set up (every directly deployed one is).
+    function initialize(
+        address treasury_,
+        address vaultMinter_,
+        address governor_,
+        address anchorer_,
+        bytes32 genesisRoot_,
+        string memory name_,
+        string memory symbol_,
+        uint16 serviceFeeBps_,
+        uint16 feeTreasuryBps_
+    ) external initializer {
+        _init(treasury_, vaultMinter_, governor_, anchorer_, genesisRoot_,
+              name_, symbol_, serviceFeeBps_, feeTreasuryBps_);
+    }
+
+    /// @dev Only the governor (the DAO timelock) may point a proxy at new
+    ///      code. The DAO treats that proposal as constitutional.
+    function _authorizeUpgrade(address) internal view override {
+        if (msg.sender != governor) revert NotGovernor();
+    }
+
+    function _init(
+        address treasury_,
+        address vaultMinter_,
+        address governor_,
+        address anchorer_,
+        bytes32 genesisRoot_,
+        string memory name_,
+        string memory symbol_,
+        uint16 serviceFeeBps_,
+        uint16 feeTreasuryBps_
+    ) private {
         if (governor_ == address(0)) revert NoAnchorAuthority();
         if (serviceFeeBps_ < MIN_SERVICE_FEE_BPS || serviceFeeBps_ > MAX_SERVICE_FEE_BPS) {
             revert FeeOutOfBounds(serviceFeeBps_);
@@ -213,7 +278,7 @@ contract Substrate is EIP712 {
     // =========================================================================
 
     /// @notice Deployment timestamp: the REP snapshot for the first anchor.
-    uint256 public immutable deployedAt;
+    uint256 public deployedAt;
 
     /// @notice The contract allowed to anchor besides the governor: the
     ///         jurisdiction's AnchorElection (Decision 2026-10-26). Set by
@@ -1031,7 +1096,7 @@ contract Substrate is EIP712 {
     // =========================================================================
 
     /// @notice Merkle root of genesis (address, amount) leaves; zero = none.
-    bytes32 public immutable genesisRoot;
+    bytes32 public genesisRoot;
 
     /// @notice Has this address claimed its genesis leaf?
     mapping(address => bool) public genesisClaimed;
@@ -1268,12 +1333,13 @@ contract Substrate is EIP712 {
     ///         the tool pool off.
     uint16 public constant MAX_FEE_TREASURY_BPS = 9000;
 
-    /// @notice DAO treasury (set at construction; no admin key to repoint).
-    address public immutable treasury;
+    /// @notice DAO treasury (set once at setup; no setter).
+    address public treasury;
 
-    /// @notice The single address (expected: DAO timelock) allowed to retune
-    ///         serviceFeeBps. Immutable; zero address = knob frozen.
-    address public immutable governor;
+    /// @notice The single address (the DAO timelock) allowed to retune
+    ///         serviceFeeBps, set the anchorer and upgrade a proxied
+    ///         Substrate. Set once at setup; no setter.
+    address public governor;
 
     /// @notice Emitted when the governor retunes the service fee.
     event ServiceFeeBpsSet(uint16 oldBps, uint16 newBps);
@@ -1328,15 +1394,15 @@ contract Substrate is EIP712 {
     // earned (Decision 2026-07-10).
     //
     // vaultMinter is the single privileged address (the AutonetVault
-    // contract, DAO repo) allowed to call mintFromVault. It is immutable — there is
-    // no admin key to repoint it; changing it is a redeploy. Zero address =
+    // contract, DAO repo) allowed to call mintFromVault. It is set once at
+    // setup and has no setter. Zero address =
     // no vault: the feature is off and mintFromVault always reverts.
     // -------------------------------------------------------------------------
 
     /// @notice The single address allowed to mint purchased ATN via
-    ///         mintFromVault (AutonetVault, DAO repo). Immutable;
+    ///         mintFromVault (AutonetVault, DAO repo). Set once at setup;
     ///         zero address = feature off.
-    address public immutable vaultMinter;
+    address public vaultMinter;
 
     /// @notice Emitted when the vault mints purchased ATN. Distinct from
     ///         ATNTransfer(address(0), ...) so indexers can separate
