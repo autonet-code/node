@@ -231,3 +231,31 @@ def reviewed_close(canonical, *, reviewer: str = REVIEWER,
     return federated_epoch_close(
         canonical, rep_shares={reviewer: rep_share},
         review_snapshot=review_snapshot(regs, reviewer), **kw)
+
+
+def deploy_homebase(w3: Web3, hb_art: dict, clone_maker_art: dict, deployer: str,
+                    token: str, timelock: str, *, voting_delay_min: int = 1,
+                    voting_period_min: int = 3, threshold: int = 1,
+                    quorum_pct: int = 4, supermajority_bps: int = 6667):
+    """A HomebaseDAO as a jurisdiction gets it (trustless-contracts): an
+    EIP-1167 clone of the implementation, set up by initialize, with
+    ``deployer`` as the launcher that approves option sources."""
+    def _deploy(art):
+        tx = w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"]).constructor(
+            ).transact({"from": deployer, "gas": 15_000_000})
+        return w3.eth.wait_for_transaction_receipt(tx).contractAddress
+
+    impl = _deploy(hb_art)
+    maker = w3.eth.contract(address=_deploy(clone_maker_art),
+                            abi=clone_maker_art["abi"])
+    clone = maker.functions.clone(impl).call({"from": deployer})
+    r = w3.eth.wait_for_transaction_receipt(
+        maker.functions.clone(impl).transact({"from": deployer, "gas": 1_000_000}))
+    assert r.status == 1
+    gov = w3.eth.contract(address=clone, abi=hb_art["abi"])
+    r = w3.eth.wait_for_transaction_receipt(gov.functions.initialize(
+        token, timelock, "Test DAO", voting_delay_min, voting_period_min,
+        threshold, quorum_pct, deployer, supermajority_bps,
+    ).transact({"from": deployer, "gas": 3_000_000}))
+    assert r.status == 1
+    return gov

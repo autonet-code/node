@@ -43,11 +43,12 @@ from nodes.common.anchored_state import fetch_carry_over_from_chain
 from nodes.common.voice_state import _anchor_cutoff, read_voice_state
 from tests.substrate_chain_helpers import (
     account_key,
+    deploy_homebase,
     deploy_substrate,
     register_bound,
 )
 from tests.test_election_anchor import (
-    GOV, HOMEBASE, REP, ROOT, _artifact, _deploy, _next_address, _travel, _tx,
+    CLONE_MAKER, GOV, HOMEBASE, REP, ROOT, _artifact, _deploy, _next_address, _travel, _tx,
 )
 
 RPB = "rpb-e2e"
@@ -128,10 +129,9 @@ def _build_net(tmp_path, households: bool = False):
     daemon's operator key; agents hold no REP. Otherwise every agent holds
     and self-delegates REP (the pre-decision shape)."""
     hb = _artifact(HOMEBASE)
-    names = [i["name"] for i in next(
-        f for f in hb["abi"] if f.get("type") == "constructor")["inputs"]]
-    if "_launcher" not in names:
-        pytest.skip("HomebaseDAO artifact predates the options launcher")
+    if not any(f.get("name") == "initialize" for f in hb["abi"]):
+        pytest.skip("HomebaseDAO artifact predates the cloned core")
+    maker_art = _artifact(CLONE_MAKER)
     rep_art = _artifact(GOV / "TestRepVotes.json")
     if not any(f.get("name") == "getPastBalance" for f in rep_art["abi"]):
         pytest.skip("TestRepVotes artifact predates getPastBalance")
@@ -153,8 +153,8 @@ def _build_net(tmp_path, households: bool = False):
             _tx(w3, rep.functions.mint(a, REP), deployer)
             _tx(w3, rep.functions.delegate(a), a)
     timelock = _deploy(w3, tl_art, 0, [], ["0x" + "00" * 20], deployer)
-    gov = _deploy(w3, hb, rep.address, timelock.address, "Test DAO",
-                  1, 3, 0, 4, deployer, 6667)
+    gov = deploy_homebase(w3, hb, maker_art, deployer, rep.address,
+                          timelock.address)
     election_addr = _next_address(w3, deployer, ahead=1)
     sub_addr = deploy_substrate(w3, sub_art["abi"], sub_art["bytecode"],
                                 deployer, governor=timelock.address,

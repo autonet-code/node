@@ -26,6 +26,7 @@ from nodes.common.anchor_election import ElectionAnchorer, epoch_number_of
 from nodes.common.governed_anchor import Voter
 from tests.substrate_chain_helpers import (
     account_key,
+    deploy_homebase,
     deploy_substrate,
     register_bound,
 )
@@ -33,6 +34,7 @@ from tests.substrate_chain_helpers import (
 ROOT = Path(__file__).resolve().parent.parent / "artifacts" / "contracts"
 GOV = ROOT / "test" / "AnchorTestGovernance.sol"
 HOMEBASE = Path("C:/code/dao/trustless-contracts/artifacts/contracts/Dao.sol/HomebaseDAO.json")
+CLONE_MAKER = Path("C:/code/dao/trustless-contracts/artifacts/contracts/CloneMaker.sol/CloneMaker.json")
 REP = 1000 * 10 ** 18
 
 
@@ -72,10 +74,9 @@ def _next_address(w3, sender: str, ahead: int = 0) -> str:
 @pytest.fixture
 def stack():
     hb = _artifact(HOMEBASE)
-    names = [i["name"] for i in next(
-        f for f in hb["abi"] if f.get("type") == "constructor")["inputs"]]
-    if "_launcher" not in names:
-        pytest.skip("HomebaseDAO artifact predates the options launcher")
+    if not any(f.get("name") == "initialize" for f in hb["abi"]):
+        pytest.skip("HomebaseDAO artifact predates the cloned core")
+    maker_art = _artifact(CLONE_MAKER)
     rep_art = _artifact(GOV / "TestRepVotes.json")
     tl_art = _artifact(GOV / "TestTimelock.json")
     sub_art = _artifact(ROOT / "core" / "Substrate.sol" / "Substrate.json")
@@ -90,9 +91,9 @@ def stack():
         _tx(w3, rep.functions.mint(a, REP), deployer)
         _tx(w3, rep.functions.delegate(a), a)
     timelock = _deploy(w3, tl_art, 0, [], ["0x" + "00" * 20], deployer)
-    # 1 minute voting delay, 3 minutes voting, threshold 0, quorum 4%.
-    governor = _deploy(w3, hb, rep.address, timelock.address, "Test DAO",
-                       1, 3, 0, 4, deployer, 6667)
+    # 1 minute voting delay, 3 minutes voting, threshold 1 unit, quorum 4%.
+    governor = deploy_homebase(w3, hb, maker_art, deployer, rep.address,
+                               timelock.address)
 
     # Substrate takes the election's address before it exists.
     election_addr = _next_address(w3, deployer, ahead=1)
