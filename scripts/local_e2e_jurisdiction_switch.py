@@ -8,7 +8,7 @@ B, through trustless-contracts' own deploy path (scripts/lib/modules.js
 AutonetSetup.prepareInstallation + JurisdictionFactory.finalize, the steps
 scripts/deploy-autonet-jurisdiction.js takes). Each DAO's Registry carries
 the jurisdiction.autonet.* keys (substrate, rep_token, tool_bond, dao,
-timelock, registry, the compact v1 charter, epoch_rules "1"), and the owner
+timelock, registry, the compact v1 charter, epoch_rules "2"), and the owner
 wallet holds genesis REP in both.
 
 Then it drives the DAEMON code paths against them, one data dir throughout,
@@ -25,7 +25,7 @@ a fresh ``Runtime`` standing in for each restart:
   5. register the root agent in B too;
   6. switch back to A: registered again with A's original tx, the adopted
      tool visible again, A's world dir is the one stage 2 created;
-  7. refused jurisdictions (epoch rules "2"; a Registry without tool_bond):
+  7. refused jurisdictions (epoch rules "1"; a Registry without tool_bond):
      the WS handler refuses each, naming the problem, selection unchanged;
   8. teardown.
 
@@ -119,11 +119,10 @@ async function main() {
   const autonetSetup = s.setups.autonet;
   const charterUi = (name) => metadata("autonet", "build").pluginSetup.prepareInstallation.inputs
     .find((i) => i.name === "substrate").components.find((c) => c.name === name)["x-ui"];
-  // ToolBond Params (trustless-contracts 448023a: staked epoch reviews).
+  // ToolBond Params, as trustless-contracts' deploy-autonet-jurisdiction.js.
   const bondParams = {
     minStake: 100_000_000n, revealWindow: 86400n, degradeBps: 1000n,
     authorSlashBps: 10000n, unbondDelay: 30n * 86400n, reviewerShareBps: 4000n,
-    appealPeriod: 10n * 86400n, harmWeightBps: 20000n,
   };
   async function launch(name, epochRules) {
     const params = {
@@ -137,7 +136,8 @@ async function main() {
     const core = { registry: c.registry, timelock: c.timelock, token: c.token, governor: c.governor };
     const autonet = await prepare(autonetSetup, deployer, core, "autonet", {
       substrate: { challengeWindow: 3600n, charter: charterUi("charter").default,
-                   epochRules: epochRules ?? charterUi("epochRules").fixed },
+                   epochRules: epochRules ?? charterUi("epochRules").fixed,
+                   genesisRoot: ethers.ZeroHash, serviceFeeBps: 250n, feeTreasuryBps: 5000n },
       toolBond: bondParams });
     const d = await autonetSetup.deploymentOf(autonet.id);
     await (await factory.finalize(core, [{ setup: await autonetSetup.getAddress(), id: autonet.id }],
@@ -147,12 +147,20 @@ async function main() {
              vault: d.vault, charter: d.charter, epoch_rules: d.epochRules };
   }
   const out = { A: await launch("Autonet A"), B: await launch("Autonet B"),
-                C: await launch("Autonet C", "2") };
+                C: await launch("Autonet C", "1") };
 
   // D: a Registry that names every address except tool_bond (written by
   // its owner, the deployer; no factory path produces such a DAO).
-  const reg = await (await ethers.getContractFactory("Registry")).deploy(deployer.address, ethers.ZeroAddress);
-  await reg.waitForDeployment();
+  // A Registry is a clone of the suite's implementation, set up in the
+  // same transaction.
+  const Registry = await ethers.getContractFactory("Registry");
+  const maker = await (await ethers.getContractFactory("CloneMaker")).deploy();
+  await maker.waitForDeployment();
+  const init = Registry.interface.encodeFunctionData("initialize", [deployer.address, ethers.ZeroAddress]);
+  const regImpl = await s.registryImplementation.getAddress();
+  const regAddr = await maker.cloneAndCall.staticCall(regImpl, init);
+  await (await maker.cloneAndCall(regImpl, init)).wait();
+  const reg = Registry.attach(regAddr);
   const src = await ethers.getContractAt("Registry", out.A.registry);
   const keys = await src.getAllKeys(), values = await src.getAllValues();
   const k2 = [], v2 = [];
@@ -252,9 +260,8 @@ def build_scratch_project() -> None:
     _copy_tree(DAO_DIR / "modules", SCRATCH / "modules")
     _copy_tree(DAO_DIR / "test" / "fixtures" / "autonet",
                SCRATCH / "test" / "fixtures" / "autonet")
-    (SCRATCH / "scripts" / "lib").mkdir(parents=True)
-    shutil.copy2(DAO_DIR / "scripts" / "lib" / "modules.js",
-                 SCRATCH / "scripts" / "lib" / "modules.js")
+    # The whole lib folder: modules.js requires its neighbours (verify.js).
+    _copy_tree(DAO_DIR / "scripts" / "lib", SCRATCH / "scripts" / "lib")
     (SCRATCH / "scripts" / "e2e_deploy.js").write_text(DEPLOY_JS, encoding="utf-8")
     (SCRATCH / "hardhat.config.js").write_text(HARDHAT_CONFIG, encoding="utf-8")
     pkg = SCRATCH / "package.json"
@@ -564,7 +571,7 @@ async def amain() -> int:
                             ("timelock", d["timelock"]), ("registry", d["registry"])):
                 check(keys.get(p + k, "").lower() == want.lower(), f"{name}: {p}{k}")
             check(keys.get(p + "charter") == v1, f"{name}: charter = compact v1 CHARTER JSON")
-            check(keys.get(p + "epoch_rules") == "1", f"{name}: epoch_rules = 1")
+            check(keys.get(p + "epoch_rules") == "2", f"{name}: epoch_rules = 2")
             rep = w3.eth.contract(address=d["rep_token"], abi=ERC20_ABI)
             check(rep.functions.balanceOf(owner).call() == GENESIS_REP * E18,
                   f"{name}: owner wallet holds {GENESIS_REP} genesis REP")
@@ -815,7 +822,7 @@ async def amain() -> int:
     log("Stage 7: refused jurisdictions")
     try:
         sel_path = root / "data" / "jurisdiction.json"
-        for name, needle in (("C", "epoch rules version 2"), ("D", "tool_bond")):
+        for name, needle in (("C", "epoch rules version 1"), ("D", "tool_bond")):
             before = sel_path.read_text(encoding="utf-8")
             resp = await ws_call(rt, {"type": "autonet_switch",
                                       "dao_registry": daos[name]["registry"],
