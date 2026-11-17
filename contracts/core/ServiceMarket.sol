@@ -150,7 +150,7 @@ contract ServiceRegistry is Initializable {
     function updateServiceAsk(
         uint256 serviceId,
         uint256 askAmount
-    ) external {
+    ) external onlyAgent {
         Service storage s = services[serviceId];
         if (s.provider == address(0)) revert NoSuchService();
         if (s.provider != msg.sender) revert NotServiceProvider();

@@ -672,6 +672,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
     error ParentNotRegistered();
     error ParentOwnerMismatch();
     error FleetTooDeep();
+    error FleetCycle();
     error BadRevokeSignature();
 
     /// @notice EIP-712 digest the owner wallet signs to bind an agent.
@@ -718,8 +719,17 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
             if (agents[parentAgent].registeredAt == 0) revert ParentNotRegistered();
             if (!isLive(parentAgent)) revert AgentNotActive();
             if (agentOwner[parentAgent] != owner) revert ParentOwnerMismatch();
-            depth = agentDepth[parentAgent] + 1;
-            if (depth > MAX_FLEET_DEPTH) revert FleetTooDeep();
+            // The parent's depth is counted by walking up from it, never
+            // read from agentDepth: a rotation re-parents one agent and
+            // leaves its descendants' recorded depths stale. The walk also
+            // refuses a cycle (binding under one's own descendant).
+            address a = parentAgent;
+            while (a != address(0)) {
+                if (a == msg.sender) revert FleetCycle();
+                depth += 1;
+                if (depth > MAX_FLEET_DEPTH) revert FleetTooDeep();
+                a = agentParent[a];
+            }
         }
 
         // Recover the signature over (this agent, parent, current nonce).
@@ -826,6 +836,11 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
 
     /// @notice True iff `agent` is registered, not revoked, and has no
     ///         revoked ancestor. The gate for every agent action.
+    ///         An agent whose chain of parents does not end within
+    ///         MAX_FLEET_DEPTH steps is NOT live: a chain that long can only
+    ///         come from re-parenting an agent that already had descendants,
+    ///         and a revoked ancestor beyond the walk must never be missed.
+    ///         Re-parenting that agent higher brings its descendants back.
     function isLive(address agent) public view returns (bool) {
         if (agents[agent].registeredAt == 0) return false;
         address a = agent;
@@ -834,7 +849,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
             a = agentParent[a];
             if (a == address(0)) return true;
         }
-        return true;
+        return false;
     }
 
     /// @notice Read an agent's owner wallet (address(0) = unset).

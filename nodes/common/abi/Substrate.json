@@ -224,6 +224,11 @@
   },
   {
    "inputs": [],
+   "name": "FleetCycle",
+   "type": "error"
+  },
+  {
+   "inputs": [],
    "name": "FleetTooDeep",
    "type": "error"
   },

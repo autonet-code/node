@@ -399,7 +399,9 @@ contract AnchorElection is Initializable {
                        uint256 maxOptions_, uint256 openAfterAttempts_)
         external onlyTimelock
     {
-        if (proposers_ == 0 || maxOptions_ == 0 || maxOptions_ > 256
+        // A vote names its option in a uint8 and index 0 is reject, so at
+        // most 255 registered options can be voted for.
+        if (proposers_ == 0 || maxOptions_ == 0 || maxOptions_ > 255
                 || proposerFloorPpm_ > PPM) {
             revert BadParams();
         }
