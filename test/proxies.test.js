@@ -179,7 +179,7 @@ describe("AnchorElection, ServiceRegistry and PaymentChannel as clones", functio
     expect(await clone.proposers()).to.equal(3n);
     expect(await clone.proposerFloorPpm()).to.equal(0n);
     expect(await clone.maxOptions()).to.equal(8n);
-    expect(await clone.openAfterAttempts()).to.equal(2n);
+    expect(await clone.openAfterAttempts()).to.equal(16n);
     await expect(clone.initialize(sub, stranger.address, stranger.address))
       .to.be.revertedWithCustomError(clone, "InvalidInitialization");
     await expect(impl.initialize(sub, stranger.address, stranger.address))
