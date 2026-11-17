@@ -301,10 +301,15 @@ contract AnchorElection is Initializable {
             // landed yet (Succeeded or Queued).
             uint256 parentAttempts = attemptsOpened[anchored + 1];
             if (parentAttempts == 0) revert EpochNotOpenable(epochNumber);
-            uint8 ps = governor.state(proposalIdOf(anchored + 1, parentAttempts - 1));
+            uint256 parent = proposalIdOf(anchored + 1, parentAttempts - 1);
+            uint8 ps = governor.state(parent);
             if (ps != SUCCEEDED_STATE && ps != QUEUED_STATE) {
                 revert EpochNotOpenable(epochNumber);
             }
+            // A vote that reject won also reads as Succeeded: it leaves no
+            // winner for the next epoch to build on.
+            (, uint256 winner) = governor.winningOption(parent);
+            if (winner == 0) revert EpochNotOpenable(epochNumber);
         }
         uint256 attempt = attemptsOpened[epochNumber];
         if (attempt > 0) {

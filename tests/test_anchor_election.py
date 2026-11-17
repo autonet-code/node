@@ -183,7 +183,8 @@ def test_next_election_waits_for_the_previous_anchor(env):
     a0 = env["agents"][0]
     _give_rep(env, a0, 1000)
     # Epoch 2 opens once epoch 1's election has a winner waiting to land.
-    _open(env, 1, state=4)
+    pid1 = _open(env, 1, state=4)
+    _send(w3, gov.functions.setWinner(pid1, True, 1), env["acc"][0])
     pid2 = _open(env, 2)
     assert _send(w3, el.functions.registerOption(2, 0, _option(env, "x")),
                  a0).status == 1
@@ -369,6 +370,10 @@ def test_open_allows_one_epoch_ahead_only_once_the_parent_has_a_winner(env):
         _set_state(env, pid1, not_decided)
         assert _reverts(w3, el.functions.open(2), a0)
     _set_state(env, pid1, SUCCEEDED)
+    # Reject won (index 0): decided, but there is no winner to build on.
+    _send(w3, env["gov"].functions.setWinner(pid1, True, 0), env["acc"][0])
+    assert _reverts(w3, el.functions.open(2), a0)
+    _send(w3, env["gov"].functions.setWinner(pid1, True, 1), env["acc"][0])
     assert _reverts(w3, el.functions.open(3), a0)
     assert _send(w3, el.functions.open(2), a0).status == 1
     assert _reverts(w3, el.functions.open(3), a0)
