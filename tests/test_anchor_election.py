@@ -83,9 +83,17 @@ def _ts(w3) -> int:
 
 
 def _open(env, epoch, attempt=0, state=PENDING):
-    """Create the election's proposal in the mock, created at the head
-    block (so REP set before it counts)."""
+    """Open the epoch's election up to `attempt` through the contract (an
+    earlier attempt is ended as Defeated first), then set the proposal's
+    state and its snapshot at the head block (so REP set before it counts)."""
     w3, gov, el = env["w3"], env["gov"], env["el"]
+    opener = env["agents"][0]
+    while el.functions.attemptsOpened(epoch).call() <= attempt:
+        opened = el.functions.attemptsOpened(epoch).call()
+        if opened:
+            prev = el.functions.proposalIdOf(epoch, opened - 1).call()
+            _send(w3, gov.functions.setProposal(prev, 3, _ts(w3)), env["acc"][0])
+        assert _send(w3, el.functions.open(epoch), opener).status == 1
     pid = el.functions.proposalIdOf(epoch, attempt).call()
     _send(w3, gov.functions.setProposal(pid, state, _ts(w3) + 10),
           env["acc"][0])
@@ -174,6 +182,8 @@ def test_next_election_waits_for_the_previous_anchor(env):
     w3, el, gov = env["w3"], env["el"], env["gov"]
     a0 = env["agents"][0]
     _give_rep(env, a0, 1000)
+    # Epoch 2 opens once epoch 1's election has a winner waiting to land.
+    _open(env, 1, state=4)
     pid2 = _open(env, 2)
     assert _send(w3, el.functions.registerOption(2, 0, _option(env, "x")),
                  a0).status == 1
@@ -307,15 +317,22 @@ def test_open_numbers_the_next_attempt_itself_once_the_latest_ended(env):
     assert gov.functions.proposeCount().call() == 5
 
 
-def test_open_allows_the_epoch_after_an_open_one_but_no_further(env):
-    """Closes are pipelined: epoch 2's election may run before epoch 1's
-    winner lands, but an epoch whose parent has no election cannot open."""
+def test_open_allows_one_epoch_ahead_only_once_the_parent_has_a_winner(env):
+    """Closes are pipelined: epoch 2's election may run while epoch 1's
+    winner sits in the timelock. Not before epoch 1 has a winner, and never
+    further ahead, so attempts of future epochs cannot be used up."""
     w3, el = env["w3"], env["el"]
     a0 = env["agents"][0]
+    assert _reverts(w3, el.functions.open(2), a0)
     _send(w3, el.functions.open(1), a0)
+    pid1 = el.functions.proposalIdOf(1, 0).call()
+    for not_decided in (PENDING, ACTIVE, DEFEATED, CANCELED):
+        _set_state(env, pid1, not_decided)
+        assert _reverts(w3, el.functions.open(2), a0)
+    _set_state(env, pid1, SUCCEEDED)
     assert _reverts(w3, el.functions.open(3), a0)
     assert _send(w3, el.functions.open(2), a0).status == 1
-    assert _send(w3, el.functions.open(3), a0).status == 1
+    assert _reverts(w3, el.functions.open(3), a0)
     assert _reverts(w3, el.functions.open(5), a0)
     # Epoch 2 is not next to anchor, so a queued attempt of it never counts
     # as stuck: it is waiting for epoch 1.
@@ -364,3 +381,32 @@ def test_an_anchored_epoch_cannot_be_opened_again(env):
     _set_state(env, pid, EXECUTED)
     assert _reverts(w3, el.functions.open(1), a0)
     assert _send(w3, el.functions.open(2), a0).status == 1
+
+
+def test_an_attempts_id_cannot_be_known_before_it_is_opened(env):
+    """The description, and so the proposal id, is written by open() with
+    the opening block's timestamp and randomness: nobody can propose that
+    id first. Options and anchoring exist only for opened attempts."""
+    w3, el, gov = env["w3"], env["el"], env["gov"]
+    a0 = env["agents"][0]
+    _give_rep(env, a0, 1000)
+    assert el.functions.descriptionOf(1, 0).call() == ""
+    unopened = el.functions.proposalIdOf(1, 0).call()
+    # Someone holds a proposal under the unopened attempt's would-be id.
+    _send(w3, gov.functions.setProposal(unopened, PENDING, _ts(w3) - 1),
+          env["acc"][0])
+    assert _reverts(w3, el.functions.registerOption(1, 0, _option(env, "x")), a0)
+    call = el.encode_abi("anchorWinner", args=[1, 0])
+    _send(w3, gov.functions.setWinner(unopened, True, 1), env["acc"][0])
+    assert _reverts(w3, gov.functions.exec(el.address, call), env["acc"][0])
+
+    assert _send(w3, el.functions.open(1), a0).status == 1
+    desc = el.functions.descriptionOf(1, 0).call()
+    assert desc.startswith("Anchor election: epoch 1, attempt 0, opened ")
+    opened = el.functions.proposalIdOf(1, 0).call()
+    assert opened != unopened
+    assert gov.functions.proposerOf(opened).call() == el.address
+    # A second attempt gets its own description.
+    _set_state(env, opened, DEFEATED)
+    assert _send(w3, el.functions.open(1), a0).status == 1
+    assert el.functions.descriptionOf(1, 1).call() != desc

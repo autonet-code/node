@@ -111,12 +111,15 @@ contract AnchorElection is Initializable {
     /// @notice How many attempts were opened for an epoch's election. The
     ///         live (or latest) one is attemptsOpened - 1.
     mapping(uint256 => uint256) public attemptsOpened;
+    /// @dev epoch => attempt => the proposal description open() wrote.
+    mapping(uint256 => mapping(uint256 => string)) private _descriptions;
     /// @notice When this contract last anchored a winner.
     uint256 public lastAnchoredAt;
 
     // Governor proposal states (OpenZeppelin IGovernor.ProposalState).
     uint8 private constant CANCELED_STATE = 2;
     uint8 private constant DEFEATED_STATE = 3;
+    uint8 private constant SUCCEEDED_STATE = 4;
     uint8 private constant QUEUED_STATE = 5;
     uint8 private constant EXPIRED_STATE = 6;
     uint8 private constant EXECUTED_STATE = 7;
@@ -150,6 +153,7 @@ contract AnchorElection is Initializable {
     error Undecided(uint256 proposalId);
     error EpochNotOpenable(uint256 epochNumber);
     error AttemptLive(uint256 proposalId);
+    error AttemptNotOpened(uint256 epochNumber, uint256 attempt);
     error BadParams();
 
     /// @dev Sets up the instance it creates, so a directly deployed
@@ -186,12 +190,17 @@ contract AnchorElection is Initializable {
     // Proposal identity
     // ---------------------------------------------------------------------
 
+    /// @notice The description of an attempt's proposal, as open() wrote
+    ///         it; empty until that attempt is opened. It ends in the
+    ///         opening block's timestamp and randomness, so a proposal id
+    ///         cannot be computed, and so cannot be taken, before the
+    ///         attempt exists (in particular not before the governor
+    ///         approves this contract as an option source, while anyone at
+    ///         the proposal threshold could still propose its calls).
     function descriptionOf(uint256 epochNumber, uint256 attempt)
-        public pure returns (string memory)
+        public view returns (string memory)
     {
-        return string.concat(
-            "Anchor election: epoch ", Strings.toString(epochNumber),
-            ", attempt ", Strings.toString(attempt));
+        return _descriptions[epochNumber][attempt];
     }
 
     function callOf(uint256 epochNumber, uint256 attempt)
@@ -259,18 +268,29 @@ contract AnchorElection is Initializable {
     /// @notice Open the election for an epoch: its first attempt, or the
     ///         next one once the latest ended without an anchor. Any live
     ///         agent may call it. The epoch must be the next to anchor, or
-    ///         follow an epoch whose election is already open (closes are
-    ///         pipelined: an epoch's election may run before its parent's
-    ///         winner lands). The attempt number is this contract's count,
+    ///         the one after it once the next epoch's election has a winner
+    ///         waiting to land (closes are pipelined: an epoch's election
+    ///         may run while its parent's winner sits in the timelock). No
+    ///         epoch further ahead can be opened, so attempts of future
+    ///         epochs cannot be used up. The attempt number is this contract's count,
     ///         never the caller's. Registration stays open while the vote
     ///         runs, so an attempt opened before the closes exist still
     ///         takes them.
     function open(uint256 epochNumber) external returns (uint256 proposalId) {
         if (!substrate.isLive(msg.sender)) revert NotLiveAgent(msg.sender);
         uint256 anchored = substrate.anchorCount();
-        if (epochNumber <= anchored
-                || (epochNumber != anchored + 1 && attemptsOpened[epochNumber - 1] == 0)) {
+        if (epochNumber <= anchored || epochNumber > anchored + 2) {
             revert EpochNotOpenable(epochNumber);
+        }
+        if (epochNumber == anchored + 2) {
+            // The parent's election must have decided a winner that has not
+            // landed yet (Succeeded or Queued).
+            uint256 parentAttempts = attemptsOpened[anchored + 1];
+            if (parentAttempts == 0) revert EpochNotOpenable(epochNumber);
+            uint8 ps = governor.state(proposalIdOf(anchored + 1, parentAttempts - 1));
+            if (ps != SUCCEEDED_STATE && ps != QUEUED_STATE) {
+                revert EpochNotOpenable(epochNumber);
+            }
         }
         uint256 attempt = attemptsOpened[epochNumber];
         if (attempt > 0) {
@@ -280,14 +300,19 @@ contract AnchorElection is Initializable {
             }
         }
         attemptsOpened[epochNumber] = attempt + 1;
+        string memory description = string.concat(
+            "Anchor election: epoch ", Strings.toString(epochNumber),
+            ", attempt ", Strings.toString(attempt),
+            ", opened ", Strings.toString(block.timestamp),
+            "-", Strings.toString(block.prevrandao));
+        _descriptions[epochNumber][attempt] = description;
 
         address[] memory targets = new address[](1);
         targets[0] = address(this);
         uint256[] memory values = new uint256[](1);
         bytes[] memory calldatas = new bytes[](1);
         calldatas[0] = callOf(epochNumber, attempt);
-        proposalId = governor.propose(
-            targets, values, calldatas, descriptionOf(epochNumber, attempt));
+        proposalId = governor.propose(targets, values, calldatas, description);
         emit ElectionOpened(proposalId, epochNumber, attempt);
     }
 
@@ -325,6 +350,9 @@ contract AnchorElection is Initializable {
     ///         identical content registers once.
     function registerOption(uint256 epochNumber, uint256 attempt,
                             Option calldata option) external returns (uint256) {
+        if (attempt >= attemptsOpened[epochNumber]) {
+            revert AttemptNotOpened(epochNumber, attempt);
+        }
         uint256 pid = proposalIdOf(epochNumber, attempt);
         uint8 st = governor.state(pid);
         if (st != PENDING && st != ACTIVE_STATE) revert NotPending(pid);
@@ -379,6 +407,9 @@ contract AnchorElection is Initializable {
     function anchorWinner(uint256 epochNumber, uint256 attempt) external onlyTimelock {
         uint256 expected = substrate.anchorCount() + 1;
         if (epochNumber != expected) revert WrongEpoch(expected, epochNumber);
+        if (attempt >= attemptsOpened[epochNumber]) {
+            revert AttemptNotOpened(epochNumber, attempt);
+        }
         uint256 pid = proposalIdOf(epochNumber, attempt);
         (bool decided, uint256 index) = governor.winningOption(pid);
         if (!decided) revert Undecided(pid);
