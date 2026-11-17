@@ -12,6 +12,9 @@ contract MockOptionGovernor {
     mapping(uint256 => uint256) public winnerOf;
     mapping(uint256 => bool) public decidedOf;
     uint256 public votingDelay;
+    mapping(uint256 => address) public proposerOf;
+    mapping(uint256 => uint256) public etaOf;
+    uint256 public proposeCount;
 
     function setVotingDelay(uint256 d) external { votingDelay = d; }
 
@@ -26,6 +29,28 @@ contract MockOptionGovernor {
     }
 
     function state(uint256 pid) external view returns (uint8) { return stateOf[pid]; }
+
+    /// @dev As HomebaseDAO for an election call: the proposal becomes
+    ///      Pending (state 0) with its snapshot one voting delay ahead. The
+    ///      test moves it on with setProposal.
+    function propose(
+        address[] memory targets,
+        uint256[] memory values,
+        bytes[] memory calldatas,
+        string memory description
+    ) external returns (uint256 pid) {
+        pid = uint256(keccak256(abi.encode(
+            targets, values, calldatas, keccak256(bytes(description)))));
+        require(proposerOf[pid] == address(0), "proposed");
+        proposerOf[pid] = msg.sender;
+        proposeCount += 1;
+        stateOf[pid] = 0;
+        snapshotOf[pid] = block.timestamp + votingDelay;
+    }
+
+    function setEta(uint256 pid, uint256 eta) external { etaOf[pid] = eta; }
+
+    function proposalEta(uint256 pid) external view returns (uint256) { return etaOf[pid]; }
 
     function proposalSnapshot(uint256 pid) external view returns (uint256) {
         return snapshotOf[pid];

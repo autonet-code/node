@@ -6,7 +6,9 @@ Each epoch's anchor is one DAO proposal whose only action is
 the contract derives, so every daemon computes the same proposal id. Its
 life, as one daemon drives it with its local agents' keys:
 
-    nonexistent -> propose (any daemon; identical proposals collide)
+    nonexistent -> open (any live agent calls AnchorElection.open: the
+                   election contract is the only proposer of its elections,
+                   and it numbers the attempts)
     Pending     -> each drawn local agent registers this daemon's option
                    (the 8 anchor fields of its own close), once per option
     Active      -> every local agent with REP votes for the option whose
@@ -14,7 +16,8 @@ life, as one daemon drives it with its local agents' keys:
     Succeeded   -> queue
     Queued      -> execute once the timelock delay passed (reverts while
                    the previous epoch is unanchored; retried next tick)
-    Defeated / Expired / Canceled -> the next attempt (a new proposal id)
+    Defeated / Expired / Canceled -> open again: the next attempt (a new
+                   proposal id, numbered by the contract)
 
 The draw itself is on chain (``isDrawn``), so a daemon never guesses who
 may register: it asks for each of its agents.
@@ -99,11 +102,26 @@ class ElectionAnchorer:
         return int(self._election.functions.proposalIdOf(
             e.epoch_number, e.attempt).call())
 
+    def _sync_attempt(self, e: Election) -> int:
+        """Follow the chain's attempt for this epoch: the contract numbers
+        them, so the live (or latest) one is attemptsOpened - 1. Returns how
+        many were opened (0 = no election for this epoch yet)."""
+        try:
+            opened = int(self._election.functions.attemptsOpened(
+                e.epoch_number).call())
+        except Exception:
+            return 0
+        if opened > 0:
+            e.attempt = opened - 1
+        return opened
+
     def state(self, e: Election) -> Optional[int]:
+        if self._sync_attempt(e) == 0:
+            return None   # not opened yet
         try:
             return int(self._governor.functions.state(self.proposal_id(e)).call())
         except Exception:
-            return None   # not proposed yet
+            return None
 
     # -- the life cycle ---------------------------------------------------
 
@@ -144,10 +162,13 @@ class ElectionAnchorer:
         if st == EXECUTED and int(self._substrate.functions.anchorCount().call())                 < e.epoch_number:
             st = CANCELED   # reject won: nothing anchored, a new attempt follows
         if st in _RETRY:
-            logger.warning("epoch %s: election attempt %d %s; re-posting as "
-                           "attempt %d", e.epoch_id, e.attempt,
-                           STATE_NAMES[st], e.attempt + 1)
-            e.attempt += 1
+            logger.warning("epoch %s: election attempt %d %s; opening the "
+                           "next attempt", e.epoch_id, e.attempt,
+                           STATE_NAMES[st])
+            # The contract opens it only once the latest attempt is over (a
+            # queued winner: after its grace); until then this is refused
+            # and retried next tick.
+            self._propose(e, voters)
             e.last_state = "retry"
             return e.last_state
         e.last_state = "nonexistent" if st is None else STATE_NAMES[st]
@@ -164,27 +185,23 @@ class ElectionAnchorer:
         return bytes(self._w3.keccak(text=self._proposal_args(e)[3]))
 
     def _propose(self, e: Election, voters: List[Voter]) -> None:
-        targets, values, calldatas, desc = self._proposal_args(e)
-        threshold = int(self._governor.functions.proposalThreshold().call())
-        clock = int(self._governor.functions.clock().call())
+        """Open this epoch's election (its first attempt or the next) through
+        AnchorElection.open, which proposes it as the election contract. Any
+        live agent may call it and no REP is needed; the contract refuses
+        when an attempt is still live or the epoch is not openable yet."""
+        before = self._sync_attempt(e)
         keys = [v.private_key for v in voters] + (
             [self._daemon_key] if self._daemon_key else [])
         for key in keys:
-            try:
-                votes = int(self._governor.functions.getVotes(
-                    self._w3.to_checksum_address(_addr_of(key)),
-                    max(clock - 1, 0)).call())
-            except Exception:
-                votes = 0
-            if votes < threshold:
-                continue
-            if self._try(e, "propose", self._governor.functions.propose(
-                    targets, values, calldatas, desc), key):
+            if self._try(e, "open", self._election.functions.open(
+                    e.epoch_number), key):
+                self._sync_attempt(e)
                 return
-            if self.state(e) is not None:
-                return   # another daemon's identical proposal landed first
-        logger.info("epoch %s: no local key meets the proposal threshold (%d); "
-                    "waiting for another daemon to propose", e.epoch_id, threshold)
+            if self._sync_attempt(e) > before:
+                return   # another daemon opened it first
+        logger.info("epoch %s: the election could not be opened now (an "
+                    "attempt is live, the epoch is not next, or no local key "
+                    "is a live agent)", e.epoch_id)
 
     def _option_index(self, e: Election) -> Optional[int]:
         pid = self.proposal_id(e)

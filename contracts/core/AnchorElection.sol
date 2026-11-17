@@ -31,6 +31,13 @@ interface IOptionGovernor {
         bytes[] memory calldatas,
         bytes32 descriptionHash
     ) external pure returns (uint256);
+    function propose(
+        address[] memory targets,
+        uint256[] memory values,
+        bytes[] memory calldatas,
+        string memory description
+    ) external returns (uint256);
+    function proposalEta(uint256 proposalId) external view returns (uint256);
     function proposalSnapshot(uint256 proposalId) external view returns (uint256);
     function votingDelay() external view returns (uint256);
     function winningOption(uint256 proposalId)
@@ -101,12 +108,33 @@ contract AnchorElection is Initializable {
     mapping(uint256 => mapping(bytes32 => bool)) private _seenOption;
     mapping(uint256 => mapping(address => bool)) private _registered;
 
+    /// @notice How many attempts were opened for an epoch's election. The
+    ///         live (or latest) one is attemptsOpened - 1.
+    mapping(uint256 => uint256) public attemptsOpened;
+    /// @notice When this contract last anchored a winner.
+    uint256 public lastAnchoredAt;
+
+    // Governor proposal states (OpenZeppelin IGovernor.ProposalState).
+    uint8 private constant CANCELED_STATE = 2;
+    uint8 private constant DEFEATED_STATE = 3;
+    uint8 private constant QUEUED_STATE = 5;
+    uint8 private constant EXPIRED_STATE = 6;
+    uint8 private constant EXECUTED_STATE = 7;
+    /// @notice How long a queued winner may sit unexecuted, once its epoch
+    ///         is next to anchor and its timelock delay has passed, before
+    ///         a new attempt may open. Anyone can execute a queued winner,
+    ///         so one still queued after this cannot anchor (its option
+    ///         does not fit the chain as it now stands).
+    uint256 public constant EXECUTE_GRACE = 1 hours;
+
     event OptionRegistered(
         uint256 indexed proposalId, uint256 indexed epochNumber,
         uint256 index, address indexed proposer, bytes32 optionHash);
     event WinnerAnchored(
         uint256 indexed proposalId, uint256 indexed epochNumber,
         uint256 index, bytes32 optionHash);
+    event ElectionOpened(
+        uint256 indexed proposalId, uint256 indexed epochNumber, uint256 attempt);
     event ParamsSet(uint256 proposers, uint256 proposerFloorPpm,
                     uint256 maxOptions, uint256 openAfterAttempts);
 
@@ -120,6 +148,8 @@ contract AnchorElection is Initializable {
     error SnapshotNotPast();
     error WrongEpoch(uint256 expected, uint256 got);
     error Undecided(uint256 proposalId);
+    error EpochNotOpenable(uint256 epochNumber);
+    error AttemptLive(uint256 proposalId);
     error BadParams();
 
     /// @dev Sets up the instance it creates, so a directly deployed
@@ -217,6 +247,70 @@ contract AnchorElection is Initializable {
     }
 
     // ---------------------------------------------------------------------
+    // Opening an election
+    //
+    // Only this contract proposes its elections (the governor refuses an
+    // election call from anyone else), and it never cancels one. So nobody
+    // can take an election's proposal id and kill it, now or ahead of time:
+    // an attempt exists only once open() makes it, and there is always a
+    // next one.
+    // ---------------------------------------------------------------------
+
+    /// @notice Open the election for an epoch: its first attempt, or the
+    ///         next one once the latest ended without an anchor. Any live
+    ///         agent may call it. The epoch must be the next to anchor, or
+    ///         follow an epoch whose election is already open (closes are
+    ///         pipelined: an epoch's election may run before its parent's
+    ///         winner lands). The attempt number is this contract's count,
+    ///         never the caller's. Registration stays open while the vote
+    ///         runs, so an attempt opened before the closes exist still
+    ///         takes them.
+    function open(uint256 epochNumber) external returns (uint256 proposalId) {
+        if (!substrate.isLive(msg.sender)) revert NotLiveAgent(msg.sender);
+        uint256 anchored = substrate.anchorCount();
+        if (epochNumber <= anchored
+                || (epochNumber != anchored + 1 && attemptsOpened[epochNumber - 1] == 0)) {
+            revert EpochNotOpenable(epochNumber);
+        }
+        uint256 attempt = attemptsOpened[epochNumber];
+        if (attempt > 0) {
+            uint256 latest = proposalIdOf(epochNumber, attempt - 1);
+            if (!_endedWithoutAnchor(latest, epochNumber == anchored + 1)) {
+                revert AttemptLive(latest);
+            }
+        }
+        attemptsOpened[epochNumber] = attempt + 1;
+
+        address[] memory targets = new address[](1);
+        targets[0] = address(this);
+        uint256[] memory values = new uint256[](1);
+        bytes[] memory calldatas = new bytes[](1);
+        calldatas[0] = callOf(epochNumber, attempt);
+        proposalId = governor.propose(
+            targets, values, calldatas, descriptionOf(epochNumber, attempt));
+        emit ElectionOpened(proposalId, epochNumber, attempt);
+    }
+
+    /// @dev Whether an unanchored epoch's attempt is over. Defeated, expired
+    ///      or cancelled: yes. Executed: yes, reject won (the epoch is still
+    ///      unanchored). Queued: only when the epoch is next to anchor and
+    ///      the winner has stayed unexecuted for EXECUTE_GRACE past both its
+    ///      timelock eta and the previous anchor.
+    function _endedWithoutAnchor(uint256 proposalId, bool isNext) private view returns (bool) {
+        uint8 st = governor.state(proposalId);
+        if (st == CANCELED_STATE || st == DEFEATED_STATE || st == EXPIRED_STATE
+                || st == EXECUTED_STATE) {
+            return true;
+        }
+        if (st == QUEUED_STATE && isNext) {
+            uint256 eta = governor.proposalEta(proposalId);
+            uint256 since = eta > lastAnchoredAt ? eta : lastAnchoredAt;
+            return eta != 0 && block.timestamp >= since + EXECUTE_GRACE;
+        }
+        return false;
+    }
+
+    // ---------------------------------------------------------------------
     // Options
     // ---------------------------------------------------------------------
 
@@ -293,6 +387,7 @@ contract AnchorElection is Initializable {
         substrate.anchor(
             o.epochId, o.epochRoot, o.prevEpochRoot, o.prevAnchorHash,
             o.agentMintCid, o.payloadHash, o.agentMintRoot, o.cutoff);
+        lastAnchoredAt = block.timestamp;
         emit WinnerAnchored(pid, epochNumber, index, optionHashOf(o));
     }
 

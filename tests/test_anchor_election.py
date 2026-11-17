@@ -252,3 +252,115 @@ def test_fee_windows_between_cutoffs(env):
     # Only the governor or the anchorer anchors.
     assert refused(sender=acc[3])
     assert sub.functions.anchorCount().call() == 1
+
+
+# ---------------------------------------------------------------------------
+# open(): only the election proposes its elections
+# ---------------------------------------------------------------------------
+
+CANCELED, DEFEATED, SUCCEEDED, QUEUED, EXPIRED, EXECUTED = 2, 3, 4, 5, 6, 7
+
+
+def _set_state(env, pid, state):
+    _send(env["w3"], env["gov"].functions.setProposal(pid, state, _ts(env["w3"])),
+          env["acc"][0])
+
+
+def test_open_proposes_the_next_epochs_election_as_the_election_itself(env):
+    w3, el, gov = env["w3"], env["el"], env["gov"]
+    a0, outsider = env["agents"][0], env["acc"][7]
+    # Agents only, and only an epoch that is next (or follows an open one).
+    assert _reverts(w3, el.functions.open(1), outsider)
+    assert _reverts(w3, el.functions.open(0), a0)
+    assert _reverts(w3, el.functions.open(2), a0)
+    assert _reverts(w3, el.functions.open(3), a0)
+
+    assert _send(w3, el.functions.open(1), a0).status == 1
+    pid = el.functions.proposalIdOf(1, 0).call()
+    assert gov.functions.proposerOf(pid).call() == el.address
+    assert el.functions.attemptsOpened(1).call() == 1
+    assert gov.functions.state(pid).call() == PENDING
+
+    # One live attempt: no second one while the first is pending or voting.
+    assert _reverts(w3, el.functions.open(1), a0)
+    _set_state(env, pid, ACTIVE)
+    assert _reverts(w3, el.functions.open(1), env["agents"][1])
+    assert gov.functions.proposeCount().call() == 1
+
+
+def test_open_numbers_the_next_attempt_itself_once_the_latest_ended(env):
+    w3, el, gov = env["w3"], env["el"], env["gov"]
+    a0, a1 = env["agents"][:2]
+    _send(w3, el.functions.open(1), a0)
+    pid0 = el.functions.proposalIdOf(1, 0).call()
+    for n, ended in enumerate((DEFEATED, EXPIRED, CANCELED, EXECUTED), start=1):
+        latest = el.functions.proposalIdOf(1, n - 1).call()
+        # A succeeded attempt is not over: its winner still has to land.
+        _set_state(env, latest, SUCCEEDED)
+        assert _reverts(w3, el.functions.open(1), a1)
+        _set_state(env, latest, ended)
+        assert _send(w3, el.functions.open(1), a1).status == 1
+        assert el.functions.attemptsOpened(1).call() == n + 1
+        nxt = el.functions.proposalIdOf(1, n).call()
+        assert gov.functions.proposerOf(nxt).call() == el.address
+        assert nxt != pid0
+    assert gov.functions.proposeCount().call() == 5
+
+
+def test_open_allows_the_epoch_after_an_open_one_but_no_further(env):
+    """Closes are pipelined: epoch 2's election may run before epoch 1's
+    winner lands, but an epoch whose parent has no election cannot open."""
+    w3, el = env["w3"], env["el"]
+    a0 = env["agents"][0]
+    _send(w3, el.functions.open(1), a0)
+    assert _reverts(w3, el.functions.open(3), a0)
+    assert _send(w3, el.functions.open(2), a0).status == 1
+    assert _send(w3, el.functions.open(3), a0).status == 1
+    assert _reverts(w3, el.functions.open(5), a0)
+    # Epoch 2 is not next to anchor, so a queued attempt of it never counts
+    # as stuck: it is waiting for epoch 1.
+    pid2 = el.functions.proposalIdOf(2, 0).call()
+    _set_state(env, pid2, QUEUED)
+    _send(w3, env["gov"].functions.setEta(pid2, _ts(w3)), env["acc"][0])
+    w3.provider.ethereum_tester.time_travel(_ts(w3) + 7200)
+    w3.provider.ethereum_tester.mine_block()
+    assert _reverts(w3, el.functions.open(2), a0)
+
+
+def test_open_replaces_a_queued_winner_that_never_executes(env):
+    w3, el, gov = env["w3"], env["el"], env["gov"]
+    a0 = env["agents"][0]
+    _send(w3, el.functions.open(1), a0)
+    pid = el.functions.proposalIdOf(1, 0).call()
+    _set_state(env, pid, QUEUED)
+    # No eta recorded: not stuck.
+    assert _reverts(w3, el.functions.open(1), a0)
+    eta = _ts(w3) + 100
+    _send(w3, gov.functions.setEta(pid, eta), env["acc"][0])
+    grace = el.functions.EXECUTE_GRACE().call()
+    w3.provider.ethereum_tester.time_travel(eta + grace - 60)
+    w3.provider.ethereum_tester.mine_block()
+    assert _reverts(w3, el.functions.open(1), a0)
+    w3.provider.ethereum_tester.time_travel(eta + grace + 60)
+    w3.provider.ethereum_tester.mine_block()
+    assert _send(w3, el.functions.open(1), a0).status == 1
+    assert el.functions.attemptsOpened(1).call() == 2
+
+
+def test_an_anchored_epoch_cannot_be_opened_again(env):
+    w3, el, gov = env["w3"], env["el"], env["gov"]
+    a0 = env["agents"][0]
+    _give_rep(env, a0, 1000)
+    _send(w3, el.functions.open(1), a0)
+    pid = el.functions.proposalIdOf(1, 0).call()
+    # Re-point the snapshot so the draw reads REP set above.
+    _send(w3, gov.functions.setProposal(pid, PENDING, _ts(w3) + 10), env["acc"][0])
+    assert _send(w3, el.functions.registerOption(1, 0, _option(env, "w")), a0).status == 1
+    _send(w3, gov.functions.setWinner(pid, True, 1), env["acc"][0])
+    call = el.encode_abi("anchorWinner", args=[1, 0])
+    assert _send(w3, gov.functions.exec(el.address, call), env["acc"][0]).status == 1
+    assert env["sub"].functions.anchorCount().call() == 1
+    assert el.functions.lastAnchoredAt().call() > 0
+    _set_state(env, pid, EXECUTED)
+    assert _reverts(w3, el.functions.open(1), a0)
+    assert _send(w3, el.functions.open(2), a0).status == 1
