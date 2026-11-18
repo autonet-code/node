@@ -53,8 +53,9 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   newly minted ATN for the tokens in the jurisdiction's value index
   (Registry `jurisdiction.parity.<token>`, a stablecoin by default) at a
   DAO-set parity, uncapped, and sends the payment straight to the treasury.
-  A parity edit is an ordinary proposal, not a constitutional one: the
-  DAO may need to adjust it often, and turnout is the DAO's job.
+  The same key converts project earnings to REP (times
+  `jurisdiction.economy.rep_rate_bps`), so a parity edit is constitutional
+  (decided 2026-11-18; it was ordinary while the two had separate keys).
   There is no redeem path. So the parity is a ceiling on ATN's price, not a
   peg: nobody pays more on a market than the vault asks, and nothing holds
   the price up from below.
