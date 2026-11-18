@@ -2,7 +2,7 @@
 
 Validates:
 
-  1. Happy path: caller pays recipient; balances move; both ATNTransfer
+  1. Happy path: caller pays recipient; balances move; both Transfer
      and ServicePayment events fire with correct fields.
   2. requestId is propagated as the third indexed topic on the event,
      so off-chain auditors can match payments to requests.
@@ -192,11 +192,14 @@ def test_pay_for_service_moves_balance_and_emits_event(chain):
     assert fargs["burned"] == burned
     assert fargs["toTreasury"] == to_treasury
 
-    # ATNTransfer events: net to recipient + treasury share.
-    xfer_events = contract.events.ATNTransfer().process_receipt(receipt)
-    by_to = {e["args"]["to"]: e["args"]["amount"] for e in xfer_events}
+    # Transfer events: net to recipient, treasury share, burned share to
+    # address(0), so the events alone account for every balance change.
+    xfer_events = contract.events.Transfer().process_receipt(receipt)
+    by_to = {e["args"]["to"]: e["args"]["value"] for e in xfer_events}
     assert by_to[recipient] == pay_amount - fee
     assert by_to[treasury] == to_treasury
+    assert by_to["0x0000000000000000000000000000000000000000"] == burned
+    assert sum(e["args"]["value"] for e in xfer_events) == pay_amount
 
 
 def test_request_id_indexed_for_filtering(chain):

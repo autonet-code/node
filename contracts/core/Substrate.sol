@@ -1214,15 +1214,24 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         atnTotalSupply += amount;
         _checkpointATN(to);
         _atnSupplyHistory.push(uint48(block.number), uint208(atnTotalSupply));
-        emit ATNTransfer(address(0), to, amount);
+        emit Transfer(address(0), to, amount);
     }
 
-    event ATNTransfer(address indexed from, address indexed to, uint256 amount);
-    event ATNApproval(address indexed owner, address indexed spender, uint256 amount);
+    // The standard ERC-20 events: explorers, wallets and indexers find
+    // token movements by these exact signatures. Every balance change
+    // emits one: mints come from address(0), the burned fee share goes to
+    // address(0).
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
 
     error InsufficientATN(uint256 requested, uint256 available);
     error InsufficientAllowance(uint256 requested, uint256 available);
     error TransferToZero();
+
+    /// @notice ERC-20 total supply (the same number as atnTotalSupply).
+    function totalSupply() external view returns (uint256) {
+        return atnTotalSupply;
+    }
 
     function balanceOf(address agent) external view returns (uint256) {
         return _atnBalance[agent];
@@ -1260,13 +1269,13 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         _atnBalance[to] += amount;
         _checkpointATN(msg.sender);
         _checkpointATN(to);
-        emit ATNTransfer(msg.sender, to, amount);
+        emit Transfer(msg.sender, to, amount);
         return true;
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {
         _atnAllowance[msg.sender][spender] = amount;
-        emit ATNApproval(msg.sender, spender, amount);
+        emit Approval(msg.sender, spender, amount);
         return true;
     }
 
@@ -1285,7 +1294,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         _atnBalance[to] += amount;
         _checkpointATN(from);
         _checkpointATN(to);
-        emit ATNTransfer(from, to, amount);
+        emit Transfer(from, to, amount);
         return true;
     }
 
@@ -1420,7 +1429,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
     address public vaultMinter;
 
     /// @notice Emitted when the vault mints purchased ATN. Distinct from
-    ///         ATNTransfer(address(0), ...) so indexers can separate
+    ///         Transfer(address(0), ...) so indexers can separate
     ///         purchased money from earned mint. No reputation is minted.
     event VaultMint(address indexed to, uint256 amount);
 
@@ -1493,7 +1502,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         if (toTreasury > 0) {
             _atnBalance[treasury] += toTreasury;
             _checkpointATN(treasury);
-            emit ATNTransfer(msg.sender, treasury, toTreasury);
+            emit Transfer(msg.sender, treasury, toTreasury);
         }
         if (burned > 0) {
             atnTotalSupply -= burned;
@@ -1503,9 +1512,10 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
             _atnSupplyHistory.push(
                 uint48(block.number), uint208(atnTotalSupply)
             );
+            emit Transfer(msg.sender, address(0), burned);
         }
 
-        emit ATNTransfer(msg.sender, recipient, net);
+        emit Transfer(msg.sender, recipient, net);
         emit ServicePayment(msg.sender, recipient, amount, requestId);
         if (fee > 0) {
             emit ServiceFee(msg.sender, recipient, amount, burned, toTreasury);

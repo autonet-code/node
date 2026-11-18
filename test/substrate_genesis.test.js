@@ -67,7 +67,7 @@ describe("Substrate.claimGenesis (fork/split carry-over)", function () {
     const amt = amounts[c.address];
     await expect(s.connect(c).claimGenesis(amt, tree.proofs[c.address]))
       .to.emit(s, "GenesisClaimed").withArgs(c.address, amt)
-      .and.to.emit(s, "ATNTransfer").withArgs(ethers.ZeroAddress, c.address, amt);
+      .and.to.emit(s, "Transfer").withArgs(ethers.ZeroAddress, c.address, amt);
     expect(await s.balanceOf(c.address)).to.equal(amt);
     expect(await s.genesisClaimed(c.address)).to.equal(true);
     expect(await s.genesisMinted()).to.equal(amt);

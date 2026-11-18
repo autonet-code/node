@@ -7,7 +7,7 @@ exclusion list) as a merkle root passed to the new Substrate's constructor
 once. A fresh network passes a zero root and needs none of this.
 
 Steps:
-  1. Holders = every address seen in the old Substrate's ATNTransfer logs
+  1. Holders = every address seen in the old Substrate's Transfer logs
      (from/to) between --from-block and --block (chunked: public RPCs cap
      log ranges).
   2. Balance = ``balanceOfAt(holder, --block)`` (Substrate checkpoints
@@ -60,7 +60,7 @@ from nodes.common.mint_merkle import (  # noqa: E402
 
 ZERO = "0x" + "00" * 20
 ATN_TRANSFER_TOPIC = "0x" + keccak(
-    text="ATNTransfer(address,address,uint256)").hex()
+    text="Transfer(address,address,uint256)").hex()
 ERC20_TRANSFER_TOPIC = "0x" + keccak(
     text="Transfer(address,address,uint256)").hex()
 
