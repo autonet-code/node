@@ -62,7 +62,9 @@ through DHT provider records. The run logs each daemon's connections
 Env: S0_DIR (default D:/autonet_s0), S0_MINUTES (activity phase, default
 60), S0_KEEP=1 leaves everything running at the end (Ctrl+C to stop),
 S0_MODEL_DIR (the shared search model files), S0_MODEL_FROM_PEERS,
-TRUSTLESS_CONTRACTS_DIR (default C:/code/dao/trustless-contracts).
+TRUSTLESS_CONTRACTS_DIR (default C:/code/dao/trustless-contracts),
+S0_EXTERNAL_CHAIN=1 (use the chain already running at S0_RPC_URL and the
+suite deployed on it, instead of starting a hardhat node).
 """
 from __future__ import annotations
 
@@ -97,6 +99,7 @@ MODEL_FROM_PEERS = {n.strip() for n in os.environ.get("S0_MODEL_FROM_PEERS", "h4
 RPC_PORT = 8545
 # S2 VMs point this at the hub chain (https://rpc.autonet.computer/<token>).
 RPC_URL = os.environ.get("S0_RPC_URL") or f"http://127.0.0.1:{RPC_PORT}"
+EXTERNAL_CHAIN = os.environ.get("S0_EXTERNAL_CHAIN", "") == "1"
 CHAIN_ID = 31337
 RELAY_PORT = 4101
 HOUSEHOLDS = 4
@@ -1405,10 +1408,13 @@ async def amain() -> int:
         # 0. The search model, once for every daemon.
         prepare_search_model()
 
-        # 1. Chain.
-        procs.start("hardhat", ["npx.cmd" if os.name == "nt" else "npx", "hardhat", "node",
-                                "--port", str(RPC_PORT)], cwd=DAO_DIR, env=base_env(),
-                    log_path=run / "hardhat.log")
+        # 1. Chain: our own hardhat node, or (S0_EXTERNAL_CHAIN=1) one already
+        # running at RPC_URL, such as the suite dao deployed as the deploy
+        # rehearsal; the jurisdiction script then uses that suite.
+        if not EXTERNAL_CHAIN:
+            procs.start("hardhat", ["npx.cmd" if os.name == "nt" else "npx", "hardhat", "node",
+                                    "--port", str(RPC_PORT)], cwd=DAO_DIR, env=base_env(),
+                        log_path=run / "hardhat.log")
         w3, accts = w3_and_accounts()
         wait_for(lambda: w3.is_connected() and w3.eth.chain_id == CHAIN_ID, 120, "hardhat")
         # One block a second, like a real chain. Automine gives every tx
