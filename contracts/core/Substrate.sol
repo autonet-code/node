@@ -306,6 +306,18 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
         a.claimRoot = claimRoot;
         a.cutoff = cutoff;
         _index(a);
+        _storeParities(anchors.length - 1);
+    }
+
+    /// @dev Store every pool token's parity as the epoch is anchored: the
+    ///      price its claims are valued at.
+    function _storeParities(uint256 index) private {
+        uint256 n = _poolTokens.length;
+        for (uint256 i = 0; i < n; i++) {
+            address t = _poolTokens[i];
+            uint256 p = parityOf(t);
+            if (p != 0) _anchorParity[index][t] = p;
+        }
     }
 
     /// @dev Index the anchor just stored, chain to it, and announce it.
@@ -869,12 +881,15 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     error BadTokenDecimals(address token);
     error TokenNotListed(address token);
 
-    /// @notice The token's parity in the index, 0 = not in it.
+    /// @notice The token's parity in the index, 0 = not in it (or malformed).
     function parityOf(address token) public view returns (uint256) {
         string memory v = IRegistryRead(registry).getRegistryValue(
             string.concat("jurisdiction.parity.", Strings.toHexString(token)));
         if (bytes(v).length == 0) return 0;
-        return Strings.parseUint(v);
+        // A malformed value reads as out of the index, so it can never block
+        // an anchor or a claim.
+        (bool ok, uint256 p) = Strings.tryParseUint(v);
+        return ok ? p : 0;
     }
 
     /// @notice True iff a payment can be made in `token` now: it is in the
@@ -1129,16 +1144,20 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     //
     // One pool per token. Each epoch's close commits one leaf per earner (a
     // household's owner wallet): the amounts it takes of each token's pool
-    // (the same fraction of every pool) and the REP value of the whole,
-    // priced by the close at the index pinned to the anchor:
+    // (the same fraction of every pool):
     //
     //   keccak256(bytes.concat(keccak256(abi.encode(
-    //       CLAIM_TAG, earner, value, tokens, amounts))))
+    //       CLAIM_TAG, earner, tokens, amounts))))
     //
     // tokens strictly ascending, one amount each. A claim credits the
-    // amounts as owed to the earner and adds the value to earnedValue; the
-    // money then leaves by withdraw, one token at a time. Claims of a token
-    // never total more than its tool share collected up to poolCutoff.
+    // amounts as owed to the earner and adds their REP value to
+    // earnedValue: each amount at its token's parity stored when the epoch
+    // was anchored (anchorParity), so a parity edit after the anchor
+    // changes nothing. The value is computed here from amounts the pool cap
+    // already bounds, never taken from the leaf, so no anchor can grant
+    // more REP than the fees collected are worth. The money then leaves by
+    // withdraw, one token at a time. Claims of a token never total more
+    // than its tool share collected up to poolCutoff.
     // =========================================================================
 
     bytes32 public constant CLAIM_TAG = keccak256("autonet.claim");
@@ -1149,6 +1168,15 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     mapping(address => uint256) public earnedValue;
     /// @notice All REP value claimed so far.
     uint256 public totalEarnedValue;
+
+    /// @dev anchor index => token => its parity when the epoch was anchored.
+    mapping(uint256 => mapping(address => uint256)) private _anchorParity;
+
+    /// @notice A pool token's parity stored when anchor `index` landed
+    ///         (0 = not in the index then): what its claims are valued at.
+    function anchorParity(uint256 index, address token) external view returns (uint256) {
+        return _anchorParity[index][token];
+    }
 
     /// @notice Has `earner` claimed its leaf of the epoch?
     mapping(address => mapping(bytes32 => bool)) public claimedEpoch;
@@ -1196,7 +1224,6 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
         bytes32 epochIdHash,
         address[] calldata tokens,
         uint256[] calldata amounts,
-        uint256 value,
         bytes32[] calldata proof
     ) external {
         string storage epochId = epochIdByHash[epochIdHash];
@@ -1207,14 +1234,15 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
             if (tokens[i] <= tokens[i - 1]) revert TokensNotSorted();
         }
 
-        bytes32 root = anchors[anchorIndexByEpochId[epochId] - 1].claimRoot;
+        uint256 index = anchorIndexByEpochId[epochId] - 1;
+        bytes32 root = anchors[index].claimRoot;
         if (root == bytes32(0)) revert ClaimRootMissing(epochIdHash);
-        if (!_verifyProof(proof, root, claimLeaf(earner, value, tokens, amounts))) {
+        if (!_verifyProof(proof, root, claimLeaf(earner, tokens, amounts))) {
             revert ClaimProofInvalid(epochIdHash);
         }
 
         claimedEpoch[earner][epochIdHash] = true;
-        _credit(earner, epochIdHash, tokens, amounts);
+        uint256 value = _credit(earner, epochIdHash, index, tokens, amounts);
         if (value > 0) {
             earnedValue[earner] += value;
             totalEarnedValue += value;
@@ -1225,20 +1253,22 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     /// @notice The leaf a claim proves (exposed for the close and tests).
     function claimLeaf(
         address earner,
-        uint256 value,
         address[] calldata tokens,
         uint256[] calldata amounts
     ) public pure returns (bytes32) {
         return keccak256(bytes.concat(keccak256(
-            abi.encode(CLAIM_TAG, earner, value, tokens, amounts))));
+            abi.encode(CLAIM_TAG, earner, tokens, amounts))));
     }
 
+    /// @dev Credit the amounts (each capped by its pool) and return their
+    ///      REP value at the anchor's stored parities.
     function _credit(
         address earner,
         bytes32 epochIdHash,
+        uint256 index,
         address[] calldata tokens,
         uint256[] calldata amounts
-    ) private {
+    ) private returns (uint256 value) {
         for (uint256 i = 0; i < tokens.length; i++) {
             uint256 a = amounts[i];
             if (a == 0) continue;
@@ -1248,6 +1278,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
             if (after_ > cap) revert PoolExceeded(t, cap, after_);
             claimedTotal[t] = after_;
             owed[earner][t] += a;
+            value += (a * _anchorParity[index][t]) / PARITY_SCALE;
             emit ClaimedToken(earner, epochIdHash, t, a);
         }
     }

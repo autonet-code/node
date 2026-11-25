@@ -205,17 +205,17 @@ async function anchorEpoch(substrate, epochId, claimRoot, sender) {
 // ---------------------------------------------------------------------------
 // Claims: one leaf per earner,
 //   keccak256(bytes.concat(keccak256(abi.encode(
-//       CLAIM_TAG, earner, value, tokens, amounts))))
+//       CLAIM_TAG, earner, tokens, amounts))))
 // in a sorted-pair merkle tree.
 // ---------------------------------------------------------------------------
 
 const CLAIM_TAG = digest("autonet.claim");
 
-function claimLeaf(earner, value, tokens, amounts) {
+function claimLeaf(earner, tokens, amounts) {
   const inner = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["bytes32", "address", "uint256", "address[]", "uint256[]"],
-      [CLAIM_TAG, earner, value, tokens, amounts]
+      ["bytes32", "address", "address[]", "uint256[]"],
+      [CLAIM_TAG, earner, tokens, amounts]
     )
   );
   return ethers.keccak256(inner);
@@ -259,15 +259,15 @@ function merkleTree(leaves) {
   return { root: layers[layers.length - 1][0], proof };
 }
 
-// Build an epoch's claim tree. `entries` is [{earner, value, tokens,
+// Build an epoch's claim tree. `entries` is [{earner, tokens,
 // amounts}] (tokens already sorted, or give `basket` pairs instead).
 // Returns { root, entries, proof(i) }.
 function claimTree(entries) {
   const norm = entries.map((e) => {
     const b = e.basket ? sortBasket(e.basket) : { tokens: e.tokens, amounts: e.amounts };
-    return { earner: e.earner, value: e.value || 0n, tokens: b.tokens, amounts: b.amounts };
+    return { earner: e.earner, tokens: b.tokens, amounts: b.amounts };
   });
-  const t = merkleTree(norm.map((e) => claimLeaf(e.earner, e.value, e.tokens, e.amounts)));
+  const t = merkleTree(norm.map((e) => claimLeaf(e.earner, e.tokens, e.amounts)));
   return { root: t.root, entries: norm, proof: t.proof };
 }
 
@@ -275,7 +275,7 @@ function claimTree(entries) {
 function claimTx(substrate, sender, tree, i, epochId) {
   const e = tree.entries[i];
   return substrate.connect(sender).claim(
-    e.earner, digest(epochId), e.tokens, e.amounts, e.value, tree.proof(i));
+    e.earner, digest(epochId), e.tokens, e.amounts, tree.proof(i));
 }
 
 // ---------------------------------------------------------------------------

@@ -767,8 +767,38 @@
   }
  },
  {
-  "label": "claimedEpoch",
+  "label": "_anchorParity",
   "slot": "34",
+  "offset": 0,
+  "type": {
+   "label": "mapping(uint256 => mapping(address => uint256))",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "mapping(address => uint256)",
+    "bytes": "32",
+    "encoding": "mapping",
+    "key": {
+     "label": "address",
+     "bytes": "20",
+     "encoding": "inplace"
+    },
+    "value": {
+     "label": "uint256",
+     "bytes": "32",
+     "encoding": "inplace"
+    }
+   }
+  }
+ },
+ {
+  "label": "claimedEpoch",
+  "slot": "35",
   "offset": 0,
   "type": {
    "label": "mapping(address => mapping(bytes32 => bool))",
@@ -798,7 +828,7 @@
  },
  {
   "label": "claimedTotal",
-  "slot": "35",
+  "slot": "36",
   "offset": 0,
   "type": {
    "label": "mapping(address => uint256)",
@@ -818,7 +848,7 @@
  },
  {
   "label": "owed",
-  "slot": "36",
+  "slot": "37",
   "offset": 0,
   "type": {
    "label": "mapping(address => mapping(address => uint256))",
@@ -848,7 +878,7 @@
  },
  {
   "label": "treasuryOwed",
-  "slot": "37",
+  "slot": "38",
   "offset": 0,
   "type": {
    "label": "mapping(address => uint256)",
@@ -868,7 +898,7 @@
  },
  {
   "label": "held",
-  "slot": "38",
+  "slot": "39",
   "offset": 0,
   "type": {
    "label": "mapping(address => uint256)",

@@ -219,12 +219,12 @@ describe("Value-index payments, pools and claims", function () {
       await anchorEpoch(substrate, "e2", tree.root);
       // The JS leaf matches the contract's.
       const e0 = tree.entries[0];
-      expect(await substrate.claimLeaf(e0.earner, e0.value, e0.tokens, e0.amounts))
-        .to.equal(claimLeaf(e0.earner, e0.value, e0.tokens, e0.amounts));
+      expect(await substrate.claimLeaf(e0.earner, e0.tokens, e0.amounts))
+        .to.equal(claimLeaf(e0.earner, e0.tokens, e0.amounts));
 
       // Anyone submits; the leaf fixes the earner.
       await expect(claimTx(substrate, stranger, tree, 0, "e2"))
-        .to.emit(substrate, "Claimed").withArgs(alice.address, digest("e2"), 500n, 500n)
+        .to.emit(substrate, "Claimed").withArgs(alice.address, digest("e2"), 12_500n, 12_500n)
         .and.to.emit(substrate, "ClaimedToken").withArgs(alice.address, digest("e2"), U, usdPool / 2n)
         .and.to.emit(substrate, "ClaimedToken").withArgs(alice.address, digest("e2"), D, daiPool / 2n);
       expect(await substrate.owed(alice.address, U)).to.equal(usdPool / 2n);
@@ -236,57 +236,85 @@ describe("Value-index payments, pools and claims", function () {
 
       // Bad proof: bob's amounts with alice's proof, or inflated amounts.
       const b = tree.entries[1];
-      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, b.amounts, b.value, tree.proof(0)))
+      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, b.amounts, tree.proof(0)))
         .to.be.revertedWithCustomError(substrate, "ClaimProofInvalid");
       await expect(substrate.claim(b.earner, digest("e2"), b.tokens,
-        b.amounts.map((a) => a + 1n), b.value, tree.proof(1)))
-        .to.be.revertedWithCustomError(substrate, "ClaimProofInvalid");
-      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, b.amounts, b.value + 1n, tree.proof(1)))
+        b.amounts.map((a) => a + 1n), tree.proof(1)))
         .to.be.revertedWithCustomError(substrate, "ClaimProofInvalid");
 
       // Unsorted (or repeated) tokens are refused before the proof.
       await expect(substrate.claim(b.earner, digest("e2"), [...b.tokens].reverse(),
-        [...b.amounts].reverse(), b.value, tree.proof(1)))
+        [...b.amounts].reverse(), tree.proof(1)))
         .to.be.revertedWithCustomError(substrate, "TokensNotSorted");
-      await expect(substrate.claim(b.earner, digest("e2"), [U, U], [1n, 1n], b.value, tree.proof(1)))
+      await expect(substrate.claim(b.earner, digest("e2"), [U, U], [1n, 1n], tree.proof(1)))
         .to.be.revertedWithCustomError(substrate, "TokensNotSorted");
-      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, [1n], b.value, tree.proof(1)))
+      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, [1n], tree.proof(1)))
         .to.be.revertedWithCustomError(substrate, "LengthMismatch");
 
       await claimTx(substrate, bob, tree, 1, "e2");
       await claimTx(substrate, bob, tree, 2, "e2");
       expect(await substrate.owed(bob.address, D)).to.equal(daiPool / 4n);
       expect(await substrate.claimedTotal(U)).to.equal(usdPool / 2n + usdPool / 4n + 1n);
-      expect(await substrate.totalEarnedValue()).to.equal(751n);
+      // 12_500 (alice) + 6_250 (bob) + 1 (stranger), valued on chain.
+      expect(await substrate.totalEarnedValue()).to.equal(18_751n);
     });
 
     it("refuses claims on an unanchored epoch or one with no claim root", async function () {
       await fillPools();
-      await expect(substrate.claim(alice.address, digest("nope"), [U], [1n], 0n, []))
+      await expect(substrate.claim(alice.address, digest("nope"), [U], [1n], []))
         .to.be.revertedWithCustomError(substrate, "EpochNotAnchored");
       await anchorEpoch(substrate, "empty");
-      await expect(substrate.claim(alice.address, digest("empty"), [U], [1n], 0n, []))
+      await expect(substrate.claim(alice.address, digest("empty"), [U], [1n], []))
         .to.be.revertedWithCustomError(substrate, "ClaimRootMissing");
     });
 
-    it("earnedValue accumulates across epochs", async function () {
+    it("earnedValue accumulates across epochs, valued on chain at the anchor's parities", async function () {
       await fillPools();
-      const t2 = claimTree([{ earner: alice.address, tokens: [U], amounts: [100n], value: 1_000n }]);
+      const t2 = claimTree([{ earner: alice.address, tokens: [U], amounts: [100n] }]);
       await anchorEpoch(substrate, "e2", t2.root);
       await claimTx(substrate, alice, t2, 0, "e2");
       const t3 = claimTree([
-        { earner: alice.address, tokens: [U], amounts: [50n], value: 2_500n },
-        { earner: bob.address, tokens: [], amounts: [], value: 7n },
+        { earner: alice.address, tokens: [U], amounts: [50n] },
+        { earner: bob.address, basket: [[D, 2n * 10n ** 12n]] },
       ]);
       await anchorEpoch(substrate, "e3", t3.root);
+      expect(await substrate.anchorParity(2, U)).to.equal(10n ** 30n);
+      expect(await substrate.anchorParity(2, D)).to.equal(10n ** 18n);
+      // A parity edit after the anchor changes nothing for its claims.
+      await setParity(substrate, dai, 5n * 10n ** 18n);
       await expect(claimTx(substrate, alice, t3, 0, "e3"))
-        .to.emit(substrate, "Claimed").withArgs(alice.address, digest("e3"), 2_500n, 3_500n);
-      // A leaf with no tokens carries value only.
+        .to.emit(substrate, "Claimed").withArgs(alice.address, digest("e3"), 50n, 150n);
       await claimTx(substrate, bob, t3, 1, "e3");
-      expect(await substrate.earnedValue(alice.address)).to.equal(3_500n);
-      expect(await substrate.earnedValue(bob.address)).to.equal(7n);
-      expect(await substrate.totalEarnedValue()).to.equal(3_507n);
+      expect(await substrate.earnedValue(alice.address)).to.equal(150n);
+      expect(await substrate.earnedValue(bob.address)).to.equal(2n);
+      expect(await substrate.totalEarnedValue()).to.equal(152n);
       expect(await substrate.owed(alice.address, U)).to.equal(150n);
+    });
+
+    it("no leaf can grant more REP value than the capped amounts are worth", async function () {
+      const { usdPool } = await fillPools();
+      // Take the token out of the index before the epoch is anchored: its
+      // amounts still pay out, and are worth no REP.
+      await setParity(substrate, usd, 0n);
+      const t = claimTree([{ earner: alice.address, tokens: [U], amounts: [usdPool] }]);
+      await anchorEpoch(substrate, "e2", t.root);
+      await claimTx(substrate, alice, t, 0, "e2");
+      expect(await substrate.owed(alice.address, U)).to.equal(usdPool);
+      expect(await substrate.earnedValue(alice.address)).to.equal(0n);
+      // A leaf with no amounts is worth nothing.
+      const t3 = claimTree([{ earner: bob.address, tokens: [], amounts: [] }]);
+      await anchorEpoch(substrate, "e3", t3.root);
+      await claimTx(substrate, bob, t3, 0, "e3");
+      expect(await substrate.earnedValue(bob.address)).to.equal(0n);
+    });
+
+    it("a malformed parity reads as out of the index and never blocks an anchor", async function () {
+      await fillPools();
+      const reg = await ethers.getContractAt("MockRegistry", await substrate.registry());
+      await reg.setValue(`jurisdiction.parity.${U.toLowerCase()}`, "not a number");
+      expect(await substrate.parityOf(U)).to.equal(0n);
+      await anchorEpoch(substrate, "e2");
+      expect(await substrate.anchorParity(1, U)).to.equal(0n);
     });
   });
 

@@ -106,7 +106,7 @@ describe("Substrate behind a proxy", function () {
     const U = await usd.getAddress();
     await payFees(substrate, usd, 1_000_000n);      // 12_500 tool share, 12_500 treasury
     await anchorEpoch(substrate, "e1");
-    const tree = claimTree([{ earner: alice.address, tokens: [U], amounts: [777n], value: 777n }]);
+    const tree = claimTree([{ earner: alice.address, tokens: [U], amounts: [777n] }]);
     await anchorEpoch(substrate, "e2", tree.root);
     await claimTx(substrate, alice, tree, 0, "e2");
     await substrate.connect(gov).setServiceFeeBps(300);

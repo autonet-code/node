@@ -103,8 +103,8 @@ describe("Substrate governor-only anchoring + the pool cap", function () {
 
       // The second anchor's root over-allocates (12_000 + 600 > 12_500).
       const tree = claimTree([
-        { earner: a1.address, tokens: [U], amounts: [12_000n], value: 1n },
-        { earner: a2.address, tokens: [U], amounts: [600n], value: 1n },
+        { earner: a1.address, tokens: [U], amounts: [12_000n] },
+        { earner: a2.address, tokens: [U], amounts: [600n] },
       ]);
       await anchorTx(substrate, gov, await anchorFields(substrate, "e2", tree.root));
       expect(await substrate.poolCap(U)).to.equal(12_500n);
