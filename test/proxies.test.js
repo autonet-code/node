@@ -6,7 +6,12 @@ const {
   deploySubstrateWith,
   registerAgent,
   signVoucher,
-  fundATN,
+  deployIndexToken,
+  fund,
+  payFees,
+  anchorEpoch,
+  claimTree,
+  claimTx,
   SLOT_GOVERNOR,
 } = require("./helpers");
 
@@ -32,8 +37,7 @@ async function cloneOf(factoryName, implementation, initArgs) {
 
 describe("Substrate behind a proxy", function () {
   let substrate, gov, deployer, alice, faucet, stranger;
-  const SubstrateArgs = (governor) => [
-    ONE, ZERO, governor, ZERO, ethers.ZeroHash, "Test ATN", "REPATN", 250, 5000];
+  const SubstrateArgs = (governor) => [ONE, governor, ZERO, ONE, 250, 5000];
 
   beforeEach(async function () {
     [deployer, alice, faucet, stranger] = await ethers.getSigners();
@@ -44,7 +48,7 @@ describe("Substrate behind a proxy", function () {
   it("is set up by initialize, at the proxy's own address", async function () {
     expect(await substrate.governor()).to.equal(gov.address);
     expect(await substrate.treasury()).to.equal(deployer.address);
-    expect(await substrate.name()).to.equal("Test ATN");
+    expect(await substrate.registry()).to.not.equal(ZERO);
     expect(await substrate.serviceFeeBps()).to.equal(250);
     expect(await substrate.deployedAt()).to.be.gt(0);
     expect(await substrate.latestCutoff()).to.equal(await substrate.deployedAt());
@@ -80,7 +84,7 @@ describe("Substrate behind a proxy", function () {
     // The implementation as the suite deploys it: inert arguments.
     const F = await ethers.getContractFactory("Substrate");
     const DEAD = "0x000000000000000000000000000000000000dEaD";
-    const impl = await F.deploy(ZERO, ZERO, DEAD, ZERO, ethers.ZeroHash, "", "", 50, 0);
+    const impl = await F.deploy(ZERO, DEAD, ZERO, DEAD, 50, 0);
     await impl.waitForDeployment();
     const Proxy = await ethers.getContractFactory("SubstrateProxy");
     const proxy = await Proxy.deploy(await impl.getAddress(), "0x");
@@ -90,19 +94,23 @@ describe("Substrate behind a proxy", function () {
     expect(await s.governor()).to.equal(ZERO);
     await s.initialize(...SubstrateArgs(gov.address));
     expect(await s.governor()).to.equal(gov.address);
-    expect(await s.name()).to.equal("Test ATN");
+    expect(await s.registry()).to.equal(ONE);
     await expect(s.initialize(...SubstrateArgs(stranger.address)))
       .to.be.revertedWithCustomError(s, "InvalidInitialization");
     await registerAgent(s, alice, "alice");
   });
 
-  it("only the governor upgrades; balances, agents and settings survive", async function () {
+  it("only the governor upgrades; pools, claims, agents and settings survive", async function () {
     await registerAgent(substrate, alice, "alice");
-    await registerAgent(substrate, faucet, "faucet");
-    await fundATN(substrate, faucet, faucet, alice.address, 777n);
+    const usd = await deployIndexToken(substrate);
+    const U = await usd.getAddress();
+    await payFees(substrate, usd, 1_000_000n);      // 12_500 tool share, 12_500 treasury
+    await anchorEpoch(substrate, "e1");
+    const tree = claimTree([{ earner: alice.address, tokens: [U], amounts: [777n], value: 777n }]);
+    await anchorEpoch(substrate, "e2", tree.root);
+    await claimTx(substrate, alice, tree, 0, "e2");
     await substrate.connect(gov).setServiceFeeBps(300);
     const deployedAt = await substrate.deployedAt();
-    const supply = await substrate.atnTotalSupply();
 
     const V2 = await ethers.getContractFactory("SubstrateV2Mock");
     const v2 = await V2.deploy();
@@ -119,19 +127,23 @@ describe("Substrate behind a proxy", function () {
 
     const upgraded = V2.attach(await substrate.getAddress());
     expect(await upgraded.version2()).to.equal(2n);
-    expect(await upgraded.balanceOf(alice.address)).to.equal(777n);
-    expect(await upgraded.atnTotalSupply()).to.equal(supply);
+    expect(await upgraded.owed(alice.address, U)).to.equal(777n);
+    expect(await upgraded.earnedValue(alice.address)).to.equal(777n);
+    expect(await upgraded.treasuryOwed(U)).to.equal(12_500n);
+    expect(await upgraded.toolShareTotal(U)).to.equal(12_500n);
+    expect(await upgraded.held(U)).to.equal(25_000n);
+    expect(await upgraded.anchorCount()).to.equal(2n);
     expect(await upgraded.isRegistered(alice.address)).to.equal(true);
     expect(await upgraded.governor()).to.equal(gov.address);
     expect(await upgraded.serviceFeeBps()).to.equal(300);
     expect(await upgraded.deployedAt()).to.equal(deployedAt);
-    expect(await upgraded.name()).to.equal("Test ATN");
+    expect(await upgraded.tokenDecimals(U)).to.equal(6);
     // Still set up: the new code cannot be initialized over the old state.
     await expect(upgraded.initialize(...SubstrateArgs(stranger.address)))
       .to.be.revertedWithCustomError(upgraded, "InvalidInitialization");
-    // And ATN still moves.
-    await upgraded.connect(alice).transfer(stranger.address, 77n);
-    expect(await upgraded.balanceOf(stranger.address)).to.equal(77n);
+    // And what is owed still pays out.
+    await upgraded.withdraw(alice.address, U);
+    expect(await usd.balanceOf(alice.address)).to.equal(777n);
   });
 
   it("refuses an upgrade to a contract that is not a Substrate implementation", async function () {
@@ -231,22 +243,24 @@ describe("AnchorElection, ServiceRegistry and PaymentChannel as clones", functio
     expect(await channel.challengeWindow()).to.equal(1800n);
     expect((await channel.eip712Domain()).verifyingContract).to.equal(chAddr);
 
-    await fundATN(substrate, faucet, faucet, client.address, 10_000n);
-    await substrate.connect(client).approve(chAddr, 10_000n);
-    await channel.connect(client).openChannel(provider.address, 5000n);
+    const usd = await deployIndexToken(substrate);
+    const U = await usd.getAddress();
+    await fund(usd, client, chAddr, 10_000n);
+    await channel.connect(client).openChannel(provider.address, U, 5000n);
     const id = await channel.channelCount();
-    expect(await substrate.balanceOf(chAddr)).to.equal(5000n);
+    expect(await usd.balanceOf(chAddr)).to.equal(5000n);
 
     // A voucher signed for the implementation's address is not this clone's.
-    const wrong = await signVoucher(impl, client, id, 3000n);
+    const wrong = await signVoucher(impl, client, id, 3000n, U);
     await expect(channel.connect(provider).settle(id, 3000n, wrong, 1000n))
       .to.be.revertedWithCustomError(channel, "BadVoucherSignature");
 
     const sig = await signVoucher(channel, client, id, 3000n);
-    const before = await substrate.balanceOf(provider.address);
+    const before = await usd.balanceOf(provider.address);
     await channel.connect(provider).settle(id, 3000n, sig, 1000n);
-    // 2.5% fee: the provider receives 975 of the 1000 served.
-    expect((await substrate.balanceOf(provider.address)) - before).to.equal(975n);
+    // 2.5% fee: the provider receives 975 of the 1000 served, Substrate 25.
+    expect((await usd.balanceOf(provider.address)) - before).to.equal(975n);
+    expect(await usd.balanceOf(sub)).to.equal(25n);
     // The reentrancy guard keeps working call after call.
     await channel.connect(provider).settle(id, 3000n, sig, 2000n);
     await channel.connect(client).topUp(id, 100n);

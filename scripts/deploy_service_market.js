@@ -4,7 +4,7 @@
  * rotation only needs the two market contracts on the new Substrate ABI.
  *
  *   ServiceRegistry(substrate)
- *   PaymentChannel(substrate, challengeWindow)   // 2-arg, ATN-only build
+ *   PaymentChannel(substrate, challengeWindow)   // a channel picks its index token at open
  *
  * Usage:
  *   SUBSTRATE_ADDR=0x... [CHALLENGE_WINDOW=3600] \

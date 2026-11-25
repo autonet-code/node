@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { deploySubstrateWith, mintATN, SLOT_GOVERNOR } = require("./helpers");
+const { ZERO, deploySubstrateWith, deployIndexToken, fund, SLOT_GOVERNOR } = require("./helpers");
 
 // The service fee and its treasury share are set at deploy and governed
 // afterwards: the right values change as the jurisdiction grows.
@@ -24,18 +24,31 @@ describe("Substrate fee settings", function () {
     await expect(deploySubstrateWith({ serviceFeeBps: 49 })).to.be.reverted;
     await expect(deploySubstrateWith({ serviceFeeBps: 1001 })).to.be.reverted;
     await expect(deploySubstrateWith({ feeTreasuryBps: 9001 })).to.be.reverted;
+    await deploySubstrateWith({ feeTreasuryBps: 9000 });
   });
 
   it("splits each fee by the treasury share", async function () {
     const s = await deploySubstrateWith({ serviceFeeBps: 1000, feeTreasuryBps: 2000 });
-    await mintATN(s, payer, payer, 10_000n);
-    const treasury = await s.treasury();
-    const before = await s.balanceOf(treasury);
-    await expect(s.connect(payer).payForService(provider.address, 10_000n, ethers.ZeroHash))
+    const usd = await deployIndexToken(s);
+    const U = await usd.getAddress();
+    await fund(usd, payer, s, 10_000n);
+    await expect(s.connect(payer).payForService(U, provider.address, 10_000n, ethers.ZeroHash))
       .to.emit(s, "ServiceFee")
-      .withArgs(payer.address, provider.address, 10_000n, 800n, 200n);
-    expect(await s.balanceOf(treasury)).to.equal(before + 200n);
-    expect(await s.balanceOf(provider.address)).to.equal(9_000n);
+      .withArgs(payer.address, provider.address, U, 10_000n, 800n, 200n);
+    expect(await s.treasuryOwed(U)).to.equal(200n);
+    expect(await s.toolShareTotal(U)).to.equal(800n);
+    expect(await s.feeTotal(U)).to.equal(1_000n);
+    expect(await usd.balanceOf(provider.address)).to.equal(9_000n);
+  });
+
+  it("with no treasury the whole fee is the tool share", async function () {
+    const s = await deploySubstrateWith({ treasury: ZERO });
+    const usd = await deployIndexToken(s);
+    const U = await usd.getAddress();
+    await fund(usd, payer, s, 10_000n);
+    await s.connect(payer).payForService(U, provider.address, 10_000n, ethers.ZeroHash);
+    expect(await s.treasuryOwed(U)).to.equal(0n);
+    expect(await s.toolShareTotal(U)).to.equal(250n);
   });
 
   it("lets only the governor retune the treasury share, within bounds", async function () {

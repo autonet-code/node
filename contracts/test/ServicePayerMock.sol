@@ -2,18 +2,21 @@
 pragma solidity ^0.8.20;
 
 interface ISubstratePay {
-    function payForService(address recipient, uint256 amount, bytes32 requestId) external returns (bool);
+    function payForService(address token, address recipient, uint256 gross, bytes32 requestId) external;
 }
 
-/// @dev Test-only: a CONTRACT payer (stand-in for the DAO's ToolBond, which
-///      slashes by calling Substrate.payForService(accuser, stake, digest)
-///      from contract context). Pins that payForService has no EOA-only or
-///      agent-only payer check.
+interface IApproveOnly {
+    function approve(address spender, uint256 amount) external returns (bool);
+}
+
+/// @dev Test-only: a CONTRACT payer (stand-in for a DAO contract that pays
+///      a service from contract context). Pins that payForService has no
+///      EOA-only or agent-only payer check.
 contract ServicePayerMock {
-    function pay(address substrate, address recipient, uint256 amount, bytes32 requestId)
+    function pay(address substrate, address token, address recipient, uint256 gross, bytes32 requestId)
         external
-        returns (bool)
     {
-        return ISubstratePay(substrate).payForService(recipient, amount, requestId);
+        IApproveOnly(token).approve(substrate, gross);
+        ISubstratePay(substrate).payForService(token, recipient, gross, requestId);
     }
 }

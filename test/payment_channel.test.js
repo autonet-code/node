@@ -6,28 +6,32 @@ const {
   deploySubstrate,
   registerAgent,
   signVoucher,
-  fundATN,
+  deployIndexToken,
+  setParity,
+  fund,
   SLOT_GOVERNOR,
 } = require("./helpers");
 
 const CHALLENGE_WINDOW = 3600;
 
-// Substrate's service fee (fee-recycled emission): 2.5% of the gross payment,
-// half to the treasury, half burned. Vouchers are GROSS-denominated; the
-// provider receives net. These mirror Substrate's serviceFeeBps (default 2.5%).
-const feeOf = (gross) => (gross * 250n) / 10000n;
+// Substrate's service fee: 2.5% of the gross payout, rounded up; half of it
+// is owed to the treasury, the rest is the tool share (the pool). Vouchers
+// are GROSS-denominated; the provider receives net straight from the
+// deposit and Substrate receives the fee.
+const feeOf = (gross) => (gross * 250n + 9999n) / 10000n;
 const toTreasury = (gross) => (feeOf(gross) * 5000n) / 10000n;
-const burned = (gross) => feeOf(gross) - toTreasury(gross);
+const toolShare = (gross) => feeOf(gross) - toTreasury(gross);
 const netOf = (gross) => gross - feeOf(gross);
 
-describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", function () {
-  let substrate, channel;
+describe("PaymentChannel (prepaid credits in a value-index token, fee at each payout)", function () {
+  let substrate, channel, usd, U, S;
   let deployer, client, provider, other, faucet;
   let treasury;
 
   beforeEach(async function () {
     [deployer, client, provider, other, faucet] = await ethers.getSigners();
     substrate = await deploySubstrate();
+    S = await substrate.getAddress();
     // deploySubstrate wires the treasury to signers[0] (the deployer).
     treasury = await substrate.treasury();
     expect(treasury).to.equal(deployer.address);
@@ -36,32 +40,60 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await registerAgent(substrate, faucet, "faucet");
 
     const Ch = await ethers.getContractFactory("PaymentChannel");
-    channel = await Ch.deploy(await substrate.getAddress(), CHALLENGE_WINDOW);
+    channel = await Ch.deploy(S, CHALLENGE_WINDOW);
     await channel.waitForDeployment();
 
-    // Client holds 10_000 ATN and approves the channel to pull deposits.
-    await fundATN(substrate, faucet, faucet, client.address, 10_000n);
-    await substrate.connect(client).approve(await channel.getAddress(), 10_000n);
+    // A 6-decimal token of the index; the client holds 10_000 and approves
+    // the channel to pull deposits.
+    usd = await deployIndexToken(substrate);
+    U = await usd.getAddress();
+    await fund(usd, client, channel, 10_000n);
   });
 
   async function openChannel(deposit = 5000n) {
-    await channel.connect(client).openChannel(provider.address, deposit);
+    await channel.connect(client).openChannel(provider.address, U, deposit);
     return await channel.channelCount();
   }
 
   it("open escrows the deposit and emits", async function () {
-    await expect(channel.connect(client).openChannel(provider.address, 5000n))
+    await expect(channel.connect(client).openChannel(provider.address, U, 5000n))
       .to.emit(channel, "ChannelOpened")
-      .withArgs(1n, client.address, provider.address, 5000n);
-    expect(await substrate.balanceOf(await channel.getAddress())).to.equal(5000n);
+      .withArgs(1n, client.address, provider.address, U, 5000n);
+    expect(await usd.balanceOf(await channel.getAddress())).to.equal(5000n);
+    expect((await channel.getChannel(1n)).token).to.equal(U);
+    // Opening lists the token on Substrate, so its fees stay collectable.
+    expect(await substrate.tokenDecimals(U)).to.equal(6);
+  });
+
+  it("refuses a token that is not in the index", async function () {
+    const other = await deployIndexToken(substrate, { parity: 0n });
+    await fund(other, client, channel, 1000n);
+    await expect(channel.connect(client).openChannel(provider.address, await other.getAddress(), 1000n))
+      .to.be.revertedWithCustomError(channel, "TokenNotAccepted");
+  });
+
+  it("refuses a token that takes a cut of the deposit", async function () {
+    const cut = await deployIndexToken(substrate, { kind: "cut", cutBps: 100 });
+    await fund(cut, client, channel, 10_000n);
+    await expect(channel.connect(client).openChannel(provider.address, await cut.getAddress(), 10_000n))
+      .to.be.revertedWithCustomError(channel, "ShortReceipt").withArgs(10_000n, 9_900n);
+  });
+
+  it("a voucher signed for another token does not verify", async function () {
+    const id = await openChannel(5000n);
+    const sig = await signVoucher(channel, client, id, 1000n, other.address);
+    await expect(channel.connect(provider).settle(id, 1000n, sig, 1000n))
+      .to.be.revertedWithCustomError(channel, "BadVoucherSignature");
+    expect(await channel.voucherHash(id, U, 1000n)).to.not.equal(
+      await channel.voucherHash(id, other.address, 1000n));
   });
 
   it("rejects zero provider / deposit", async function () {
     await expect(
-      channel.connect(client).openChannel(ethers.ZeroAddress, 1n)
+      channel.connect(client).openChannel(ethers.ZeroAddress, U, 1n)
     ).to.be.revertedWithCustomError(channel, "ProviderRequired");
     await expect(
-      channel.connect(client).openChannel(provider.address, 0n)
+      channel.connect(client).openChannel(provider.address, U, 0n)
     ).to.be.revertedWithCustomError(channel, "ZeroDeposit");
   });
 
@@ -101,11 +133,8 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const cumulative = 3000n;
     const sig = await signVoucher(channel, client, id, cumulative);
 
-    const treasBefore = await substrate.balanceOf(treasury);
-    const supplyBefore = await substrate.atnTotalSupply();
-
-    // closeChannel routes the payout through payForService: provider gets net,
-    // treasury gets half the fee, the burned half emits ServiceFee.
+    // closeChannel pays the provider the net from the deposit and Substrate
+    // the fee (collectFee), split between the treasury and the pool.
     await expect(channel.connect(provider).closeChannel(id, cumulative, sig, cumulative))
       .to.emit(channel, "ChannelClosed")
       .withArgs(id, 3000n, 2000n, anyValue)
@@ -113,17 +142,19 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       .withArgs(
         await channel.getAddress(),
         provider.address,
+        U,
         cumulative,
-        burned(cumulative),
+        toolShare(cumulative),
         toTreasury(cumulative)
       );
 
     // Provider receives GROSS minus the 2.5% service fee.
-    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(cumulative));
-    // Treasury got its half of the fee.
-    expect(await substrate.balanceOf(treasury)).to.equal(treasBefore + toTreasury(cumulative));
-    // Supply dropped by the burned half.
-    expect(await substrate.atnTotalSupply()).to.equal(supplyBefore - burned(cumulative));
+    expect(await usd.balanceOf(provider.address)).to.equal(netOf(cumulative));
+    // Substrate holds the fee: the treasury's share owed, the rest the pool's.
+    expect(await usd.balanceOf(S)).to.equal(feeOf(cumulative));
+    expect(await substrate.held(U)).to.equal(feeOf(cumulative));
+    expect(await substrate.treasuryOwed(U)).to.equal(toTreasury(cumulative));
+    expect(await substrate.toolShareTotal(U)).to.equal(toolShare(cumulative));
 
     // The provider's close collected everything it can: no window, the
     // remainder is the client's at once.
@@ -131,8 +162,8 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       .to.emit(channel, "RemainderWithdrawn")
       .withArgs(id, client.address, 2000n);
     // Refund is fee-free: client's balance ends at 10_000 - gross-claimed.
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 3000n);
-    expect(await substrate.balanceOf(await channel.getAddress())).to.equal(0n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 3000n);
+    expect(await usd.balanceOf(await channel.getAddress())).to.equal(0n);
   });
 
   it("a vanished provider never locks the deposit: the client closes and takes it all back", async function () {
@@ -147,7 +178,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await expect(channel.withdrawRemainder(id))
       .to.emit(channel, "RemainderWithdrawn")
       .withArgs(id, client.address, 5000n);
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n);
   });
 
   it("a provider's close inside the client's window releases the remainder at once", async function () {
@@ -156,7 +187,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await channel.connect(provider).closeChannel(id, 1200n, await signVoucher(channel, client, id, 1200n), 1200n);
     await expect(channel.withdrawRemainder(id))
       .to.emit(channel, "RemainderWithdrawn").withArgs(id, client.address, 3800n);
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 1200n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 1200n);
   });
 
   it("the provider can still settle inside the client's close window, not after", async function () {
@@ -165,7 +196,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await channel.connect(client).startClose(id);
     await expect(channel.connect(provider).closeChannel(id, 3000n, sig, 3000n))
       .to.emit(channel, "ChannelClosed");
-    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(3000n));
+    expect(await usd.balanceOf(provider.address)).to.equal(netOf(3000n));
 
     const id2 = await openChannel(1000n);
     const sig2 = await signVoucher(channel, client, id2, 500n);
@@ -180,15 +211,16 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const sig = await signVoucher(channel, client, id, 1000n);
     await channel.connect(provider).closeChannel(id, 1000n, sig, 1000n);
 
-    const supplyBefore = await substrate.atnTotalSupply();
-    const treasBefore = await substrate.balanceOf(treasury);
+    const heldBefore = await usd.balanceOf(S);
+    const owedBefore = await substrate.treasuryOwed(U);
     await time.increase(CHALLENGE_WINDOW + 1);
     await expect(channel.withdrawRemainder(id)).to.not.emit(substrate, "ServiceFee");
-    // No burn, no treasury take on the refund.
-    expect(await substrate.atnTotalSupply()).to.equal(supplyBefore);
-    expect(await substrate.balanceOf(treasury)).to.equal(treasBefore);
+    // No fee on the refund: Substrate's balance and books are unchanged.
+    expect(await usd.balanceOf(S)).to.equal(heldBefore);
+    expect(await substrate.treasuryOwed(U)).to.equal(owedBefore);
+    expect(await substrate.toolShareTotal(U)).to.equal(toolShare(1000n));
     // Client got the full unclaimed remainder back (deposit - gross claimed).
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 1000n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 1000n);
   });
 
   it("only the provider can close", async function () {
@@ -230,9 +262,9 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     // provider foolishly closes with an older, lower cumulative
     const staleSig = await signVoucher(channel, client, id, 1000n);
     await channel.connect(provider).closeChannel(id, 1000n, staleSig, 1000n);
-    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(1000n));
+    expect(await usd.balanceOf(provider.address)).to.equal(netOf(1000n));
 
-    // it cannot then submit the newer higher voucher — channel is Closing
+    // it cannot then submit the newer higher voucher Ã¢â‚¬â€ channel is Closing
     const newerSig = await signVoucher(channel, client, id, 4000n);
     await expect(
       channel.connect(provider).closeChannel(id, 4000n, newerSig, 4000n)
@@ -241,7 +273,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     // client's remainder reflects the (larger) unclaimed GROSS portion
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 1000n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 1000n);
   });
 
   it("over-claim beyond deposit is capped at the deposit", async function () {
@@ -249,11 +281,11 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const sig = await signVoucher(channel, client, id, 9999n);
     await channel.connect(provider).closeChannel(id, 9999n, sig, 9999n);
     // capped at deposit (gross), provider receives net of that
-    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(2000n));
+    expect(await usd.balanceOf(provider.address)).to.equal(netOf(2000n));
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
-    // remainder is zero; the fee's burn/treasury split accounts for the rest
-    expect(await substrate.balanceOf(await channel.getAddress())).to.equal(0n);
+    // remainder is zero; the provider's net and Substrate's fee account for the rest
+    expect(await usd.balanceOf(await channel.getAddress())).to.equal(0n);
   });
 
   it("cannot withdraw remainder before close, or twice", async function () {
@@ -274,10 +306,10 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     const id = await openChannel(5000n);
     const sig = await signVoucher(channel, client, id, 0n);
     await channel.connect(provider).closeChannel(id, 0n, sig, 0n);
-    expect(await substrate.balanceOf(provider.address)).to.equal(0n);
+    expect(await usd.balanceOf(provider.address)).to.equal(0n);
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n);
   });
 
   // ---------------------------------------------------------------------------
@@ -305,24 +337,23 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await channel.connect(client).startClose(id2);
     await channel.connect(provider).settle(id2, 3000n, sig2, 1000n);
     await time.increase(CHALLENGE_WINDOW + 1);
-    const before = await substrate.balanceOf(client.address);
+    const before = await usd.balanceOf(client.address);
     await channel.withdrawRemainder(id2);
-    expect(await substrate.balanceOf(client.address)).to.equal(before + 4000n);
+    expect(await usd.balanceOf(client.address)).to.equal(before + 4000n);
   });
 
   it("settle pays the difference net of fee and leaves the channel Open", async function () {
     const id = await openChannel(5000n);
     const sig1 = await signVoucher(channel, client, id, 1000n);
-    const supplyBefore = await substrate.atnTotalSupply();
     await expect(channel.connect(provider).settle(id, 1000n, sig1, 1000n))
       .to.emit(channel, "ChannelPaid")
       .withArgs(id, client.address, provider.address, 1000n, 1000n)
       .and.to.emit(substrate, "ServiceFee")
-      .withArgs(await channel.getAddress(), provider.address, 1000n,
-        burned(1000n), toTreasury(1000n));
-    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(1000n));
-    // The fee burns at the settle, not at the close.
-    expect(await substrate.atnTotalSupply()).to.equal(supplyBefore - burned(1000n));
+      .withArgs(await channel.getAddress(), provider.address, U, 1000n,
+        toolShare(1000n), toTreasury(1000n));
+    expect(await usd.balanceOf(provider.address)).to.equal(netOf(1000n));
+    // The fee is taken at the settle, not at the close.
+    expect(await usd.balanceOf(S)).to.equal(feeOf(1000n));
     let ch = await channel.getChannel(id);
     expect(ch.status).to.equal(1n); // Open
     expect(ch.claimed).to.equal(1000n);
@@ -333,7 +364,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await expect(channel.connect(provider).settle(id, 2500n, sig2, 2500n))
       .to.emit(channel, "ChannelPaid")
       .withArgs(id, client.address, provider.address, 1500n, 2500n);
-    expect(await substrate.balanceOf(provider.address))
+    expect(await usd.balanceOf(provider.address))
       .to.equal(netOf(1000n) + netOf(1500n));
     ch = await channel.getChannel(id);
     expect(ch.status).to.equal(1n);
@@ -383,7 +414,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       .withArgs(id, client.address, provider.address, 2000n, 3000n)
       .and.to.emit(channel, "ChannelClosed")
       .withArgs(id, 3000n, 2000n, anyValue);
-    expect(await substrate.balanceOf(provider.address))
+    expect(await usd.balanceOf(provider.address))
       .to.equal(netOf(1000n) + netOf(2000n));
     // Closed: no more settles.
     await expect(channel.connect(provider).settle(id, 3000n, sig, 3000n))
@@ -392,8 +423,8 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await expect(channel.withdrawRemainder(id))
       .to.emit(channel, "RemainderWithdrawn")
       .withArgs(id, client.address, 2000n);
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 3000n);
-    expect(await substrate.balanceOf(await channel.getAddress())).to.equal(0n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 3000n);
+    expect(await usd.balanceOf(await channel.getAddress())).to.equal(0n);
   });
 
   it("close pays only up to upTo (what was served); the unserved rest of the voucher is the client's", async function () {
@@ -405,7 +436,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       .withArgs(id, client.address, provider.address, 1200n, 1200n)
       .and.to.emit(channel, "ChannelClosed")
       .withArgs(id, 1200n, 3800n, anyValue);
-    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(1200n));
+    expect(await usd.balanceOf(provider.address)).to.equal(netOf(1200n));
     await expect(channel.withdrawRemainder(id))
       .to.emit(channel, "RemainderWithdrawn").withArgs(id, client.address, 3800n);
     // upTo at or below what settle already paid pays nothing more.
@@ -448,21 +479,21 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       .to.be.revertedWithCustomError(channel, "ChannelNotOpen");
     await expect(channel.withdrawRemainder(id))
       .to.emit(channel, "RemainderWithdrawn").withArgs(id, client.address, 3800n);
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 1200n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 1200n);
   });
 
   // ---------------------------------------------------------------------------
   // topUp: add to the buyer's credit
   // ---------------------------------------------------------------------------
 
-  it("topUp grows the deposit, pulls the ATN and emits", async function () {
+  it("topUp grows the deposit, pulls the token and emits", async function () {
     const id = await openChannel(1000n);
     await expect(channel.connect(client).topUp(id, 500n))
       .to.emit(channel, "ChannelToppedUp")
       .withArgs(id, client.address, 500n, 1500n);
     expect((await channel.getChannel(id)).deposit).to.equal(1500n);
-    expect(await substrate.balanceOf(await channel.getAddress())).to.equal(1500n);
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 1500n);
+    expect(await usd.balanceOf(await channel.getAddress())).to.equal(1500n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 1500n);
     // A voucher above the old deposit is now collectable up to the new one.
     await expect(channel.connect(provider).settle(
       id, 1400n, await signVoucher(channel, client, id, 1400n), 1400n))
@@ -490,7 +521,7 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
 
   it("topUp needs the allowance", async function () {
     const id = await openChannel(1000n);
-    await substrate.connect(client).approve(await channel.getAddress(), 0n);
+    await usd.connect(client).approve(await channel.getAddress(), 0n);
     await expect(channel.connect(client).topUp(id, 100n)).to.be.reverted;
   });
 
@@ -510,8 +541,8 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
     expect((await channel.getChannel(id)).claimed - honest).to.equal(ITEM);
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - cumulative);
-    expect(await substrate.balanceOf(await channel.getAddress())).to.equal(0n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - cumulative);
+    expect(await usd.balanceOf(await channel.getAddress())).to.equal(0n);
   });
 
   // ---------------------------------------------------------------------------
@@ -537,13 +568,13 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     expect(cumulative).to.equal(4000n);
 
     await channel.connect(provider).closeChannel(id, cumulative, latestSig, cumulative);
-    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(4000n));
+    expect(await usd.balanceOf(provider.address)).to.equal(netOf(4000n));
 
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.withdrawRemainder(id);
     // client paid exactly the served GROSS total; the unserved 1000 refunds.
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 4000n);
-    expect(await substrate.balanceOf(await channel.getAddress())).to.equal(0n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 4000n);
+    expect(await usd.balanceOf(await channel.getAddress())).to.equal(0n);
   });
 
   it("client stops paying mid-relationship: provider closes with last voucher, gets exactly the served total (net)", async function () {
@@ -556,15 +587,15 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
       cumulative += ITEM;
       lastSig = await signVoucher(channel, client, id, cumulative);
     }
-    // client vanishes here — no further vouchers exist.
+    // client vanishes here Ã¢â‚¬â€ no further vouchers exist.
 
     await channel.connect(provider).closeChannel(id, cumulative, lastSig, cumulative);
-    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(3000n));
+    expect(await usd.balanceOf(provider.address)).to.equal(netOf(3000n));
 
     await time.increase(CHALLENGE_WINDOW + 1);
     await channel.connect(other).withdrawRemainder(id); // anyone can trigger
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - 3000n);
-    expect(await substrate.balanceOf(await channel.getAddress())).to.equal(0n);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - 3000n);
+    expect(await usd.balanceOf(await channel.getAddress())).to.equal(0n);
   });
 
   it("theft ceiling: a provider who takes a voucher and never serves steals at most one item's increment (net)", async function () {
@@ -590,11 +621,11 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
 
     // The provider collected net(1100); the theft beyond honest work is bounded
     // by ONE item's increment (net), not the deposit.
-    const providerGot = await substrate.balanceOf(provider.address);
+    const providerGot = await usd.balanceOf(provider.address);
     expect(providerGot).to.equal(netOf(cumulative));
     const theft = providerGot - netOf(honestCumulative);
     expect(theft).to.equal(netOf(cumulative) - netOf(honestCumulative)); // one increment, net
     // Client's balance: 10_000 - gross claimed (fee came out of the claimed).
-    expect(await substrate.balanceOf(client.address)).to.equal(10_000n - cumulative);
+    expect(await usd.balanceOf(client.address)).to.equal(10_000n - cumulative);
   });
 });

@@ -1,185 +1,159 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity ^0.8.24;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @title Substrate — chain surface for the world-model substrate.
+/// @dev The DAO Registry's read surface: every parameter lives there,
+///      the value index among them (jurisdiction.parity.<token>).
+interface IRegistryRead {
+    function getRegistryValue(string memory key) external view returns (string memory);
+}
+
+/// @title Substrate: a jurisdiction's chain surface for the tool economy.
 ///
-/// Substrate-native replacement for the pre-substrate RPB / Registry /
-/// AutonetDAO contracts. Designed from scratch around the substrate's
-/// data shapes (epoch_id, epoch_root, agent_mint blob CID,
-/// authoritative payload hash) rather than retro-fitting them into
-/// task-driven training contracts.
+/// Four concerns that share state:
 ///
-/// Two responsibilities live here, intentionally folded into one
-/// contract because they share state:
+///   1. **Epoch anchoring.** Each epoch's close is anchored here (by the
+///      governor, or the AnchorElection as the anchorer): hash-chained,
+///      cutoffs strictly increasing, with the merkle root of the epoch's
+///      claims.
+///   2. **Agents and tools.** The agent registry with owner binding, and the
+///      authorship of published tools.
+///   3. **Service payments in the value index's tokens.** A payment is made
+///      in any token the jurisdiction's value index lists (a non-zero
+///      Registry `jurisdiction.parity.<token>`). Each takes the service fee:
+///      `feeTreasuryBps` of it is owed to the treasury and the rest, the tool
+///      share, fills that token's pool. Nothing is burned and nothing is
+///      minted: Substrate is not a token.
+///   4. **Claims from the pools.** Each epoch's close commits, per earner,
+///      an amount of every token's pool (the same fraction of each, the
+///      basket) and the REP value of the whole, priced by the close at the
+///      index pinned to the anchor. A claim credits the amounts as owed and
+///      adds the value to `earnedValue`, which the DAO's REP claim reads.
+///      Each token is then withdrawn on its own, so a token that freezes
+///      blocks nothing else.
 ///
-///   1. **Epoch anchoring** — at each network epoch close, one
-///      participant (typically an agent acting as the rotating
-///      canonical-ordering coordinator) submits the canonical anchor
-///      (epoch_id, epoch_root, prev_epoch_root, prev_anchor_hash,
-///      agent_mint_cid, payload_hash). The chain verifies the anchor
-///      links into the chain correctly and rejects forgeries.
-///
-///   2. **Household mint claims** — the close keys each mint leaf by a
-///      household's owner wallet (Decision 2026-10-27). Anyone (the
-///      household's daemon operator, typically) reads the authoritative
-///      mint from the off-chain agent_mint blob (CID is on chain) and
-///      calls claimFor(owner, amount, epochIdHash, proof). The contract
-///      dedupes per (claimant, epoch), binds the claim to a real
-///      anchored epoch, mints ATN to the owner, and accumulates its
-///      tool-pool earnings ledger.
-///
-/// Substrate is a PURE MONEY contract (Decision 2026-07-10, fees-only
-/// emission + REP-from-earnings): it moves ATN, takes the service fee,
-/// and records earnings. It mints NO reputation. Reputation (== the DAO
-/// governance token == review weight) lives DAO-side as a pull claim on
-/// the cumulative tool-pool mint (agentMintTotal) at a hardcoded 1:1.
-/// Net service revenue (serviceEarnings) is recorded here too but earns
-/// money only, no REP (Decision 2026-10-27). You cannot lie about REP
-/// because you cannot lie about ATN you provably earned from the pool.
-///
-/// What is deliberately NOT here
-/// -----------------------------
-///
-///   - ATN token / ERC20 / share purchases. The substrate doesn't
-///     need a token tied to its operation. Token economics will
-///     come back as a separate substrate-native contract when we get
-///     to incentive distribution. This contract is just the
-///     attribution layer.
-///   - Heartbeat / DAO governance. Separate concern.
-///   - Capability scoring, evolution proposals, sponsorship
-///     hierarchies. All pre-substrate concepts.
-///
-/// What an agent's chain interaction looks like
-/// --------------------------------------------
-///
-/// 1. Once: ``registerAgentBound(peerId, owner, parent, sig)``. Sets
-///    msg.sender as an active agent, bound to its owner wallet.
-///
-/// 2. Per epoch close its household minted in (any submitter):
-///      a. Off-chain: read EpochAnchored event for the epoch_id.
-///      b. Off-chain: fetch agent_mint blob via the cid.
-///      c. Off-chain: decode the owner's mint amount, scale to uint256,
-///         and build the merkle proof from the full mint map.
-///      d. On-chain: ``claimFor(owner, amount, epochIdHash, proof)``.
-///         Reverts if (owner, epochIdHash) was already claimed, or if
-///         (owner, amount) doesn't verify against the anchor's
-///         agentMintRoot.
-///
-/// 3. Anytime: read ``agentMintTotal(address)`` for cumulative earnings
-///    or ``mintForEpoch(address, bytes32)`` for per-epoch.
-contract Substrate is EIP712, Initializable, UUPSUpgradeable {
+/// Custody. Substrate holds only the pools and what is owed from them
+/// (earners' claims, the treasury's share). Channel deposits stay in
+/// PaymentChannel and bonds in ToolBond. Every token call is checked
+/// (SafeERC20), every inflow must arrive in full (a token that takes a cut
+/// is refused), every function that moves a token is guarded against
+/// reentry, and the books are Substrate's own: `balanceOf` is read only to
+/// measure inflows and to sweep what was sent outside a payment.
+contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTransient {
     using ECDSA for bytes32;
+    using SafeERC20 for IERC20;
+    using Checkpoints for Checkpoints.Trace208;
 
     // -------------------------------------------------------------------------
     // Deployment: one implementation, one proxy per jurisdiction
     //
     // A jurisdiction's Substrate is an ERC-1967 proxy over an implementation
     // deployed once, set up by initialize() in the transaction that creates
-    // the proxy. The proxy's address is the ATN token for the jurisdiction's
-    // whole life: its governor (the DAO timelock) can point it at new code
-    // (upgradeToAndCall), which keeps every balance, anchor, registration
-    // and earning. Nobody else can, and the values initialize() sets have
-    // no setter.
+    // the proxy. Its governor (the DAO timelock) can point it at new code
+    // (upgradeToAndCall), which keeps every pool, claim, anchor and
+    // registration, until it calls renounceUpgrades(), after which nobody
+    // can. The values initialize() sets have no setter, except the anchorer
+    // and the fee settings, which the governor retunes.
     //
     // The constructor takes the same arguments and sets up the instance it
     // creates, so a Substrate deployed directly works as a plain contract
     // (local chains, tests) and can never be initialized again: that is
-    // also what locks the implementation behind the proxies. A directly
-    // deployed Substrate cannot be upgraded (upgradeToAndCall only works
-    // through a proxy).
-    //
-    // The EIP-712 name and version are constants, so the domain separator
-    // of a proxy is computed for the proxy's own address.
+    // also what locks the implementation behind the proxies.
     // -------------------------------------------------------------------------
 
-    /// @dev EIP712 domain: name + version. The domain separator folds in
-    ///      chainId + this contract's address, so an owner-binding signature is
-    ///      bound to THIS Substrate deployment on THIS chain — it cannot be
-    ///      replayed against another Substrate instance or a fork.
-    /// @param treasury_ The DAO treasury address receiving the treasury share
-    ///        of the service fee (see payForService). Set once, with no
-    ///        setter.
-    /// @param vaultMinter_ The single privileged address (AutonetVault, from
-    ///        the DAO repo) allowed to mint ATN for purchased funding via
-    ///        mintFromVault. Set once, with no setter.
-    ///        Zero address = no vault: mintFromVault always reverts and the
-    ///        purchased-money feature is off.
-    /// @param governor_ The DAO timelock. The only address that may anchor
-    ///        an epoch (anchor) and retune the service fee
-    ///        (setServiceFeeBps). Anchors arrive as ordinary DAO proposals
-    ///        (Decision 2026-10-16), so the DAO's REP vote is the anchor
-    ///        authority and the DAO can cancel a bad anchor in the timelock.
-    ///        Set once and non-zero. It is also the only address that may
-    ///        upgrade a proxied Substrate.
+    /// @param treasury_ The DAO treasury: the fee's treasury share and any
+    ///        token sent here outside a payment are owed to it. Zero = no
+    ///        treasury share (the whole fee is the tool share).
+    /// @param governor_ The DAO timelock: anchors, sets the anchorer, retunes
+    ///        the fee, upgrades a proxy. Non-zero.
     /// @param anchorer_ The jurisdiction's AnchorElection, or address(0).
-    ///        Set at construction so a jurisdiction launched in one go
-    ///        (werule's JurisdictionFactory, which predicts the election's
-    ///        address) anchors from its first epoch; changed later by the
-    ///        governor (setAnchorer).
-    /// @param genesisRoot_ Merkle root of carried-over ATN balances for a
-    ///        jurisdiction fork or split (see claimGenesis), or bytes32(0)
-    ///        for a fresh network: zero means no genesis and every
-    ///        claimGenesis reverts. Set once, no setter.
+    /// @param registry_ The DAO Registry, where the value index lives.
+    ///        Non-zero.
     constructor(
         address treasury_,
-        address vaultMinter_,
         address governor_,
         address anchorer_,
-        bytes32 genesisRoot_,
-        string memory name_,
-        string memory symbol_,
+        address registry_,
         uint16 serviceFeeBps_,
         uint16 feeTreasuryBps_
     )
         EIP712("AutonetSubstrate", "1")
         initializer
     {
-        _init(treasury_, vaultMinter_, governor_, anchorer_, genesisRoot_,
-              name_, symbol_, serviceFeeBps_, feeTreasuryBps_);
+        _init(treasury_, governor_, anchorer_, registry_, serviceFeeBps_, feeTreasuryBps_);
     }
 
     /// @notice Set up a proxy's Substrate: the constructor's arguments, in
-    ///         the same order. Once per proxy; reverts on an instance that
-    ///         was already set up (every directly deployed one is).
+    ///         the same order. Once per proxy.
     function initialize(
         address treasury_,
-        address vaultMinter_,
         address governor_,
         address anchorer_,
-        bytes32 genesisRoot_,
-        string memory name_,
-        string memory symbol_,
+        address registry_,
         uint16 serviceFeeBps_,
         uint16 feeTreasuryBps_
     ) external initializer {
-        _init(treasury_, vaultMinter_, governor_, anchorer_, genesisRoot_,
-              name_, symbol_, serviceFeeBps_, feeTreasuryBps_);
+        _init(treasury_, governor_, anchorer_, registry_, serviceFeeBps_, feeTreasuryBps_);
     }
 
+    /// @notice True once the governor gave up upgrading this proxy.
+    bool public upgradesRenounced;
+
+    event UpgradesRenounced();
+
+    error UpgradesAreRenounced();
+
+    error NotDuringUpgrade();
+
+    /// @dev Transient flag: set while an authorized upgrade runs, so
+    ///      renounceUpgrades can only be the call of an upgradeToAndCall.
+    bytes32 private constant _UPGRADING_SLOT =
+        keccak256("autonet.substrate.upgrading");
+
     /// @dev Only the governor (the DAO timelock) may point a proxy at new
-    ///      code. The DAO treats that proposal as constitutional.
-    function _authorizeUpgrade(address) internal view override {
+    ///      code, and only until it renounces upgrades. The DAO's governor
+    ///      treats upgradeToAndCall as constitutional, by its selector.
+    function _authorizeUpgrade(address) internal override {
         if (msg.sender != governor) revert NotGovernor();
+        if (upgradesRenounced) revert UpgradesAreRenounced();
+        bytes32 slot = _UPGRADING_SLOT;
+        assembly ("memory-safe") { tstore(slot, 1) }
+    }
+
+    /// @notice Give up upgrades for good. One way, and only as the call of
+    ///         an upgradeToAndCall by the governor (to the same or a new
+    ///         implementation), so it takes the same constitutional proposal
+    ///         as an upgrade.
+    function renounceUpgrades() external {
+        if (msg.sender != governor) revert NotGovernor();
+        bytes32 slot = _UPGRADING_SLOT;
+        uint256 upgrading;
+        assembly ("memory-safe") { upgrading := tload(slot) }
+        if (upgrading == 0) revert NotDuringUpgrade();
+        upgradesRenounced = true;
+        emit UpgradesRenounced();
     }
 
     function _init(
         address treasury_,
-        address vaultMinter_,
         address governor_,
         address anchorer_,
-        bytes32 genesisRoot_,
-        string memory name_,
-        string memory symbol_,
+        address registry_,
         uint16 serviceFeeBps_,
         uint16 feeTreasuryBps_
     ) private {
         if (governor_ == address(0)) revert NoAnchorAuthority();
+        if (registry_ == address(0)) revert RegistryRequired();
         if (serviceFeeBps_ < MIN_SERVICE_FEE_BPS || serviceFeeBps_ > MAX_SERVICE_FEE_BPS) {
             revert FeeOutOfBounds(serviceFeeBps_);
         }
@@ -187,14 +161,11 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         serviceFeeBps = serviceFeeBps_;
         feeTreasuryBps = feeTreasuryBps_;
         treasury = treasury_;
-        vaultMinter = vaultMinter_;
         governor = governor_;
+        registry = registry_;
         deployedAt = block.timestamp;
         latestCutoff = block.timestamp;
         anchorer = anchorer_;
-        genesisRoot = genesisRoot_;
-        name = name_;
-        symbol = symbol_;
         emit AnchorerSet(address(0), anchorer_);
     }
 
@@ -207,41 +178,26 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         bytes32 epochRoot;
         bytes32 prevEpochRoot;
         bytes32 prevAnchorHash;
-        string agentMintCid;
+        // sha256 of the epoch's claim blob (the close's payload of claims),
+        // served peer to peer; not an IPFS CID.
+        string claimCid;
         bytes32 payloadHash;
         address submitter;
         uint256 blockNumber;
         uint256 timestamp;
-        // Merkle root over (owner wallet, scaled ATN amount) leaves for
-        // this epoch. claimFor verifies each claim
-        // against it — the mint amount is federation-ratified, not
-        // self-reported. Money-only leaf (Decision 2026-07-10): REP is a
-        // DAO-side function of ratified earnings, so nothing about voice
-        // is committed here. Appended last so prior tuple indexes hold.
-        bytes32 agentMintRoot;
-        // On-chain conservation (2026-10-12). windowBurned = ATN burned by
-        // payForService fees between the previous anchor and this one (tx
-        // order exact). mintPool = the PREVIOUS anchor's windowBurned: the
-        // fees-only pool this epoch may mint (lag-1, the same window the
-        // daemon close prices from; voice_state reads it from here).
-        // minted = cumulative claimFor amounts for this epoch (claims are
-        // capped on the network-wide total, mintPoolTotal, so an epoch may
-        // mint more than its own pool when earlier closes carried some
-        // over). Appended last so prior tuple indexes hold.
-        uint256 windowBurned;
-        uint256 mintPool;
-        uint256 minted;
-        // The epoch's cutoff (Decision 2026-10-26): its batches are those
-        // signed after the previous anchor's cutoff and at or before this
-        // one, and windowBurned is the fees burned in that same span.
-        // Appended last so prior tuple indexes hold.
+        // Merkle root of the epoch's leaves: one claim per earner (see
+        // claim) and, for ToolBond, one leaf per concluded tool, each type
+        // under its own tag.
+        bytes32 claimRoot;
+        // The epoch's batches are those signed after the previous anchor's
+        // cutoff and at or before this one; its fees are those collected in
+        // the same span.
         uint256 cutoff;
     }
 
-    /// @dev Sequential storage of anchors as submitted.
     Anchor[] private anchors;
     mapping(string => uint256) private anchorIndexByEpochId;  // 1-indexed
-    mapping(bytes32 => string) private epochIdByHash;          // for hash → string lookup
+    mapping(bytes32 => string) private epochIdByHash;
     bytes32 public latestAnchorHash;
     bytes32 public latestEpochRoot;
 
@@ -252,7 +208,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         bytes32 prevEpochRoot,
         bytes32 prevAnchorHash,
         bytes32 payloadHash,
-        string agentMintCid,
+        string claimCid,
         address submitter,
         uint256 blockNumber
     );
@@ -262,69 +218,35 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
     error PrevEpochRootMismatch(bytes32 expected, bytes32 got);
     error PrevAnchorHashMismatch(bytes32 expected, bytes32 got);
     error NoAnchorAuthority();
+    error RegistryRequired();
     error CutoffOutOfOrder(uint256 latest, uint256 got);
 
     event AnchorerSet(address indexed oldAnchorer, address indexed newAnchorer);
-
-    // =========================================================================
-    // Anchor authority (Decision 2026-10-16)
-    //
-    // Only the governor (the DAO timelock) anchors. Each anchor is an
-    // ordinary DAO proposal calling anchor(...): REP holders vote, the DAO
-    // Governor decides it early once the outcome cannot change (For above
-    // half of REP at the snapshot, or Against at half), and the timelock
-    // executes it. The REP-signature quorum and the genesis signer set this
-    // replaces are gone; the hash chain and the fees-only mint cap stay here.
-    // =========================================================================
 
     /// @notice Deployment timestamp: the REP snapshot for the first anchor.
     uint256 public deployedAt;
 
     /// @notice The contract allowed to anchor besides the governor: the
-    ///         jurisdiction's AnchorElection (Decision 2026-10-26). Set by
-    ///         the governor; address(0) = governor only.
+    ///         jurisdiction's AnchorElection. Set by the governor;
+    ///         address(0) = governor only.
     address public anchorer;
 
     /// @notice The latest anchored epoch's cutoff (deployedAt before any).
     uint256 public latestCutoff;
 
-    /// @dev Cumulative ATN burned by payForService fees, checkpointed by
-    ///      block timestamp, so the fees burned between any two cutoffs
-    ///      are known before either epoch is anchored.
-    Checkpoints.Trace208 private _burnedHistory;
-
-    /// @notice All ATN burned by payForService fees so far.
-    uint256 public totalBurned;
-
-    /// @notice Cumulative fees burned at the latest cutoff, as counted when
-    ///         that epoch was anchored. The next window starts here, so a
-    ///         fee burned later in the cutoff's own second lands in the next
-    ///         window instead of in neither.
-    uint256 public burnedAtLatestCutoff;
+    /// @notice The cutoff the pools are capped at: the cutoff of the anchor
+    ///         before the latest one (0 until two epochs are anchored). Claims
+    ///         of a token can never total more than its tool share collected
+    ///         up to it, so the pool an epoch allocates is the previous
+    ///         epoch's fees (lag one), and whatever a close leaves unallocated
+    ///         carries over.
+    uint256 public poolCutoff;
 
     /// @notice Set the anchorer (the AnchorElection). Governor only.
     function setAnchorer(address newAnchorer) external {
         if (msg.sender != governor) revert NotGovernor();
         emit AnchorerSet(anchorer, newAnchorer);
         anchorer = newAnchorer;
-    }
-
-    /// @notice Cumulative fees burned at or before `timestamp`.
-    function burnedUpTo(uint256 timestamp) public view returns (uint256) {
-        return _burnedHistory.upperLookup(uint48(timestamp));
-    }
-
-    /// @notice Fees burned after `fromTs` and at or before `toTs`.
-    function burnedBetween(uint256 fromTs, uint256 toTs)
-        external view returns (uint256)
-    {
-        if (toTs <= fromTs) return 0;
-        return burnedUpTo(toTs) - burnedUpTo(fromTs);
-    }
-
-    /// @notice ATN burned by payForService fees since the latest cutoff.
-    function burnedSinceAnchor() external view returns (uint256) {
-        return totalBurned - burnedAtLatestCutoff;
     }
 
     /// @notice The REP timepoint the close weighs the NEXT epoch at (the
@@ -334,35 +256,26 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         return n == 0 ? deployedAt : anchors[n - 1].timestamp;
     }
 
-    /// @notice The fees-only pool the NEXT anchor may mint (the latest
-    ///         anchor's windowBurned; 0 before any anchor).
-    function nextMintPool() public view returns (uint256) {
-        uint256 n = anchors.length;
-        return n == 0 ? 0 : anchors[n - 1].windowBurned;
-    }
-
-    /// @notice Anchor a network epoch close. Governor or the anchorer (the
-    ///         AnchorElection) only: the call arrives through a DAO decision.
-    /// @param agentMintRoot Merkle root over the epoch's
-    ///        (agent, scaledAmount) mint map; sorted-pair hashing,
-    ///        double-hashed leaves (see claimFor).
-    /// @param cutoff The epoch's cutoff: after the latest one and not in
-    ///        the future.
+    /// @notice Anchor a network epoch close. Governor or the anchorer only.
+    /// @param claimRoot Merkle root of the epoch's leaves (sorted-pair
+    ///        hashing, double-hashed leaves; see claim).
+    /// @param cutoff The epoch's cutoff: after the latest one and before
+    ///        this block, so every fee of the epoch is already counted.
     function anchor(
         string calldata epochId,
         bytes32 epochRoot,
         bytes32 prevEpochRoot,
         bytes32 prevAnchorHash,
-        string calldata agentMintCid,
+        string calldata claimCid,
         bytes32 payloadHash,
-        bytes32 agentMintRoot,
+        bytes32 claimRoot,
         uint256 cutoff
     ) external {
         if (msg.sender != governor
                 && (anchorer == address(0) || msg.sender != anchorer)) {
             revert NotGovernor();
         }
-        if (cutoff <= latestCutoff || cutoff > block.timestamp) {
+        if (cutoff <= latestCutoff || cutoff >= block.timestamp) {
             revert CutoffOutOfOrder(latestCutoff, cutoff);
         }
         if (bytes(epochId).length == 0) revert EpochIdEmpty();
@@ -376,53 +289,37 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
             revert PrevAnchorHashMismatch(latestAnchorHash, prevAnchorHash);
         }
 
-        bytes32 epochIdHash = keccak256(bytes(epochId));
-        // On-chain conservation: this anchor's mint pool is the previous
-        // epoch's fee window (lag-1, fees-only); its own window is the fees
-        // burned between the previous cutoff and its own.
-        uint256 mintPool = nextMintPool();
-        mintPoolTotal += mintPool;
-        uint256 burnedAtCutoff = burnedUpTo(cutoff);
-        uint256 windowBurned = burnedAtCutoff - burnedAtLatestCutoff;
-        burnedAtLatestCutoff = burnedAtCutoff;
+        // The pools may now pay out the fees up to the previous cutoff.
+        if (anchors.length > 0) poolCutoff = latestCutoff;
         latestCutoff = cutoff;
 
-        anchors.push(Anchor({
-            epochId: epochId,
-            epochRoot: epochRoot,
-            prevEpochRoot: prevEpochRoot,
-            prevAnchorHash: prevAnchorHash,
-            agentMintCid: agentMintCid,
-            payloadHash: payloadHash,
-            submitter: msg.sender,
-            blockNumber: block.number,
-            timestamp: block.timestamp,
-            agentMintRoot: agentMintRoot,
-            windowBurned: windowBurned,
-            mintPool: mintPool,
-            minted: 0,
-            cutoff: cutoff
-        }));
-        anchorIndexByEpochId[epochId] = anchors.length;
-        epochIdByHash[epochIdHash] = epochId;
+        Anchor storage a = anchors.push();
+        a.epochId = epochId;
+        a.epochRoot = epochRoot;
+        a.prevEpochRoot = prevEpochRoot;
+        a.prevAnchorHash = prevAnchorHash;
+        a.claimCid = claimCid;
+        a.payloadHash = payloadHash;
+        a.submitter = msg.sender;
+        a.blockNumber = block.number;
+        a.timestamp = block.timestamp;
+        a.claimRoot = claimRoot;
+        a.cutoff = cutoff;
+        _index(a);
+    }
 
-        // Content only (Decision 2026-10-26): no sender or block number,
-        // so the next epoch's prevAnchorHash is known before this anchor
-        // lands and elections can run ahead.
-        bytes32 newAnchorHash = _hashStored(anchors[anchors.length - 1]);
-        latestAnchorHash = newAnchorHash;
-        latestEpochRoot = epochRoot;
-
+    /// @dev Index the anchor just stored, chain to it, and announce it.
+    function _index(Anchor storage a) private {
+        bytes32 epochIdHash = keccak256(bytes(a.epochId));
+        anchorIndexByEpochId[a.epochId] = anchors.length;
+        epochIdByHash[epochIdHash] = a.epochId;
+        // Content only: no sender or block number, so the next epoch's
+        // prevAnchorHash is known before this anchor lands.
+        latestAnchorHash = _hashStored(a);
+        latestEpochRoot = a.epochRoot;
         emit EpochAnchored(
-            epochId,
-            epochIdHash,
-            epochRoot,
-            prevEpochRoot,
-            prevAnchorHash,
-            payloadHash,
-            agentMintCid,
-            msg.sender,
-            block.number
+            a.epochId, epochIdHash, a.epochRoot, a.prevEpochRoot, a.prevAnchorHash,
+            a.payloadHash, a.claimCid, msg.sender, block.number
         );
     }
 
@@ -432,20 +329,20 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         bytes32 epochRoot,
         bytes32 prevEpochRoot,
         bytes32 prevAnchorHash,
-        string calldata agentMintCid,
+        string calldata claimCid,
         bytes32 payloadHash,
-        bytes32 agentMintRoot,
+        bytes32 claimRoot,
         uint256 cutoff
     ) public pure returns (bytes32) {
         return keccak256(abi.encode(
-            epochId, epochRoot, prevEpochRoot, prevAnchorHash, agentMintCid,
-            payloadHash, agentMintRoot, cutoff));
+            epochId, epochRoot, prevEpochRoot, prevAnchorHash, claimCid,
+            payloadHash, claimRoot, cutoff));
     }
 
     function _hashStored(Anchor storage a) private view returns (bytes32) {
         return keccak256(abi.encode(
             a.epochId, a.epochRoot, a.prevEpochRoot, a.prevAnchorHash,
-            a.agentMintCid, a.payloadHash, a.agentMintRoot, a.cutoff));
+            a.claimCid, a.payloadHash, a.claimRoot, a.cutoff));
     }
 
     function anchorCount() external view returns (uint256) {
@@ -454,6 +351,16 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
 
     function getAnchor(uint256 index) external view returns (Anchor memory) {
         return anchors[index];
+    }
+
+    /// @notice The anchor's block timestamp (the next epoch's REP snapshot).
+    function anchorTimestamp(uint256 index) external view returns (uint256) {
+        return anchors[index].timestamp;
+    }
+
+    /// @notice The anchor's merkle root (claims and concluded tools).
+    function anchorRoot(uint256 index) external view returns (bytes32) {
+        return anchors[index].claimRoot;
     }
 
     function getAnchorByEpochId(string calldata epochId) external view returns (Anchor memory) {
@@ -467,8 +374,6 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
     }
 
     /// @notice True iff an epochIdHash maps to an anchored epoch.
-    /// @dev    Convenience for the per-epoch training submission path
-    ///         where agents reference epochs by hash, not string.
     function isAnchoredByHash(bytes32 epochIdHash) external view returns (bool) {
         return bytes(epochIdByHash[epochIdHash]).length > 0;
     }
@@ -480,8 +385,6 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
     struct Agent {
         uint256 registeredAt;
         bool active;
-        uint256 totalTrainingMint;
-        uint256 trainingSubmissionCount;
     }
 
     mapping(address => Agent) public agents;
@@ -772,9 +675,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
 
         agents[msg.sender] = Agent({
             registeredAt: block.timestamp,
-            active: true,
-            totalTrainingMint: 0,
-            trainingSubmissionCount: 0
+            active: true
         });
         agentPeerId[msg.sender] = peerId;
         registeredAgentList.push(msg.sender);
@@ -935,153 +836,470 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
         return toolAuthor[manifestDigest] != address(0);
     }
 
+
     // =========================================================================
-    // Per-epoch training records
+    // The value index
+    //
+    // A token is in the jurisdiction's value index while the DAO Registry
+    // holds a non-zero `jurisdiction.parity.<token>` (0x and 40 lowercase hex
+    // digits, a decimal string), the same key the economy module reads.
+    // Editing it is constitutional (the governor protects the prefix).
+    // The value of an amount is amount x parity / 1e30, in 6-decimal value
+    // units: 1 USDC (6 decimals) at parity 1e30 is 1e6, and so is 1 DAI
+    // (18 decimals) at parity 1e18. REP is that value x 1e12, DAO side.
     // =========================================================================
 
-    /// @dev mintForEpoch[agent][epochIdHash] = scaled mint amount.
-    ///      Zero means "agent did not submit for that epoch."
-    mapping(address => mapping(bytes32 => uint256)) public mintForEpoch;
+    /// @notice The DAO Registry (the value index's source). Set once.
+    address public registry;
 
-    /// @dev Cumulative tool-pool mint for each agent — the CUMULATIVE
-    ///      TOOL-POOL EARNINGS LEDGER (money), monotonic, one write site
-    ///      (claimFor). This is NOT reputation: under the
-    ///      fees-only / REP-from-earnings decision (2026-07-10) Substrate
-    ///      mints no reputation. REP lives DAO-side (RepToken) as pull
-    ///      claims on this ledger at a hardcoded 1:1 — tool authors claim
-    ///      REP on their pool distributions read from here. The kept name
-    ///      ``agentMintTotal`` is back-compat with Phase 5.6 callers.
-    mapping(address => uint256) public agentMintTotal;
+    uint256 private constant PARITY_SCALE = 1e30;
+    uint8 public constant MIN_TOKEN_DECIMALS = 6;
+    uint8 public constant MAX_TOKEN_DECIMALS = 18;
 
-    /// @dev Network-wide cumulative tool-pool mint (sum of all agents'
-    ///      agentMintTotal).
-    uint256 public networkMintTotal;
+    /// @notice Decimals of every token Substrate has accepted, stored when
+    ///         it was first listed and never read again; 0 = never listed.
+    mapping(address => uint8) public tokenDecimals;
 
-    /// @dev Cumulative fees-only pool: the sum of every anchor's mintPool.
-    ///      Claims are capped on this total, not per epoch (Decision
-    ///      2026-11-07): a close that leaves part of its pool unminted carries
-    ///      it over, and a later close allocates it.
-    uint256 public mintPoolTotal;
+    /// @dev Every token ever listed, in listing order (the pools' tokens).
+    address[] private _poolTokens;
 
-    using Checkpoints for Checkpoints.Trace208;
+    event TokenListed(address indexed token, uint8 decimals);
 
-    /// @param amount The ATN (money) minted in this training event, from
-    ///        the epoch's tool-usage pool (fees-only emission).
-    /// @param cumulativeForAgent The agent's cumulative tool-pool earnings
-    ///        (agentMintTotal) AFTER this event.
-    event TrainingRecorded(
-        address indexed agent,
-        bytes32 indexed epochIdHash,
+    error NotInIndex(address token);
+    error BadTokenDecimals(address token);
+    error TokenNotListed(address token);
+
+    /// @notice The token's parity in the index, 0 = not in it.
+    function parityOf(address token) public view returns (uint256) {
+        string memory v = IRegistryRead(registry).getRegistryValue(
+            string.concat("jurisdiction.parity.", Strings.toHexString(token)));
+        if (bytes(v).length == 0) return 0;
+        return Strings.parseUint(v);
+    }
+
+    /// @notice True iff a payment can be made in `token` now: it is in the
+    ///         index and has 6 to 18 decimals.
+    function acceptsToken(address token) public view returns (bool) {
+        if (parityOf(token) == 0) return false;
+        uint8 d = tokenDecimals[token];
+        if (d != 0) return true;
+        (bool ok, uint8 dec) = _readDecimals(token);
+        return ok && dec >= MIN_TOKEN_DECIMALS && dec <= MAX_TOKEN_DECIMALS;
+    }
+
+    /// @notice The value of `amount` of `token` at today's index, in 6-decimal
+    ///         value units; 0 when the token is not accepted. The one place
+    ///         the parity is turned into value (ToolBond values bonds here).
+    function valueOf(address token, uint256 amount) external view returns (uint256) {
+        if (!acceptsToken(token)) return 0;
+        return (amount * parityOf(token)) / PARITY_SCALE;
+    }
+
+    /// @notice List `token` (store its decimals) so its fees can be
+    ///         collected even after it leaves the index: a payment channel
+    ///         lists its token when it opens. Anyone; only an accepted token.
+    function listToken(address token) public {
+        if (tokenDecimals[token] != 0) return;
+        if (parityOf(token) == 0) revert NotInIndex(token);
+        (bool ok, uint8 dec) = _readDecimals(token);
+        if (!ok || dec < MIN_TOKEN_DECIMALS || dec > MAX_TOKEN_DECIMALS) {
+            revert BadTokenDecimals(token);
+        }
+        tokenDecimals[token] = dec;
+        _poolTokens.push(token);
+        emit TokenListed(token, dec);
+    }
+
+    function poolTokenCount() external view returns (uint256) {
+        return _poolTokens.length;
+    }
+
+    function poolTokens() external view returns (address[] memory) {
+        return _poolTokens;
+    }
+
+    function _readDecimals(address token) private view returns (bool, uint8) {
+        if (token.code.length == 0) return (false, 0);
+        (bool ok, bytes memory ret) = token.staticcall(abi.encodeWithSignature("decimals()"));
+        if (!ok || ret.length < 32) return (false, 0);
+        uint256 d = abi.decode(ret, (uint256));
+        if (d > type(uint8).max) return (false, 0);
+        return (true, uint8(d));
+    }
+
+    // =========================================================================
+    // Service payments and the fee
+    //
+    // The fee is serviceFeeBps of the gross, rounded up, so no split of a
+    // payment escapes it. feeTreasuryBps of the fee is owed to the treasury;
+    // the rest, the tool share, fills the token's pool, which pays the
+    // authors and reviewers of the tools that conclude. Both are set at
+    // deploy and retuned by the governor; at least a tenth of every fee is
+    // the tool share. Pricing is off chain (the provider's signed list).
+    // =========================================================================
+
+    /// @notice Fee on every service payment, in basis points of the gross.
+    uint16 public serviceFeeBps;
+    /// @notice Share OF THE FEE owed to the treasury; the rest is the tool
+    ///         share.
+    uint16 public feeTreasuryBps;
+    uint16 public constant BPS_DENOM = 10_000;
+
+    /// @notice Bounds on the governed service fee: 0.5% to 10%.
+    uint16 public constant MIN_SERVICE_FEE_BPS = 50;
+    uint16 public constant MAX_SERVICE_FEE_BPS = 1000;
+    /// @notice At least 10% of every fee is the tool share, so no vote can
+    ///         switch the tool pool off.
+    uint16 public constant MAX_FEE_TREASURY_BPS = 9000;
+
+    /// @notice DAO treasury (set once; no setter).
+    address public treasury;
+
+    /// @notice The DAO timelock. Set once; no setter.
+    address public governor;
+
+    /// @dev Cumulative tool share collected per token, checkpointed by block
+    ///      timestamp: the pools' cap and what the close allocates.
+    mapping(address => Checkpoints.Trace208) private _toolShareHistory;
+    /// @dev Cumulative fees collected per token (treasury share included),
+    ///      checkpointed by block timestamp: the epoch-length measure.
+    mapping(address => Checkpoints.Trace208) private _feeHistory;
+
+    /// @notice All tool share collected in `token` so far.
+    mapping(address => uint256) public toolShareTotal;
+    /// @notice All fees collected in `token` so far.
+    mapping(address => uint256) public feeTotal;
+
+    event ServicePayment(
+        address indexed payer,
+        address indexed recipient,
+        address indexed token,
         uint256 amount,
-        uint256 cumulativeForAgent
+        bytes32 requestId
     );
+    /// @notice One per fee collected: `payer` is who paid the fee (the buyer
+    ///         on a direct payment, the PaymentChannel on a channel payout).
+    event ServiceFee(
+        address indexed payer,
+        address indexed recipient,
+        address indexed token,
+        uint256 amount,
+        uint256 toolShare,
+        uint256 toTreasury
+    );
+    event ServiceFeeBpsSet(uint16 oldBps, uint16 newBps);
+    event FeeTreasuryBpsSet(uint16 oldBps, uint16 newBps);
+
+    error NotGovernor();
+    error FeeOutOfBounds(uint16 bps);
+    error ZeroAddress();
+    error ZeroAmount();
+    error ShortReceipt(address token, uint256 expected, uint256 received);
+
+    function setServiceFeeBps(uint16 newBps) external {
+        if (msg.sender != governor) revert NotGovernor();
+        if (newBps < MIN_SERVICE_FEE_BPS || newBps > MAX_SERVICE_FEE_BPS) {
+            revert FeeOutOfBounds(newBps);
+        }
+        emit ServiceFeeBpsSet(serviceFeeBps, newBps);
+        serviceFeeBps = newBps;
+    }
+
+    function setFeeTreasuryBps(uint16 newBps) external {
+        if (msg.sender != governor) revert NotGovernor();
+        if (newBps > MAX_FEE_TREASURY_BPS) revert FeeOutOfBounds(newBps);
+        emit FeeTreasuryBpsSet(feeTreasuryBps, newBps);
+        feeTreasuryBps = newBps;
+    }
+
+    /// @notice The fee on a payment of `gross`, rounded up.
+    function feeOf(uint256 gross) public view returns (uint256) {
+        return (gross * serviceFeeBps + BPS_DENOM - 1) / BPS_DENOM;
+    }
+
+    /// @notice Pay `recipient` for a service, in `token` (in the index):
+    ///         the recipient receives gross less the fee, straight from the
+    ///         payer; Substrate takes the fee. Approve this contract for
+    ///         `gross` first.
+    function payForService(
+        address token,
+        address recipient,
+        uint256 gross,
+        bytes32 requestId
+    ) external nonReentrant {
+        if (recipient == address(0)) revert ZeroAddress();
+        if (gross == 0) revert ZeroAmount();
+        if (parityOf(token) == 0) revert NotInIndex(token);
+        listToken(token);
+        uint256 fee = feeOf(gross);
+        _pullFee(token, msg.sender, recipient, gross, fee);
+        if (gross > fee) {
+            IERC20(token).safeTransferFrom(msg.sender, recipient, gross - fee);
+        }
+        emit ServicePayment(msg.sender, recipient, token, gross, requestId);
+    }
+
+    /// @notice Pay the fee on a payment of `gross` to `recipient` that the
+    ///         caller made itself (a PaymentChannel paying a provider the net
+    ///         from its deposit). Pulls exactly feeOf(gross) from the caller
+    ///         (approve first). The token must have been listed; it need no
+    ///         longer be in the index, so a channel opened in a token the DAO
+    ///         later removed still settles.
+    function collectFee(
+        address token,
+        address recipient,
+        uint256 gross,
+        bytes32 requestId
+    ) external nonReentrant {
+        if (tokenDecimals[token] == 0) revert TokenNotListed(token);
+        if (gross == 0) revert ZeroAmount();
+        _pullFee(token, msg.sender, recipient, gross, feeOf(gross));
+        requestId;
+    }
+
+    function _pullFee(
+        address token,
+        address payer,
+        address recipient,
+        uint256 gross,
+        uint256 fee
+    ) private {
+        if (fee == 0) return;
+        _pullExact(token, payer, fee);
+        uint256 toTreasury = treasury != address(0)
+            ? (fee * feeTreasuryBps) / BPS_DENOM
+            : 0;
+        uint256 toolShare = fee - toTreasury;
+
+        _book(token, fee, toolShare, toTreasury);
+        emit ServiceFee(payer, recipient, token, gross, toolShare, toTreasury);
+    }
+
+    function _book(address token, uint256 fee, uint256 toolShare, uint256 toTreasury) private {
+        if (toTreasury > 0) treasuryOwed[token] += toTreasury;
+        uint48 now_ = SafeCast.toUint48(block.timestamp);
+        uint256 f = feeTotal[token] + fee;
+        feeTotal[token] = f;
+        _feeHistory[token].push(now_, SafeCast.toUint208(f));
+        if (toolShare > 0) {
+            uint256 t = toolShareTotal[token] + toolShare;
+            toolShareTotal[token] = t;
+            _toolShareHistory[token].push(now_, SafeCast.toUint208(t));
+        }
+    }
+
+    /// @dev Pull exactly `amount` of `token` from `from` into Substrate's
+    ///      books. A token that delivers less (a transfer fee) is refused.
+    function _pullExact(address token, address from, uint256 amount) private {
+        uint256 before = IERC20(token).balanceOf(address(this));
+        IERC20(token).safeTransferFrom(from, address(this), amount);
+        uint256 got = IERC20(token).balanceOf(address(this)) - before;
+        if (got != amount) revert ShortReceipt(token, amount, got);
+        held[token] += amount;
+    }
+
+    /// @notice Tool share collected in `token` at or before `timestamp`.
+    function toolShareUpTo(address token, uint256 timestamp) public view returns (uint256) {
+        return _toolShareHistory[token].upperLookup(SafeCast.toUint48(timestamp));
+    }
+
+    /// @notice Tool share collected in `token` after `fromTs`, at or before `toTs`.
+    function toolShareBetween(address token, uint256 fromTs, uint256 toTs)
+        external view returns (uint256)
+    {
+        if (toTs <= fromTs) return 0;
+        return toolShareUpTo(token, toTs) - toolShareUpTo(token, fromTs);
+    }
+
+    /// @notice Fees collected in `token` at or before `timestamp`.
+    function feesUpTo(address token, uint256 timestamp) public view returns (uint256) {
+        return _feeHistory[token].upperLookup(SafeCast.toUint48(timestamp));
+    }
+
+    /// @notice Fees collected in `token` after `fromTs`, at or before `toTs`.
+    function feesBetween(address token, uint256 fromTs, uint256 toTs)
+        external view returns (uint256)
+    {
+        if (toTs <= fromTs) return 0;
+        return feesUpTo(token, toTs) - feesUpTo(token, fromTs);
+    }
+
+    // =========================================================================
+    // The pools and the claims
+    //
+    // One pool per token. Each epoch's close commits one leaf per earner (a
+    // household's owner wallet): the amounts it takes of each token's pool
+    // (the same fraction of every pool) and the REP value of the whole,
+    // priced by the close at the index pinned to the anchor:
+    //
+    //   keccak256(bytes.concat(keccak256(abi.encode(
+    //       CLAIM_TAG, earner, value, tokens, amounts))))
+    //
+    // tokens strictly ascending, one amount each. A claim credits the
+    // amounts as owed to the earner and adds the value to earnedValue; the
+    // money then leaves by withdraw, one token at a time. Claims of a token
+    // never total more than its tool share collected up to poolCutoff.
+    // =========================================================================
+
+    bytes32 public constant CLAIM_TAG = keccak256("autonet.claim");
+
+    /// @notice Cumulative REP value an earner has claimed, in 6-decimal value
+    ///         units. Monotonic: the DAO's REP claim mints the difference to
+    ///         what it already paid (x1e12).
+    mapping(address => uint256) public earnedValue;
+    /// @notice All REP value claimed so far.
+    uint256 public totalEarnedValue;
+
+    /// @notice Has `earner` claimed its leaf of the epoch?
+    mapping(address => mapping(bytes32 => bool)) public claimedEpoch;
+
+    /// @notice All of `token`'s pool claimed so far.
+    mapping(address => uint256) public claimedTotal;
+
+    /// @notice Claimed and not yet withdrawn, per earner and token.
+    mapping(address => mapping(address => uint256)) public owed;
+    /// @notice The treasury's fee share and swept surplus, not yet withdrawn.
+    mapping(address => uint256) public treasuryOwed;
+
+    /// @dev What Substrate's books say it holds of each token: every fee
+    ///      pulled and every surplus swept, less every withdrawal.
+    mapping(address => uint256) public held;
+
+    event Claimed(address indexed earner, bytes32 indexed epochIdHash, uint256 value, uint256 earnedValueAfter);
+    event ClaimedToken(address indexed earner, bytes32 indexed epochIdHash, address indexed token, uint256 amount);
+    event Withdrawn(address indexed earner, address indexed token, address to, uint256 amount);
+    event TreasuryWithdrawn(address indexed token, uint256 amount);
+    event Swept(address indexed token, uint256 amount);
 
     error EpochNotAnchored(bytes32 epochIdHash);
-    error AlreadySubmittedForEpoch(bytes32 epochIdHash);
-    error MintRootMissing(bytes32 epochIdHash);
-    error MintProofInvalid(bytes32 epochIdHash);
-    error EpochPoolExceeded(bytes32 epochIdHash, uint256 pool, uint256 mintedAfter);
+    error AlreadyClaimed(bytes32 epochIdHash);
+    error ClaimRootMissing(bytes32 epochIdHash);
+    error ClaimProofInvalid(bytes32 epochIdHash);
+    error TokensNotSorted();
+    error LengthMismatch();
+    error PoolExceeded(address token, uint256 cap, uint256 claimedAfter);
+    error NothingOwed();
 
-    /// @notice Claim a household's authoritative mint for an
-    ///         already-anchored epoch, on its behalf.
-    /// @dev    Permissionless (Decision 2026-10-27, the owner wallet
-    ///         claims): anyone may submit, typically the household's
-    ///         daemon operator key paying the gas. The leaf commits
-    ///         (claimant, amount), so the merkle proof fixes the amount
-    ///         and the ATN can only go to ``claimant``, the household's
-    ///         owner wallet. Per-(claimant, epochIdHash) idempotent. The
-    ///         epoch must have been anchored first, binding the claim to a
-    ///         federation-ratified close.
-    ///
-    ///         Money-only leaf (Decision 2026-07-10, fees-only emission +
-    ///         REP-from-earnings). This mints ATN ONLY and accrues the
-    ///         tool-pool earnings ledger; it grants NO reputation.
-    ///         Reputation is a pure DAO-side function of ratified
-    ///         earnings (REP claims 1:1 on agentMintTotal), so there is
-    ///         nothing about voice to commit or mint here.
-    /// @param claimant The household owner wallet the leaf names.
-    /// @param amount The ATN (money) mint, integer-scaled (default x1e6
-    ///               at the submitter, see Phase 5.6 docs).
-    /// @param epochIdHash keccak256 of the epoch_id string.
-    /// @param proof Merkle proof for the leaf
-    ///              keccak256(bytes.concat(keccak256(abi.encode(
-    ///              claimant, amount)))) under the anchor's
-    ///              agentMintRoot (sorted-pair hashing; a single-leaf
-    ///              tree has root == leaf and an empty proof).
-    function claimFor(
-        address claimant,
-        uint256 amount,
+    /// @notice The most that can ever have been claimed of `token`'s pool by
+    ///         now: its tool share collected up to poolCutoff.
+    function poolCap(address token) public view returns (uint256) {
+        uint256 c = poolCutoff;
+        return c == 0 ? 0 : toolShareUpTo(token, c);
+    }
+
+    /// @notice Claim an earner's leaf of an anchored epoch, on its behalf.
+    ///         Anyone may submit (the household's operator, typically); the
+    ///         leaf fixes the earner, so nothing can go elsewhere. Once per
+    ///         (earner, epoch). Credits the amounts as owed; withdraw pays.
+    function claim(
+        address earner,
         bytes32 epochIdHash,
+        address[] calldata tokens,
+        uint256[] calldata amounts,
+        uint256 value,
         bytes32[] calldata proof
     ) external {
         string storage epochId = epochIdByHash[epochIdHash];
-        if (bytes(epochId).length == 0) {
-            revert EpochNotAnchored(epochIdHash);
-        }
-        if (mintForEpoch[claimant][epochIdHash] != 0) {
-            revert AlreadySubmittedForEpoch(epochIdHash);
-        }
-        // Zero shares are not in the mint tree: a no-op (no event, no
-        // state change).
-        if (amount == 0) {
-            return;
+        if (bytes(epochId).length == 0) revert EpochNotAnchored(epochIdHash);
+        if (claimedEpoch[earner][epochIdHash]) revert AlreadyClaimed(epochIdHash);
+        if (tokens.length != amounts.length) revert LengthMismatch();
+        for (uint256 i = 1; i < tokens.length; i++) {
+            if (tokens[i] <= tokens[i - 1]) revert TokensNotSorted();
         }
 
-        bytes32 root = anchors[anchorIndexByEpochId[epochId] - 1].agentMintRoot;
-        if (root == bytes32(0)) revert MintRootMissing(epochIdHash);
-        // Money-only leaf: commits (claimant, amount). Same double-hashed
-        // OpenZeppelin leaf convention (mirrored by
-        // nodes/common/mint_merkle.py).
-        bytes32 leaf = keccak256(
-            bytes.concat(keccak256(abi.encode(claimant, amount)))
-        );
-        if (!_verifyMintProof(proof, root, leaf)) {
-            revert MintProofInvalid(epochIdHash);
+        bytes32 root = anchors[anchorIndexByEpochId[epochId] - 1].claimRoot;
+        if (root == bytes32(0)) revert ClaimRootMissing(epochIdHash);
+        if (!_verifyProof(proof, root, claimLeaf(earner, value, tokens, amounts))) {
+            revert ClaimProofInvalid(epochIdHash);
         }
 
-        // On-chain conservation: all earned mint together can never exceed
-        // the fees burned into the pool so far, whatever roots were
-        // anchored. The cap is cumulative so an unminted remainder carries
-        // over to later epochs.
-        {
-            uint256 mintedAfter = networkMintTotal + amount;
-            if (mintedAfter > mintPoolTotal) {
-                revert EpochPoolExceeded(epochIdHash, mintPoolTotal, mintedAfter);
-            }
-            anchors[anchorIndexByEpochId[epochId] - 1].minted += amount;
+        claimedEpoch[earner][epochIdHash] = true;
+        _credit(earner, epochIdHash, tokens, amounts);
+        if (value > 0) {
+            earnedValue[earner] += value;
+            totalEarnedValue += value;
         }
-
-        // Record the ratified per-epoch amount, then accrue the
-        // cumulative tool-pool earnings ledger (the DAO's REP claim base).
-        mintForEpoch[claimant][epochIdHash] = amount;
-        agentMintTotal[claimant] += amount;
-        networkMintTotal += amount;
-        if (agents[claimant].registeredAt != 0) {
-            agents[claimant].totalTrainingMint += amount;
-            agents[claimant].trainingSubmissionCount += 1;
-        }
-
-        // ATN balance is transferable money, minted at the ratified
-        // `amount` to the household.
-        _mintATN(claimant, amount);
-
-        emit TrainingRecorded(
-            claimant,
-            epochIdHash,
-            amount,
-            agentMintTotal[claimant]
-        );
+        emit Claimed(earner, epochIdHash, value, earnedValue[earner]);
     }
 
-    /// @notice Has (agent, epochIdHash) already been submitted?
-    function hasSubmittedForEpoch(address agent, bytes32 epochIdHash) external view returns (bool) {
-        return mintForEpoch[agent][epochIdHash] != 0;
+    /// @notice The leaf a claim proves (exposed for the close and tests).
+    function claimLeaf(
+        address earner,
+        uint256 value,
+        address[] calldata tokens,
+        uint256[] calldata amounts
+    ) public pure returns (bytes32) {
+        return keccak256(bytes.concat(keccak256(
+            abi.encode(CLAIM_TAG, earner, value, tokens, amounts))));
     }
 
-    /// @dev Sorted-pair merkle verification (OpenZeppelin-compatible):
-    ///      at each level the pair is hashed in ascending byte order,
-    ///      so proofs carry no left/right index bits.
-    function _verifyMintProof(
+    function _credit(
+        address earner,
+        bytes32 epochIdHash,
+        address[] calldata tokens,
+        uint256[] calldata amounts
+    ) private {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint256 a = amounts[i];
+            if (a == 0) continue;
+            address t = tokens[i];
+            uint256 after_ = claimedTotal[t] + a;
+            uint256 cap = poolCap(t);
+            if (after_ > cap) revert PoolExceeded(t, cap, after_);
+            claimedTotal[t] = after_;
+            owed[earner][t] += a;
+            emit ClaimedToken(earner, epochIdHash, t, a);
+        }
+    }
+
+    /// @notice Pay `earner` what it is owed in `token`. Anyone may trigger
+    ///         it; the money only goes to the earner.
+    function withdraw(address earner, address token) external nonReentrant {
+        _withdraw(earner, token, earner);
+    }
+
+    /// @notice The earner withdraws what it is owed in `token` to another
+    ///         address (for an address its token's issuer blocked).
+    function withdrawTo(address token, address to) external nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        _withdraw(msg.sender, token, to);
+    }
+
+    function _withdraw(address earner, address token, address to) private {
+        uint256 a = owed[earner][token];
+        if (a == 0) revert NothingOwed();
+        owed[earner][token] = 0;
+        held[token] -= a;
+        IERC20(token).safeTransfer(to, a);
+        emit Withdrawn(earner, token, to, a);
+    }
+
+    /// @notice Pay the treasury what it is owed in `token`. Anyone.
+    function withdrawTreasury(address token) external nonReentrant {
+        uint256 a = treasuryOwed[token];
+        if (a == 0) revert NothingOwed();
+        treasuryOwed[token] = 0;
+        held[token] -= a;
+        IERC20(token).safeTransfer(treasury, a);
+        emit TreasuryWithdrawn(token, a);
+    }
+
+    /// @notice Tokens sent here outside a payment belong to the treasury:
+    ///         move the surplus over the books into what it is owed. Anyone.
+    ///         The pools take only fees.
+    function sweep(address token) external nonReentrant {
+        if (treasury == address(0)) revert ZeroAddress();
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        uint256 h = held[token];
+        if (bal <= h) revert NothingOwed();
+        uint256 surplus = bal - h;
+        held[token] = bal;
+        treasuryOwed[token] += surplus;
+        emit Swept(token, surplus);
+    }
+
+    /// @dev Sorted-pair merkle verification (OpenZeppelin-compatible).
+    function _verifyProof(
         bytes32[] calldata proof,
         bytes32 root,
         bytes32 leaf
@@ -1094,432 +1312,5 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable {
                 : keccak256(abi.encodePacked(p, computed));
         }
         return computed == root;
-    }
-
-    // =========================================================================
-    // Genesis claim (jurisdiction forks and splits)
-    //
-    // A jurisdiction that forks or splits off an old chain carries the old
-    // ATN balances (minus excluded addresses) as a merkle root fixed at
-    // construction. Each address claims its own leaf once. Genesis ATN is
-    // outside the epoch mint cap (mintPool) and does NOT accrue the
-    // tool-pool earnings ledger (agentMintTotal), so it grants no REP
-    // claim; REP genesis is the DAO's initial members list. A fresh
-    // network passes a zero root and this path is closed. No admin keys,
-    // no setters. Supply check: atnTotalSupply minted ==
-    // epoch mints + vault mints + genesisMinted.
-    // =========================================================================
-
-    /// @notice Merkle root of genesis (address, amount) leaves; zero = none.
-    bytes32 public genesisRoot;
-
-    /// @notice Has this address claimed its genesis leaf?
-    mapping(address => bool) public genesisClaimed;
-
-    /// @notice Total ATN minted through claimGenesis.
-    uint256 public genesisMinted;
-
-    event GenesisClaimed(address indexed account, uint256 amount);
-
-    error NoGenesis();
-    error GenesisAlreadyClaimed(address account);
-    error GenesisProofInvalid(address account);
-
-    /// @notice Claim the caller's carried-over ATN balance.
-    /// @param amount The ATN amount the caller's leaf commits.
-    /// @param proof Merkle proof for the leaf
-    ///              keccak256(bytes.concat(keccak256(abi.encode(
-    ///              msg.sender, amount)))) under genesisRoot (the same
-    ///              double-hashed, sorted-pair convention as claimFor).
-    function claimGenesis(uint256 amount, bytes32[] calldata proof) external {
-        bytes32 root = genesisRoot;
-        if (root == bytes32(0)) revert NoGenesis();
-        if (genesisClaimed[msg.sender]) revert GenesisAlreadyClaimed(msg.sender);
-        bytes32 leaf = keccak256(
-            bytes.concat(keccak256(abi.encode(msg.sender, amount)))
-        );
-        if (!_verifyMintProof(proof, root, leaf)) {
-            revert GenesisProofInvalid(msg.sender);
-        }
-        genesisClaimed[msg.sender] = true;
-        genesisMinted += amount;
-        _mintATN(msg.sender, amount);
-        emit GenesisClaimed(msg.sender, amount);
-    }
-
-    // =========================================================================
-    // ATN: transferable token (Phase 7.1)
-    //
-    // The ONLY thing Substrate mints (Decision 2026-07-10). Reputation is
-    // not a Substrate asset — it is a DAO-side pull claim on earnings.
-    // Training mints ATN and accrues the earnings ledger; ATN moves freely.
-    //
-    // ERC20-shaped surface: name, symbol, decimals, balanceOf, transfer,
-    // approve, transferFrom, allowance. Name and symbol are set per
-    // jurisdiction at deploy (the setup derives them from the DAO, e.g.
-    // "Tetepare ATN" / "REPATN") so wallets tell jurisdictions' ATN apart;
-    // decimals is fixed at 6 (1 ATN = 1e6 base units, the scale of the
-    // close's mint amounts and of AutonetVault's parity).
-    // No external mint or burn function. The mint paths are claimFor
-    // (epoch pool), mintFromVault (purchased) and claimGenesis (fork
-    // carry-over). No admin keys.
-    // =========================================================================
-
-    string public name;
-    string public symbol;
-
-    function decimals() external pure returns (uint8) {
-        return 6;
-    }
-
-    mapping(address => uint256) private _atnBalance;
-    mapping(address => mapping(address => uint256)) private _atnAllowance;
-    uint256 public atnTotalSupply;
-
-    // Checkpointed balance history (the IVotes MECHANISM without the
-    // delegation layer — deliberate: getPastVotes-style semantics
-    // return 0 for accounts that never delegate, which would mute
-    // every wallet by default; the substrate's voice weighting needs
-    // past BALANCES, not past votes). Every balance mutation pushes a
-    // (block, balance) checkpoint, so historical balances are read
-    // from CURRENT state: balanceOfAt works on any node, no archive
-    // state required. Used by the federated close's voice weighting,
-    // which prices each household's review/usage credit from balances
-    // at the previous epoch's anchor block (nodes/common/voice_state.py).
-    // (``using Checkpoints for Checkpoints.Trace208`` is declared once,
-    // in the training-records section above.)
-    mapping(address => Checkpoints.Trace208) private _atnBalanceHistory;
-    Checkpoints.Trace208 private _atnSupplyHistory;
-
-    /// @dev Push the account's CURRENT balance as a checkpoint at this
-    ///      block. Same-block pushes overwrite (Trace208 semantics), so
-    ///      multiple transfers in one block leave one final checkpoint.
-    ///      uint208 cannot overflow: balances are bounded by total mint
-    ///      volume (1e6-scaled federation amounts).
-    function _checkpointATN(address account) private {
-        _atnBalanceHistory[account].push(
-            uint48(block.number), uint208(_atnBalance[account])
-        );
-    }
-
-    /// @dev The one ATN mint primitive: bumps balance + supply, checkpoints
-    ///      both, and emits the canonical mint transfer (from address(0)).
-    ///      Substrate mints ATN only and never reputation (REP is a DAO-side
-    ///      claim on earnings, Decision 2026-07-10). The training path
-    ///      additionally accrues the earnings ledger (agentMintTotal) around
-    ///      its call to this; the purchased-money path (mintFromVault) does
-    ///      not, because bought ATN grants no REP claim.
-    function _mintATN(address to, uint256 amount) private {
-        _atnBalance[to] += amount;
-        atnTotalSupply += amount;
-        _checkpointATN(to);
-        _atnSupplyHistory.push(uint48(block.number), uint208(atnTotalSupply));
-        emit Transfer(address(0), to, amount);
-    }
-
-    // The standard ERC-20 events: explorers, wallets and indexers find
-    // token movements by these exact signatures. Every balance change
-    // emits one: mints come from address(0), the burned fee share goes to
-    // address(0).
-    event Transfer(address indexed from, address indexed to, uint256 value);
-    event Approval(address indexed owner, address indexed spender, uint256 value);
-
-    error InsufficientATN(uint256 requested, uint256 available);
-    error InsufficientAllowance(uint256 requested, uint256 available);
-    error TransferToZero();
-
-    /// @notice ERC-20 total supply (the same number as atnTotalSupply).
-    function totalSupply() external view returns (uint256) {
-        return atnTotalSupply;
-    }
-
-    function balanceOf(address agent) external view returns (uint256) {
-        return _atnBalance[agent];
-    }
-
-    /// @notice ATN balance as of the END of `blockNumber` (latest
-    ///         checkpoint at or before it; 0 if none). Served from
-    ///         current state — works on non-archive nodes.
-    function balanceOfAt(address agent, uint256 blockNumber)
-        external
-        view
-        returns (uint256)
-    {
-        return _atnBalanceHistory[agent].upperLookup(uint48(blockNumber));
-    }
-
-    /// @notice Total ATN supply as of the END of `blockNumber`.
-    function atnTotalSupplyAt(uint256 blockNumber)
-        external
-        view
-        returns (uint256)
-    {
-        return _atnSupplyHistory.upperLookup(uint48(blockNumber));
-    }
-
-    function allowance(address owner, address spender) external view returns (uint256) {
-        return _atnAllowance[owner][spender];
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        if (to == address(0)) revert TransferToZero();
-        uint256 bal = _atnBalance[msg.sender];
-        if (bal < amount) revert InsufficientATN(amount, bal);
-        unchecked { _atnBalance[msg.sender] = bal - amount; }
-        _atnBalance[to] += amount;
-        _checkpointATN(msg.sender);
-        _checkpointATN(to);
-        emit Transfer(msg.sender, to, amount);
-        return true;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        _atnAllowance[msg.sender][spender] = amount;
-        emit Approval(msg.sender, spender, amount);
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        if (to == address(0)) revert TransferToZero();
-        uint256 allowed = _atnAllowance[from][msg.sender];
-        if (allowed < amount) revert InsufficientAllowance(amount, allowed);
-        uint256 bal = _atnBalance[from];
-        if (bal < amount) revert InsufficientATN(amount, bal);
-        // Allowance decreases unless set to max (the unlimited-approval
-        // convention used by ERC20 implementations everywhere).
-        if (allowed != type(uint256).max) {
-            unchecked { _atnAllowance[from][msg.sender] = allowed - amount; }
-        }
-        unchecked { _atnBalance[from] = bal - amount; }
-        _atnBalance[to] += amount;
-        _checkpointATN(from);
-        _checkpointATN(to);
-        emit Transfer(from, to, amount);
-        return true;
-    }
-
-    // =========================================================================
-    // Service payments (Phase 7.2)
-    //
-    // payForService is a thin wrapper around transfer that emits a
-    // structured event tagged with an off-chain request id. The event
-    // lets the network audit which on-chain payments matched which
-    // service requests; the request id is opaque to the contract
-    // (typically a sha256/keccak of the request body).
-    //
-    // No special pricing logic on chain. The price is whatever the
-    // caller pays. Daemons advertise their price off-chain (libp2p
-    // capability gossip); requesting agents call payForService with
-    // that amount before the serving agent agrees to serve.
-    //
-    // The contract does not enforce that the payment matches a real
-    // service request — that's the off-chain protocol's job. This
-    // function just provides a labeled payment rail with audit-grade
-    // event tagging.
-    // =========================================================================
-
-    event ServicePayment(
-        address indexed payer,
-        address indexed recipient,
-        uint256 amount,
-        bytes32 indexed requestId
-    );
-
-    // -------------------------------------------------------------------------
-    // Service fee (fee-recycled emission, docs/epoch_economics.md).
-    //
-    // A fee on every labeled service payment, split two ways:
-    //   - the BURNED share leaves supply here and re-enters as the recycled
-    //     component of the next epoch's emission pool (the federated close
-    //     reads ServiceFee logs between anchors) — burn-and-remint is
-    //     recycling implemented on the existing mint rail, and it is what
-    //     makes volume-linked emission wash-proof: pumping volume pays real
-    //     fees into a pool you only ever share pro-rata;
-    //   - the TREASURY share transfers to the immutable DAO treasury.
-    //
-    // Both are set at deploy (the werule setup's defaults: 2.5% and half) and
-    // governed afterwards: the right values change as the jurisdiction grows.
-    // -------------------------------------------------------------------------
-
-    /// @notice Fee on payForService, in basis points of the gross amount.
-    ///         Set at deploy, then governed (setServiceFeeBps).
-    uint16 public serviceFeeBps;
-    /// @notice Share OF THE FEE that goes to the treasury; the rest burns
-    ///         and funds the next tool pool. Set at deploy, then governed
-    ///         (setFeeTreasuryBps).
-    uint16 public feeTreasuryBps;
-    uint16 public constant BPS_DENOM = 10_000;
-
-    /// @notice Hardcoded bounds on the governed service fee: 0.5% to 10%.
-    uint16 public constant MIN_SERVICE_FEE_BPS = 50;
-    uint16 public constant MAX_SERVICE_FEE_BPS = 1000;
-    /// @notice At least 10% of every fee burns, so no DAO vote can switch
-    ///         the tool pool off.
-    uint16 public constant MAX_FEE_TREASURY_BPS = 9000;
-
-    /// @notice DAO treasury (set once at setup; no setter).
-    address public treasury;
-
-    /// @notice The single address (the DAO timelock) allowed to retune
-    ///         serviceFeeBps, set the anchorer and upgrade a proxied
-    ///         Substrate. Set once at setup; no setter.
-    address public governor;
-
-    /// @notice Emitted when the governor retunes the service fee.
-    event ServiceFeeBpsSet(uint16 oldBps, uint16 newBps);
-    /// @notice Emitted when the governor retunes the fee's treasury share.
-    event FeeTreasuryBpsSet(uint16 oldBps, uint16 newBps);
-
-    error NotGovernor();
-    error FeeOutOfBounds(uint16 bps);
-
-    /// @notice Retune the service fee. Governor-only; reverts unless
-    ///         50 <= newBps <= 1000 (0.5%–10%). A zero-address governor
-    ///         freezes the knob (this always reverts).
-    function setServiceFeeBps(uint16 newBps) external {
-        if (msg.sender != governor || governor == address(0)) {
-            revert NotGovernor();
-        }
-        if (newBps < MIN_SERVICE_FEE_BPS || newBps > MAX_SERVICE_FEE_BPS) {
-            revert FeeOutOfBounds(newBps);
-        }
-        uint16 oldBps = serviceFeeBps;
-        serviceFeeBps = newBps;
-        emit ServiceFeeBpsSet(oldBps, newBps);
-    }
-
-    /// @notice Retune the fee's treasury share (the rest burns).
-    ///         Governor-only; reverts above 9000 (90%).
-    function setFeeTreasuryBps(uint16 newBps) external {
-        if (msg.sender != governor || governor == address(0)) {
-            revert NotGovernor();
-        }
-        if (newBps > MAX_FEE_TREASURY_BPS) revert FeeOutOfBounds(newBps);
-        uint16 oldBps = feeTreasuryBps;
-        feeTreasuryBps = newBps;
-        emit FeeTreasuryBpsSet(oldBps, newBps);
-    }
-
-    /// @notice Cumulative net service revenue per recipient. Bumped by
-    ///         payForService with the post-fee `net`. A record only: service
-    ///         revenue earns no REP (Decision 2026-10-27; AutonetRepClaim
-    ///         claims on agentMintTotal alone). Monotonic.
-    mapping(address => uint256) public serviceEarnings;
-
-    // -------------------------------------------------------------------------
-    // Vault minter (purchased-money rail).
-    //
-    // ATN has exactly two mint origins: tool-pool EARNINGS via
-    // claimFor (which also accrues the REP claim ledger),
-    // and PURCHASED money via mintFromVault (which does not). The two are
-    // kept strictly separate on purpose: a holder who buys ATN
-    // through the DAO-repo AutonetVault accrues NO service/pool earnings
-    // and therefore no REP claim — money can be bought, voice must be
-    // earned (Decision 2026-07-10).
-    //
-    // vaultMinter is the single privileged address (the AutonetVault
-    // contract, DAO repo) allowed to call mintFromVault. It is set once at
-    // setup and has no setter. Zero address =
-    // no vault: the feature is off and mintFromVault always reverts.
-    // -------------------------------------------------------------------------
-
-    /// @notice The single address allowed to mint purchased ATN via
-    ///         mintFromVault (AutonetVault, DAO repo). Set once at setup;
-    ///         zero address = feature off.
-    address public vaultMinter;
-
-    /// @notice Emitted when the vault mints purchased ATN. Distinct from
-    ///         Transfer(address(0), ...) so indexers can separate
-    ///         purchased money from earned mint. No reputation is minted.
-    event VaultMint(address indexed to, uint256 amount);
-
-    error NotVaultMinter();
-    error VaultDisabled();
-
-    /// @notice Mint purchased ATN to `to`. Callable ONLY by the immutable
-    ///         vaultMinter (AutonetVault from the DAO repo, via a minimal
-    ///         IAutonetATN interface).
-    /// @dev Mints ATN ONLY — balance, supply, and checkpoints move exactly
-    ///      like the claimFor mint path, but the earnings
-    ///      ledger (agentMintTotal) is deliberately NOT touched: this is
-    ///      purchased money, not earned revenue, so it grants no REP claim
-    ///      (Decision 2026-07-10). If vaultMinter is the zero address the
-    ///      feature is off and this always reverts.
-    /// @param to     Recipient of the purchased ATN.
-    /// @param amount ATN to mint.
-    function mintFromVault(address to, uint256 amount) external {
-        if (vaultMinter == address(0)) revert VaultDisabled();
-        if (msg.sender != vaultMinter) revert NotVaultMinter();
-        if (to == address(0)) revert TransferToZero();
-        _mintATN(to, amount);
-        emit VaultMint(to, amount);
-    }
-
-    /// @notice Emitted per fee collection. `burned` is what the federated
-    ///         close sums into the next epoch's recycled emission pool.
-    event ServiceFee(
-        address indexed payer,
-        address indexed recipient,
-        uint256 amount,
-        uint256 burned,
-        uint256 toTreasury
-    );
-
-    /// @notice Pay a serving agent for a service request.
-    /// @param recipient The serving agent's address (the on-chain
-    ///                  identity of the agent that handled the
-    ///                  request — not the daemon process that
-    ///                  carried the bytes).
-    /// @param amount    ATN to transfer.
-    /// @param requestId Opaque off-chain request id (e.g. keccak256
-    ///                  of the service request body) — emitted in
-    ///                  the event so the request can be matched.
-    function payForService(
-        address recipient,
-        uint256 amount,
-        bytes32 requestId
-    ) external returns (bool) {
-        if (recipient == address(0)) revert TransferToZero();
-        uint256 bal = _atnBalance[msg.sender];
-        if (bal < amount) revert InsufficientATN(amount, bal);
-
-        // Service fee: burned share exits supply (recycled into the next
-        // epoch's emission pool by the close), treasury share transfers.
-        uint256 fee = (amount * serviceFeeBps) / BPS_DENOM;
-        uint256 toTreasury = treasury != address(0)
-            ? (fee * feeTreasuryBps) / BPS_DENOM
-            : 0;
-        uint256 burned = fee - toTreasury;
-        uint256 net = amount - fee;
-
-        unchecked { _atnBalance[msg.sender] = bal - amount; }
-        _atnBalance[recipient] += net;
-        // Cumulative net service revenue per recipient — the DAO's REP
-        // claim base for service providers (1:1, Decision 2026-07-10).
-        serviceEarnings[recipient] += net;
-        _checkpointATN(msg.sender);
-        _checkpointATN(recipient);
-        if (toTreasury > 0) {
-            _atnBalance[treasury] += toTreasury;
-            _checkpointATN(treasury);
-            emit Transfer(msg.sender, treasury, toTreasury);
-        }
-        if (burned > 0) {
-            atnTotalSupply -= burned;
-            // Feeds the fee windows between cutoffs (on-chain conservation).
-            totalBurned += burned;
-            _burnedHistory.push(uint48(block.timestamp), uint208(totalBurned));
-            _atnSupplyHistory.push(
-                uint48(block.number), uint208(atnTotalSupply)
-            );
-            emit Transfer(msg.sender, address(0), burned);
-        }
-
-        emit Transfer(msg.sender, recipient, net);
-        emit ServicePayment(msg.sender, recipient, amount, requestId);
-        if (fee > 0) {
-            emit ServiceFee(msg.sender, recipient, amount, burned, toTreasury);
-        }
-        return true;
     }
 }

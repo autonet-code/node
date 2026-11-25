@@ -1,304 +1,147 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const {
+  ZERO,
+  ONE,
   digest,
-  registerAgent,
-  mintLeaf,
-  mintATN,
   deploySubstrateWith,
-  seedPool,
+  deployIndexToken,
+  fund,
+  feeOf,
+  anchorFields,
+  anchorTx,
   anchorEpoch,
+  SLOT_GOVERNOR,
 } = require("./helpers");
 
-const ZERO = "0x0000000000000000000000000000000000000000";
+// Substrate is not a token: it anchors epochs, registers agents and tools,
+// takes the service fee in the value index's tokens and pays the pools out.
 
-// Deploy Substrate with an explicit governor (ZERO = the helper default,
-// signers[18], which anchors). The default test vault faucet (signers[19])
-// stays wired so mintATN works.
-async function deployWith(treasury, vaultMinter, governor) {
-  const opts = { treasury };
-  if (governor !== ZERO) opts.governor = governor;
-  if (vaultMinter !== ZERO) opts.vaultMinter = vaultMinter;
-  return deploySubstrateWith(opts);
-}
-
-// Anchor from the deploy's governor (Decision 2026-10-16). `relayer` is
-// unused: only the governor may anchor.
-async function genesisAnchor(substrate, relayer, epochId, root) {
-  return anchorEpoch(substrate, epochId, root);
-}
-
-// Sorted-pair keccak of two leaves (OpenZeppelin convention).
-function hashPair(a, b) {
-  const [lo, hi] = a <= b ? [a, b] : [b, a];
-  return ethers.keccak256(ethers.solidityPacked(["bytes32", "bytes32"], [lo, hi]));
-}
-
-describe("Substrate — fees-only emission + REP-from-earnings (2026-07-10)", function () {
-  let deployer, gov, faucet, submitter, agentA, agentB, payer, recipient;
+describe("Substrate: surface, deploy guards, fee and anchors", function () {
+  let signers, deployer, gov, payer, recipient;
 
   beforeEach(async function () {
-    [deployer, gov, faucet, submitter, agentA, agentB, payer, recipient] =
-      await ethers.getSigners();
+    signers = await ethers.getSigners();
+    [deployer, , , , , , payer, recipient] = signers;
+    gov = signers[SLOT_GOVERNOR];
   });
 
-  // -------------------------------------------------------------------------
-  // Money-only merkle leaf round-trip.
-  // -------------------------------------------------------------------------
-  describe("claimFor (household claimant, money-only 2-field leaf)", function () {
-    let substrate;
-    beforeEach(async function () {
-      substrate = await deployWith(deployer.address, ZERO, ZERO);
-      await registerAgent(substrate, submitter, "submitter");
-      await registerAgent(substrate, agentA, "agentA");
-      await registerAgent(substrate, agentB, "agentB");
-      // Fees-only pool for the next anchor (on-chain conservation).
-      await seedPool(substrate);
-    });
-
-    it("single-leaf tree: root == leaf, empty proof mints ATN and accrues earnings", async function () {
-      const amount = 1_000_000n;
-      const epochId = "epoch-single";
-      const root = mintLeaf(agentA.address, amount);
-      await genesisAnchor(substrate, submitter, epochId, root);
-      await expect(
-        substrate
-          .connect(agentA)
-          .claimFor(agentA.address, amount, digest(epochId), [])
-      )
-        .to.emit(substrate, "TrainingRecorded")
-        .withArgs(agentA.address, digest(epochId), amount, amount);
-
-      // ATN minted at the ratified amount; earnings ledger accrues it 1:1.
-      expect(await substrate.balanceOf(agentA.address)).to.equal(amount);
-      expect(await substrate.agentMintTotal(agentA.address)).to.equal(amount);
-      expect(await substrate.networkMintTotal()).to.equal(amount);
-      expect(await substrate.mintForEpoch(agentA.address, digest(epochId))).to.equal(amount);
-    });
-
-    it("anyone may submit; the ATN goes to the unregistered owner wallet the leaf names", async function () {
-      // `payer` is a bare owner wallet (never registered on Substrate);
-      // `submitter` is the daemon operator paying the gas.
-      const amount = 250_000n;
-      const epochId = "epoch-owner";
-      await genesisAnchor(substrate, submitter, epochId, mintLeaf(payer.address, amount));
-      const before = await substrate.balanceOf(submitter.address);
-      await expect(
-        substrate.connect(submitter).claimFor(payer.address, amount, digest(epochId), [])
-      )
-        .to.emit(substrate, "TrainingRecorded")
-        .withArgs(payer.address, digest(epochId), amount, amount);
-      expect(await substrate.balanceOf(payer.address)).to.equal(amount);
-      expect(await substrate.balanceOf(submitter.address)).to.equal(before);
-      expect(await substrate.agentMintTotal(payer.address)).to.equal(amount);
-      expect(await substrate.agentMintTotal(submitter.address)).to.equal(0n);
-      // An unregistered claimant gets no Agent struct entry.
-      expect((await substrate.agents(payer.address)).registeredAt).to.equal(0n);
-    });
-
-    it("a submitter cannot redirect a leaf to itself", async function () {
-      const amount = 400_000n;
-      const epochId = "epoch-steal";
-      await genesisAnchor(substrate, submitter, epochId, mintLeaf(payer.address, amount));
-      await expect(
-        substrate.connect(submitter).claimFor(submitter.address, amount, digest(epochId), [])
-      ).to.be.revertedWithCustomError(substrate, "MintProofInvalid");
-    });
-
-    it("two-leaf tree: each claimant verifies with the sibling as proof", async function () {
-      const amtA = 700_000n;
-      const amtB = 300_000n;
-      const leafA = mintLeaf(agentA.address, amtA);
-      const leafB = mintLeaf(agentB.address, amtB);
-      const root = hashPair(leafA, leafB);
-      const epochId = "epoch-two";
-
-      await genesisAnchor(substrate, submitter, epochId, root);
-
-      // Both claimed by one submitter; each proves with its sibling.
-      await substrate
-        .connect(submitter)
-        .claimFor(agentA.address, amtA, digest(epochId), [leafB]);
-      await substrate
-        .connect(submitter)
-        .claimFor(agentB.address, amtB, digest(epochId), [leafA]);
-
-      expect(await substrate.balanceOf(agentA.address)).to.equal(amtA);
-      expect(await substrate.balanceOf(agentB.address)).to.equal(amtB);
-      expect(await substrate.networkMintTotal()).to.equal(amtA + amtB);
-    });
-
-    it("wrong amount does not verify against the leaf", async function () {
-      const amount = 500_000n;
-      const epochId = "epoch-bad";
-      const root = mintLeaf(agentA.address, amount);
-      await genesisAnchor(substrate, submitter, epochId, root);
-      await expect(
-        substrate
-          .connect(agentA)
-          .claimFor(agentA.address, amount + 1n, digest(epochId), [])
-      ).to.be.revertedWithCustomError(substrate, "MintProofInvalid");
-    });
-
-    it("double claim for the same epoch reverts, whoever submits", async function () {
-      const amount = 123_456n;
-      const epochId = "epoch-dup";
-      const root = mintLeaf(agentA.address, amount);
-      await genesisAnchor(substrate, submitter, epochId, root);
-      await substrate.connect(agentA).claimFor(agentA.address, amount, digest(epochId), []);
-      await expect(
-        substrate.connect(submitter).claimFor(agentA.address, amount, digest(epochId), [])
-      ).to.be.revertedWithCustomError(substrate, "AlreadySubmittedForEpoch");
-      expect(await substrate.hasSubmittedForEpoch(agentA.address, digest(epochId))).to.equal(true);
-    });
-
-    it("unanchored epoch reverts", async function () {
-      await expect(
-        substrate.connect(agentA).claimFor(agentA.address, 1n, digest("nope"), [])
-      ).to.be.revertedWithCustomError(substrate, "EpochNotAnchored");
-    });
-
-    it("the agent-only recordTrainingForEpoch is gone", async function () {
-      expect(substrate.interface.hasFunction("recordTrainingForEpoch")).to.equal(false);
-    });
+  it("has no token surface (no ERC-20, no vault mint, no genesis claim)", async function () {
+    const s = await deploySubstrateWith();
+    for (const f of [
+      "balanceOf", "transfer", "transferFrom", "approve", "totalSupply",
+      "name", "symbol", "decimals", "mintFromVault", "claimGenesis",
+      "claimFor", "agentMintTotal", "atnTotalSupply", "serviceEarnings",
+    ]) {
+      expect(s.interface.hasFunction(f), f).to.equal(false);
+    }
+    for (const f of [
+      "payForService", "collectFee", "claim", "withdraw", "withdrawTo",
+      "withdrawTreasury", "sweep", "poolCap", "earnedValue", "parityOf",
+      "acceptsToken", "valueOf", "renounceUpgrades",
+    ]) {
+      expect(s.interface.hasFunction(f), f).to.equal(true);
+    }
   });
 
-  // -------------------------------------------------------------------------
-  // Reputation surface is gone (Substrate is pure money now).
-  // -------------------------------------------------------------------------
-  it("reputation views are removed from the ABI", async function () {
-    const substrate = await deployWith(deployer.address, ZERO, ZERO);
-    expect(substrate.interface.hasFunction("agentReputation")).to.equal(false);
-    expect(substrate.interface.hasFunction("reputationOfAt")).to.equal(false);
-    expect(substrate.interface.hasFunction("reputationTotalSupplyAt")).to.equal(false);
-    // Money surface stays.
-    expect(substrate.interface.hasFunction("balanceOfAt")).to.equal(true);
-    expect(substrate.interface.hasFunction("atnTotalSupplyAt")).to.equal(true);
-    expect(substrate.interface.hasFunction("agentMintTotal")).to.equal(true);
-    expect(substrate.interface.hasFunction("serviceEarnings")).to.equal(true);
+  it("refuses a zero governor and a zero registry at deploy", async function () {
+    const F = await ethers.getContractFactory("Substrate");
+    await expect(F.deploy(deployer.address, ZERO, ZERO, ONE, 250, 5000))
+      .to.be.revertedWithCustomError(F, "NoAnchorAuthority");
+    await expect(F.deploy(deployer.address, ONE, ZERO, ZERO, 250, 5000))
+      .to.be.revertedWithCustomError(F, "RegistryRequired");
   });
 
-  // -------------------------------------------------------------------------
-  // serviceEarnings ledger (the second REP claim base).
-  // -------------------------------------------------------------------------
-  describe("serviceEarnings", function () {
-    let substrate;
-    const feeOf = (g, bps) => (g * bps) / 10000n;
-    const netOf = (g, bps) => g - feeOf(g, bps);
-
-    beforeEach(async function () {
-      substrate = await deployWith(deployer.address, ZERO, gov.address);
-      await registerAgent(substrate, faucet, "faucet");
-      await registerAgent(substrate, submitter, "submitter");
-      // Fund the payer with ATN via the faucet.
-      await mintATN(substrate, submitter, faucet, 100_000n);
-      await substrate.connect(faucet).transfer(payer.address, 100_000n);
-    });
-
-    it("accumulates net (post-fee) per recipient across payForService calls", async function () {
-      const bps = await substrate.serviceFeeBps();
-      await substrate.connect(payer).payForService(recipient.address, 10_000n, digest("r1"));
-      expect(await substrate.serviceEarnings(recipient.address)).to.equal(netOf(10_000n, bps));
-
-      await substrate.connect(payer).payForService(recipient.address, 4_000n, digest("r2"));
-      expect(await substrate.serviceEarnings(recipient.address)).to.equal(
-        netOf(10_000n, bps) + netOf(4_000n, bps)
-      );
-      // A different recipient tracks separately.
-      expect(await substrate.serviceEarnings(payer.address)).to.equal(0n);
-    });
-
-    it("accumulates net when payForService is driven via PaymentChannel closeChannel", async function () {
-      const bps = await substrate.serviceFeeBps();
-      const Ch = await ethers.getContractFactory("PaymentChannel");
-      const channel = await Ch.deploy(await substrate.getAddress(), 3600);
-      await channel.waitForDeployment();
-
-      // recipient must be a registered agent to be a channel provider.
-      await registerAgent(substrate, recipient, "provider");
-      await substrate.connect(payer).approve(await channel.getAddress(), 50_000n);
-      await channel.connect(payer).openChannel(recipient.address, 5_000n);
-      const id = await channel.channelCount();
-
-      const net = await ethers.provider.getNetwork();
-      const domain = {
-        name: "AutonetPaymentChannel",
-        version: "1",
-        chainId: net.chainId,
-        verifyingContract: await channel.getAddress(),
-      };
-      const types = {
-        Voucher: [
-          { name: "channelId", type: "uint256" },
-          { name: "cumulativeAmount", type: "uint256" },
-        ],
-      };
-      const cumulative = 3_000n;
-      const sig = await payer.signTypedData(domain, types, {
-        channelId: id,
-        cumulativeAmount: cumulative,
-      });
-      await channel.connect(recipient).closeChannel(id, cumulative, sig, cumulative);
-
-      // The channel (as payer) called payForService(recipient, 3000) — the
-      // recipient's earnings ledger reflects the post-fee net.
-      expect(await substrate.serviceEarnings(recipient.address)).to.equal(
-        netOf(cumulative, bps)
-      );
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Governed service fee.
-  // -------------------------------------------------------------------------
   describe("setServiceFeeBps", function () {
-    it("governor can retune within bounds; fee math uses the new value", async function () {
-      const substrate = await deployWith(deployer.address, ZERO, gov.address);
-      await registerAgent(substrate, faucet, "faucet");
-      await registerAgent(substrate, submitter, "submitter");
-      await mintATN(substrate, submitter, faucet, 100_000n);
-      await substrate.connect(faucet).transfer(payer.address, 100_000n);
-
-      expect(await substrate.serviceFeeBps()).to.equal(250);
-      await expect(substrate.connect(gov).setServiceFeeBps(1000))
-        .to.emit(substrate, "ServiceFeeBpsSet")
-        .withArgs(250, 1000);
-      expect(await substrate.serviceFeeBps()).to.equal(1000);
-
-      // Fee now 10%: recipient nets 90% of a 10_000 payment.
-      await substrate.connect(payer).payForService(recipient.address, 10_000n, digest("x"));
-      expect(await substrate.balanceOf(recipient.address)).to.equal(9_000n);
-      expect(await substrate.serviceEarnings(recipient.address)).to.equal(9_000n);
+    it("governor can retune within bounds; payments use the new value", async function () {
+      const s = await deploySubstrateWith();
+      const usd = await deployIndexToken(s);
+      expect(await s.serviceFeeBps()).to.equal(250);
+      await expect(s.connect(gov).setServiceFeeBps(1000))
+        .to.emit(s, "ServiceFeeBpsSet").withArgs(250, 1000);
+      await fund(usd, payer, s, 10_000n);
+      await s.connect(payer).payForService(await usd.getAddress(), recipient.address, 10_000n, digest("x"));
+      expect(await usd.balanceOf(recipient.address)).to.equal(9_000n);
+      expect(await usd.balanceOf(await s.getAddress())).to.equal(1_000n);
+      expect(await s.feeOf(10_000n)).to.equal(1_000n);
     });
 
     it("non-governor cannot retune", async function () {
-      const substrate = await deployWith(deployer.address, ZERO, gov.address);
-      await expect(
-        substrate.connect(payer).setServiceFeeBps(500)
-      ).to.be.revertedWithCustomError(substrate, "NotGovernor");
+      const s = await deploySubstrateWith();
+      await expect(s.connect(payer).setServiceFeeBps(500))
+        .to.be.revertedWithCustomError(s, "NotGovernor");
     });
 
     it("reverts below the lower bound and above the upper bound", async function () {
-      const substrate = await deployWith(deployer.address, ZERO, gov.address);
-      await expect(
-        substrate.connect(gov).setServiceFeeBps(49)
-      ).to.be.revertedWithCustomError(substrate, "FeeOutOfBounds");
-      await expect(
-        substrate.connect(gov).setServiceFeeBps(1001)
-      ).to.be.revertedWithCustomError(substrate, "FeeOutOfBounds");
-      // Bounds themselves are accepted.
-      await substrate.connect(gov).setServiceFeeBps(50);
-      expect(await substrate.serviceFeeBps()).to.equal(50);
-      await substrate.connect(gov).setServiceFeeBps(1000);
-      expect(await substrate.serviceFeeBps()).to.equal(1000);
+      const s = await deploySubstrateWith();
+      await expect(s.connect(gov).setServiceFeeBps(49))
+        .to.be.revertedWithCustomError(s, "FeeOutOfBounds");
+      await expect(s.connect(gov).setServiceFeeBps(1001))
+        .to.be.revertedWithCustomError(s, "FeeOutOfBounds");
+      await s.connect(gov).setServiceFeeBps(50);
+      expect(await s.serviceFeeBps()).to.equal(50);
+      await s.connect(gov).setServiceFeeBps(1000);
+      expect(await s.serviceFeeBps()).to.equal(1000);
     });
 
-    it("zero-address governor is rejected at deploy", async function () {
-      const Substrate = await ethers.getContractFactory("Substrate");
-      await expect(
-        Substrate.deploy(deployer.address, ZERO, ZERO, ZERO, ethers.ZeroHash, "Test ATN", "REPATN", 250, 5000)
-      ).to.be.revertedWithCustomError(Substrate, "NoAnchorAuthority");
+    it("feeOf rounds up", async function () {
+      const s = await deploySubstrateWith();
+      expect(await s.feeOf(1n)).to.equal(1n);
+      expect(await s.feeOf(40n)).to.equal(1n);
+      expect(await s.feeOf(41n)).to.equal(2n);
+      expect(await s.feeOf(1_000_000n)).to.equal(feeOf(1_000_000n));
+    });
+  });
+
+  describe("anchor cutoffs and the pool cutoff", function () {
+    it("a cutoff must be after the latest one and before the anchoring block", async function () {
+      const s = await deploySubstrateWith();
+      const f = await anchorFields(s, "e1");
+      // Not before this block: the next block's own timestamp is too late.
+      const next = BigInt((await ethers.provider.getBlock("latest")).timestamp) + 100n;
+      await ethers.provider.send("evm_setNextBlockTimestamp", [Number(next)]);
+      await expect(anchorTx(s, gov, { ...f, cutoff: next }))
+        .to.be.revertedWithCustomError(s, "CutoffOutOfOrder");
+      // Not at or before the latest cutoff (deployedAt before any anchor).
+      await expect(anchorTx(s, gov, { ...f, cutoff: await s.latestCutoff() }))
+        .to.be.revertedWithCustomError(s, "CutoffOutOfOrder");
+      await anchorTx(s, gov, f);
+      expect(await s.latestCutoff()).to.equal(f.cutoff);
+    });
+
+    it("poolCutoff is the cutoff of the anchor before the latest (0 until two)", async function () {
+      const s = await deploySubstrateWith();
+      expect(await s.poolCutoff()).to.equal(0n);
+      const a1 = await anchorEpoch(s, "e1");
+      expect(await s.poolCutoff()).to.equal(0n);
+      const a2 = await anchorEpoch(s, "e2");
+      expect(await s.poolCutoff()).to.equal(a1.cutoff);
+      await anchorEpoch(s, "e3");
+      expect(await s.poolCutoff()).to.equal(a2.cutoff);
+      expect(await s.anchorCount()).to.equal(3n);
+      expect((await s.getAnchorByEpochId("e2")).cutoff).to.equal(a2.cutoff);
+    });
+
+    it("the anchor hash is the content hash anchorHashOf computes", async function () {
+      const s = await deploySubstrateWith();
+      const f = await anchorFields(s, "e1", digest("root"));
+      await anchorTx(s, gov, f);
+      expect(await s.latestAnchorHash()).to.equal(await s.anchorHashOf(
+        f.epochId, f.epochRoot, f.prevEpochRoot, f.prevAnchorHash, f.claimCid,
+        f.payloadHash, f.claimRoot, f.cutoff));
+      expect(await s.anchorRoot(0)).to.equal(digest("root"));
+    });
+
+    it("the anchorer may anchor once the governor sets it", async function () {
+      const s = await deploySubstrateWith();
+      const anchorer = signers[5];
+      await expect(anchorTx(s, anchorer, await anchorFields(s, "e1")))
+        .to.be.revertedWithCustomError(s, "NotGovernor");
+      await expect(s.connect(anchorer).setAnchorer(anchorer.address))
+        .to.be.revertedWithCustomError(s, "NotGovernor");
+      await s.connect(gov).setAnchorer(anchorer.address);
+      await anchorTx(s, anchorer, await anchorFields(s, "e1"));
+      expect(await s.isAnchored("e1")).to.equal(true);
     });
   });
 });

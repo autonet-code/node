@@ -5,6 +5,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title ServiceMarket — decentralized monetizable APIs (services_market.md)
 ///
@@ -16,9 +18,10 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 ///      Firestore `services`. Chain = truth, blob = spec storage.
 ///
 ///   2. PaymentChannel — the ONLY settlement rail (prepaid, unidirectional):
-///      client opens with a deposit (its credit with that provider, across
-///      all of the provider's services) and may top it up; it hands the
-///      provider EIP-712 vouchers over (channelId, cumulativeAmount)
+///      client opens with a deposit in a token of the value index (its
+///      credit with that provider, across all of the provider's services)
+///      and may top it up; it hands the provider EIP-712 vouchers over
+///      (channelId, token, cumulativeAmount)
 ///      off-chain per work item; the provider cashes in the latest
 ///      cumulative whenever it likes (settle) without ending the channel,
 ///      and either side ends it. A provider's close (closeChannel) collects
@@ -35,29 +38,25 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 /// voucher, sized by the client — worth less than the review history a
 /// cheating provider burns. No arbitration, no fulfillment oracle.
 ///
-/// Service commerce is ATN-only (ratified 2026-07-10): the earlier "any
-/// ERC20 is payable" doctrine is retired. Channel settlement routes the
-/// provider payout through Substrate.payForService, so the fee-recycled
-/// emission doctrine holds on the canonical rail (closes audit gap G1: the
-/// 2.5% service fee that finances the commons was bypassed by the raw
-/// safeTransfer payout). Services still get NO substrate standing, mint, or
-/// verdict-layer claims — the trust basis is behavioral (identity + atomic
+/// Service commerce is paid in the jurisdiction's value index (2026-11-25):
+/// any token with a non-zero Registry parity, as Substrate.acceptsToken
+/// says. A channel's token is fixed when it opens. Each payout pays the
+/// provider the net straight from the deposit and Substrate the service fee
+/// (Substrate.collectFee), so the fee is taken on every payout, as on a
+/// direct payment. Services still get NO substrate standing, mint, or
+/// verdict-layer claims: the trust basis is behavioral (identity + atomic
 /// payment + receipts), per the spec.
 
-/// @dev Read of Substrate.sol's agent registry AND its ATN ERC20 surface.
-///      Registry needs only the isRegistered gate; the channel additionally
-///      pulls/refunds deposits and settles through payForService. Substrate's
-///      ERC20 functions revert on failure (they never return false), so the
-///      bool returns are checked only defensively.
+/// @dev Read of Substrate.sol: the agent registry (the services' identity
+///      gate), the value index, and the fee.
 interface ISubstrate {
     function isRegistered(address agent) external view returns (bool);
     function isLive(address agent) external view returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function payForService(address recipient, uint256 amount, bytes32 requestId)
-        external
-        returns (bool);
     function governor() external view returns (address);
+    function acceptsToken(address token) external view returns (bool);
+    function listToken(address token) external;
+    function feeOf(uint256 gross) external view returns (uint256);
+    function collectFee(address token, address recipient, uint256 gross, bytes32 requestId) external;
 }
 
 // =============================================================================
@@ -72,7 +71,7 @@ contract ServiceRegistry is Initializable {
     struct Service {
         address provider;      // the registered agent offering the service
         bytes32 specDigest;    // sha256 of the service_spec blob (NOT IPFS)
-        uint256 askAmount;     // per-work-item price, ATN-denominated
+        uint256 askAmount;     // optional price, enforced by nothing; its token is in the spec
         bool active;           // false once retired
         uint256 registeredAt;
         uint256 updatedAt;
@@ -128,7 +127,8 @@ contract ServiceRegistry is Initializable {
     }
 
     /// @notice Publish a new service. Provider = msg.sender, must be a
-    ///         registered agent on Substrate. Ask is ATN-denominated.
+    ///         registered agent on Substrate. The ask is optional and enforces
+    ///         nothing: prices are the provider's signed list off chain.
     function registerService(
         bytes32 specDigest,
         uint256 askAmount
@@ -187,10 +187,11 @@ contract ServiceRegistry is Initializable {
 // services, like API credits. On-chain txs are per deposit and per cash-in,
 // never per work item:
 //
-//   1. openChannel(provider, deposit) — client escrows a deposit of ATN.
+//   1. openChannel(provider, token, deposit) — client escrows a deposit in
+//      a token of the value index.
 //      topUp(channelId, amount) adds to it while the channel is Open.
 //   2. per work item, OFF-CHAIN: client signs an EIP-712 voucher over
-//      (channelId, cumulativeAmount). cumulativeAmount is MONOTONE — each
+//      (channelId, token, cumulativeAmount). cumulativeAmount is MONOTONE — each
 //      voucher supersedes the last. "Not served = no voucher" preserves
 //      per-item granularity without a tx per item.
 //   3. settle(channelId, cumulativeAmount, sig) — provider cashes in the
@@ -207,21 +208,22 @@ contract ServiceRegistry is Initializable {
 //   5. withdrawRemainder refunds deposit - claimed to the client: at once
 //      after a provider's close, after the window after a client's close.
 //
-// ATN-only (ratified 2026-07-10). The deposit and every top-up are pulled
-// with substrate.transferFrom and every provider payout (settle, and close
-// when it pays something) routes through
-// substrate.payForService(provider, pay, channelId) — so the provider
-// receives NET of the service fee, exactly like the direct payForService
-// rail (closes audit gap G1), and the fee burns as soon as the provider
-// cashes in rather than when the channel ends. Every payout emits
+// Paid in the value index's tokens (2026-11-25). The deposit and every
+// top-up are pulled into this contract and must arrive in full (a token
+// that takes a cut on transfer is refused). Every provider payout (settle,
+// and close when it pays something) sends the provider the NET straight
+// from the deposit and the service fee to Substrate (collectFee), so the
+// fee is taken as soon as the provider cashes in. Every payout emits
 // ChannelPaid. Vouchers remain GROSS-denominated (the cumulative the client
 // signs is the pre-fee ask); the fee is taken at each payout. The theft
-// ceiling below is UNCHANGED by settling in steps and by top-ups — the fee
+// ceiling below is UNCHANGED by settling in steps and by top-ups: the fee
 // is on the same side of every voucher, and each payout only moves claimed
 // up to a cumulative the client signed, so the bound is still one
 // client-sized voucher's increment (net of fee, strictly smaller). The
-// remainder refund is NOT a service payment and pays no fee.
-//
+// remainder refund is NOT a service payment and pays no fee. A channel
+// keeps its token after the DAO removes it from the index: it still
+// settles, closes and refunds, but takes no top-up.
+
 // Unidirectional only (client→provider). No bidirectional / mutual-close
 // complexity — the spec explicitly says keep it minimal and standard.
 //
@@ -268,11 +270,11 @@ contract ServiceRegistry is Initializable {
 
 contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
     using ECDSA for bytes32;
+    using SafeERC20 for IERC20;
 
-    /// @notice The ATN token / settlement contract (Substrate.sol). Deposits
-    ///         are pulled here and payouts route through its payForService.
-    ///         Set once at setup (the constructor, or initialize() on a
-    ///         clone); no setter.
+    /// @notice The jurisdiction's Substrate: the value index, the fee, and
+    ///         where the fee goes. Set once at setup (the constructor, or
+    ///         initialize() on a clone); no setter.
     ISubstrate public substrate;
 
     /// @notice Seconds after the client starts a close before its remainder
@@ -294,6 +296,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
     struct Channel {
         address client;
         address provider;
+        address token;         // the deposit's token, fixed at open
         uint256 deposit;
         uint256 claimed;       // cumulative paid to the provider so far (gross)
         uint256 closesAt;      // timestamp remainder becomes withdrawable
@@ -306,12 +309,13 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
 
     /// @dev EIP-712 typed voucher: the client signs this off-chain per item.
     bytes32 private constant VOUCHER_TYPEHASH =
-        keccak256("Voucher(uint256 channelId,uint256 cumulativeAmount)");
+        keccak256("Voucher(uint256 channelId,address token,uint256 cumulativeAmount)");
 
     event ChannelOpened(
         uint256 indexed channelId,
         address indexed client,
         address indexed provider,
+        address token,
         uint256 deposit
     );
     /// @notice A payout to the provider (settle, or a close that pays
@@ -350,10 +354,11 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
     error NotClient();
     error BadVoucherSignature();
     error WindowNotElapsed();
-    error DepositTransferFailed();
     error NotGovernor();
     error ZeroWindow();
     error NothingToSettle();
+    error TokenNotAccepted(address token);
+    error ShortReceipt(uint256 expected, uint256 received);
 
     /// @dev Sets up the instance it creates, so a directly deployed channel
     ///      contract works as a plain contract and can never be initialized
@@ -395,54 +400,65 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
     }
 
     /// @notice Client opens a unidirectional channel to a provider, escrowing
-    ///         `deposit` of ATN. Must approve this contract on Substrate first.
+    ///         `deposit` of `token` (a token of the value index). Approve this
+    ///         contract for it first.
     function openChannel(
         address provider,
+        address token,
         uint256 deposit
     ) external nonReentrant returns (uint256 channelId) {
         if (provider == address(0)) revert ProviderRequired();
         if (deposit == 0) revert ZeroDeposit();
+        if (!substrate.acceptsToken(token)) revert TokenNotAccepted(token);
+        // Substrate keeps the token's decimals from now on, so this channel
+        // still pays its fee if the token later leaves the index.
+        substrate.listToken(token);
         channelId = ++channelCount;
         channels[channelId] = Channel({
             client: msg.sender,
             provider: provider,
+            token: token,
             deposit: deposit,
             claimed: 0,
             closesAt: 0,
             status: Status.Open,
             window: challengeWindow
         });
-        // Substrate reverts on insufficient allowance/balance; the bool is
-        // defensive (it never returns false).
-        if (!substrate.transferFrom(msg.sender, address(this), deposit)) {
-            revert DepositTransferFailed();
-        }
-        emit ChannelOpened(channelId, msg.sender, provider, deposit);
+        _pullExact(token, deposit);
+        emit ChannelOpened(channelId, msg.sender, provider, token, deposit);
     }
 
-    /// @notice Client adds `amount` of ATN to an Open channel's deposit (its
-    ///         credit with the provider). Must approve this contract on
-    ///         Substrate first, as for openChannel.
+    /// @notice Client adds `amount` to an Open channel's deposit (its credit
+    ///         with the provider), in the channel's token, while that token
+    ///         is still in the index. Approve this contract first.
     function topUp(uint256 channelId, uint256 amount) external nonReentrant {
         Channel storage c = channels[channelId];
         if (c.status != Status.Open) revert ChannelNotOpen();
         if (msg.sender != c.client) revert NotClient();
         if (amount == 0) revert ZeroDeposit();
+        if (!substrate.acceptsToken(c.token)) revert TokenNotAccepted(c.token);
         c.deposit += amount;
-        if (!substrate.transferFrom(msg.sender, address(this), amount)) {
-            revert DepositTransferFailed();
-        }
+        _pullExact(c.token, amount);
         emit ChannelToppedUp(channelId, msg.sender, amount, c.deposit);
+    }
+
+    /// @dev Pull exactly `amount` from the caller; a short receipt reverts.
+    function _pullExact(address token, uint256 amount) private {
+        uint256 before = IERC20(token).balanceOf(address(this));
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 got = IERC20(token).balanceOf(address(this)) - before;
+        if (got != amount) revert ShortReceipt(amount, got);
     }
 
     /// @notice EIP-712 digest a client signs for a voucher. Exposed for
     ///         off-chain signers / tests.
     function voucherHash(
         uint256 channelId,
+        address token,
         uint256 cumulativeAmount
     ) public view returns (bytes32) {
         return _hashTypedDataV4(
-            keccak256(abi.encode(VOUCHER_TYPEHASH, channelId, cumulativeAmount))
+            keccak256(abi.encode(VOUCHER_TYPEHASH, channelId, token, cumulativeAmount))
         );
     }
 
@@ -466,7 +482,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
     ///         the client's (refunded at the close, or served later under the
     ///         same voucher). Pays min(cumulativeAmount, deposit, upTo) minus
     ///         what was already paid, NET of the service fee (routed through
-    ///         payForService); the channel keeps its status (Open stays Open,
+    ///         collectFee); the channel keeps its status (Open stays Open,
     ///         a client's close keeps its deadline).
     /// @param cumulativeAmount The voucher's cumulative total (gross).
     /// @param signature Client's EIP-712 signature over (channelId, cumulative).
@@ -487,7 +503,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
     /// @notice Provider closes the channel with its highest voucher, up to
     ///         `upTo` as settle does: pays the provider whatever of
     ///         min(cumulativeAmount, deposit, upTo) settle has not paid yet,
-    ///         NET of the service fee (routed through payForService); deposit
+    ///         NET of the service fee (the fee goes to Substrate); deposit
     ///         - claimed becomes the client's remainder, withdrawable at once:
     ///         nothing more can be collected, so there is nothing to wait
     ///         for. The unserved rest of a voucher paid ahead goes back to
@@ -527,7 +543,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
         if (msg.sender != c.provider) revert NotProvider();
 
         // Recover the client's signature over the typed voucher.
-        bytes32 digest = voucherHash(channelId, cumulativeAmount);
+        bytes32 digest = voucherHash(channelId, c.token, cumulativeAmount);
         address signer = digest.recover(signature);
         if (signer != c.client) revert BadVoucherSignature();
 
@@ -535,14 +551,20 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
     }
 
     /// @dev Pay the provider up to `capped` (> claimed): claimed moves first,
-    ///      then the payout routes through payForService so the fee-recycled
-    ///      emission takes its cut on the canonical rail and the provider
-    ///      receives the net. The channelId is the requestId so the payout is
-    ///      matchable off-chain.
+    ///      then the provider gets the net from the deposit and Substrate the
+    ///      fee. The channelId is the requestId so the payout is matchable
+    ///      off-chain.
     function _payProvider(Channel storage c, uint256 channelId, uint256 capped) private {
         uint256 pay = capped - c.claimed;
         c.claimed = capped;
-        substrate.payForService(c.provider, pay, bytes32(channelId));
+        IERC20 token = IERC20(c.token);
+        uint256 fee = substrate.feeOf(pay);
+        if (fee > pay) fee = pay;
+        if (pay > fee) token.safeTransfer(c.provider, pay - fee);
+        if (fee > 0) {
+            token.forceApprove(address(substrate), fee);
+            substrate.collectFee(address(token), c.provider, pay, bytes32(channelId));
+        }
         emit ChannelPaid(channelId, c.client, c.provider, pay, capped);
     }
 
@@ -562,7 +584,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
         address client = c.client;
         c.status = Status.Settled;
         if (remainder > 0) {
-            substrate.transfer(client, remainder);
+            IERC20(c.token).safeTransfer(client, remainder);
         }
         emit RemainderWithdrawn(channelId, client, remainder);
     }

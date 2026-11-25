@@ -2,31 +2,34 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const {
   ZERO,
+  ONE,
   digest,
   registerAgent,
-  mintLeaf,
-  mintATN,
   deploySubstrateWith,
-  seedPool,
+  deployIndexToken,
+  fund,
+  payFees,
   anchorFields,
   anchorTx,
+  claimTree,
+  claimTx,
   SLOT_GOVERNOR,
 } = require("./helpers");
 
-// Governor-only anchoring + on-chain conservation (Decision 2026-10-16).
+// Governor-only anchoring and the pools' on-chain cap.
 //
 // Substrate.anchor is callable only by the governor (the DAO timelock in
-// production: each anchor is an ordinary DAO proposal). The hash chain and
-// the fees-only mint pool stay enforced by Substrate. The full proposal
+// production) or the anchorer (the AnchorElection). The hash chain and the
+// lag-one cap on the pools stay enforced by Substrate. The full proposal
 // lifecycle through an OZ Governor + timelock is covered on the Python side
 // (tests/test_governed_anchor.py).
 
-describe("Substrate governor-only anchoring + conservation", function () {
-  let signers, attacker, a1, a2, payer, provider, gov;
+describe("Substrate governor-only anchoring + the pool cap", function () {
+  let signers, attacker, a1, a2, provider, gov;
 
   beforeEach(async function () {
     signers = await ethers.getSigners();
-    [, attacker, , a1, a2, , payer, provider] = signers;
+    [, attacker, , a1, a2, , , provider] = signers;
     gov = signers[SLOT_GOVERNOR];
   });
 
@@ -39,8 +42,8 @@ describe("Substrate governor-only anchoring + conservation", function () {
 
     it("rejects a zero governor at deploy", async function () {
       const F = await ethers.getContractFactory("Substrate");
-      await expect(F.deploy(ZERO, ZERO, ZERO, ZERO, ethers.ZeroHash, "Test ATN", "REPATN", 250, 5000)).to.be.revertedWithCustomError(
-        F, "NoAnchorAuthority");
+      await expect(F.deploy(ZERO, ZERO, ZERO, ONE, 250, 5000))
+        .to.be.revertedWithCustomError(F, "NoAnchorAuthority");
     });
 
     it("exposes the governor", async function () {
@@ -48,7 +51,7 @@ describe("Substrate governor-only anchoring + conservation", function () {
     });
 
     it("non-governor anchor reverts, even from a registered agent", async function () {
-      const f = await anchorFields(substrate, "evil", mintLeaf(attacker.address, 10n ** 12n));
+      const f = await anchorFields(substrate, "evil", digest("evil-root"));
       await expect(anchorTx(substrate, attacker, f)).to.be.revertedWithCustomError(
         substrate, "NotGovernor");
       expect(await substrate.anchorCount()).to.equal(0n);
@@ -58,6 +61,7 @@ describe("Substrate governor-only anchoring + conservation", function () {
       const f = await anchorFields(substrate, "e1");
       await expect(anchorTx(substrate, gov, f)).to.emit(substrate, "EpochAnchored");
       expect(await substrate.isAnchored("e1")).to.equal(true);
+      expect(await substrate.isAnchoredByHash(digest("e1"))).to.equal(true);
       expect(await substrate.anchorCount()).to.equal(1n);
     });
 
@@ -73,82 +77,67 @@ describe("Substrate governor-only anchoring + conservation", function () {
       await expect(
         anchorTx(substrate, gov, { ...f, epochId: "e1" })
       ).to.be.revertedWithCustomError(substrate, "EpochAlreadyAnchored");
+      await expect(
+        anchorTx(substrate, gov, { ...f, epochId: "" })
+      ).to.be.revertedWithCustomError(substrate, "EpochIdEmpty");
       await anchorTx(substrate, gov, f);
       expect(await substrate.anchorCount()).to.equal(2n);
     });
   });
 
-  describe("on-chain conservation (fees-only pool)", function () {
-    let substrate;
+  describe("on-chain cap (lag one)", function () {
+    let substrate, usd, U;
     beforeEach(async function () {
       substrate = await deploySubstrateWith();
-      await registerAgent(substrate, a1, "a1");
-      await registerAgent(substrate, a2, "a2");
+      usd = await deployIndexToken(substrate);
+      U = await usd.getAddress();
     });
 
-    it("first anchor has a zero pool: any mint reverts", async function () {
-      const f = await anchorFields(substrate, "e1", mintLeaf(a1.address, 1n));
-      await anchorTx(substrate, gov, f);
-      await expect(
-        substrate.connect(a1).claimFor(a1.address, 1n, digest("e1"), [])
-      ).to.be.revertedWithCustomError(substrate, "EpochPoolExceeded");
+    it("claims of a pool never exceed its tool share up to the previous cutoff", async function () {
+      // 1_000_000 gross, fee 2.5% = 25_000, half to the treasury: 12_500 tool share.
+      const { toolShare } = await payFees(substrate, usd, 1_000_000n);
+      expect(toolShare).to.equal(12_500n);
+      expect(await substrate.toolShareTotal(U)).to.equal(12_500n);
+      await anchorTx(substrate, gov, await anchorFields(substrate, "e1"));
+      expect(await substrate.poolCap(U)).to.equal(0n);
+
+      // The second anchor's root over-allocates (12_000 + 600 > 12_500).
+      const tree = claimTree([
+        { earner: a1.address, tokens: [U], amounts: [12_000n], value: 1n },
+        { earner: a2.address, tokens: [U], amounts: [600n], value: 1n },
+      ]);
+      await anchorTx(substrate, gov, await anchorFields(substrate, "e2", tree.root));
+      expect(await substrate.poolCap(U)).to.equal(12_500n);
+
+      await claimTx(substrate, a1, tree, 0, "e2");
+      await expect(claimTx(substrate, a2, tree, 1, "e2"))
+        .to.be.revertedWithCustomError(substrate, "PoolExceeded")
+        .withArgs(U, 12_500n, 12_600n);
+      expect(await substrate.claimedTotal(U)).to.equal(12_000n);
     });
 
-    it("pool = previous window's burned fees; mint over pool reverts", async function () {
-      // 1_000_000 gross, fee 2.5% = 25_000, half to treasury -> 12_500 burned.
-      await mintATN(substrate, null, payer, 1_000_000n);
-      await substrate.connect(payer).payForService(provider.address, 1_000_000n, digest("x"));
-      expect(await substrate.burnedSinceAnchor()).to.equal(12_500n);
-      let f = await anchorFields(substrate, "e1");
-      await anchorTx(substrate, gov, f);
-      expect(await substrate.burnedSinceAnchor()).to.equal(0n);
-      expect(await substrate.nextMintPool()).to.equal(12_500n);
-
-      // Signed root over-allocates (12_000 + 600 > 12_500): the late claim reverts.
-      const l1 = mintLeaf(a1.address, 12_000n);
-      const l2 = mintLeaf(a2.address, 600n);
-      const [lo, hi] = l1 <= l2 ? [l1, l2] : [l2, l1];
-      const root = ethers.keccak256(ethers.solidityPacked(["bytes32", "bytes32"], [lo, hi]));
-      f = await anchorFields(substrate, "e2", root);
-      await anchorTx(substrate, gov, f);
-      const anchor = await substrate.getAnchorByEpochId("e2");
-      expect(anchor.mintPool).to.equal(12_500n);
-
-      await substrate.connect(a1).claimFor(a1.address, 12_000n, digest("e2"), [l2]);
-      await expect(substrate.connect(a2).claimFor(a2.address, 600n, digest("e2"), [l1]))
-        .to.be.revertedWithCustomError(substrate, "EpochPoolExceeded")
-        .withArgs(digest("e2"), 12_500n, 12_600n);
-      expect((await substrate.getAnchorByEpochId("e2")).minted).to.equal(12_000n);
+    it("fees after the previous cutoff wait for the next anchor", async function () {
+      await payFees(substrate, usd, 1_000_000n);              // 12_500
+      await anchorTx(substrate, gov, await anchorFields(substrate, "e1"));
+      await payFees(substrate, usd, 2_000_000n);              // 25_000, epoch 2
+      await anchorTx(substrate, gov, await anchorFields(substrate, "e2"));
+      expect(await substrate.poolCap(U)).to.equal(12_500n);
+      await anchorTx(substrate, gov, await anchorFields(substrate, "e3"));
+      expect(await substrate.poolCap(U)).to.equal(37_500n);
     });
 
-    it("honest path: pool-exact mints all claim", async function () {
-      const pool = await seedPool(substrate);
-      const half = pool / 2n;
-      const rest = pool - half;
-      const l1 = mintLeaf(a1.address, half);
-      const l2 = mintLeaf(a2.address, rest);
-      const [lo, hi] = l1 <= l2 ? [l1, l2] : [l2, l1];
-      const root = ethers.keccak256(ethers.solidityPacked(["bytes32", "bytes32"], [lo, hi]));
-      const f = await anchorFields(substrate, "h1", root);
-      await anchorTx(substrate, gov, f);
-      await substrate.connect(a1).claimFor(a1.address, half, digest("h1"), [l2]);
-      await substrate.connect(a2).claimFor(a2.address, rest, digest("h1"), [l1]);
-      expect(await substrate.networkMintTotal()).to.equal(pool);
-    });
-
-    it("a contract can call payForService (ToolBond slashing path) and its fee feeds the pool", async function () {
+    it("a contract can pay a service and its fee feeds the pool", async function () {
       const M = await ethers.getContractFactory("ServicePayerMock");
       const payerContract = await M.deploy();
       await payerContract.waitForDeployment();
-      const pcAddr = await payerContract.getAddress();
-      await substrate.connect(signers[19]).mintFromVault(pcAddr, 400_000n);
+      await usd.mint(await payerContract.getAddress(), 400_000n);
       await expect(
-        payerContract.pay(await substrate.getAddress(), provider.address, 400_000n, digest("slash"))
+        payerContract.pay(await substrate.getAddress(), U, provider.address, 400_000n, digest("pay"))
       ).to.emit(substrate, "ServicePayment");
-      // fee 10_000; 5_000 to treasury, 5_000 burned.
-      expect(await substrate.balanceOf(provider.address)).to.equal(390_000n);
-      expect(await substrate.serviceEarnings(provider.address)).to.equal(390_000n);
-      expect(await substrate.burnedSinceAnchor()).to.equal(5_000n);
+      // fee 10_000; 5_000 owed to the treasury, 5_000 tool share.
+      expect(await usd.balanceOf(provider.address)).to.equal(390_000n);
+      expect(await substrate.treasuryOwed(U)).to.equal(5_000n);
+      expect(await substrate.toolShareTotal(U)).to.equal(5_000n);
     });
   });
 });

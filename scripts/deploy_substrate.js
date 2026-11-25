@@ -1,11 +1,13 @@
 /**
  * Deploy contracts/core/Substrate.sol to a Hardhat-configured network.
  *
- * Constructor: (treasury, vaultMinter, governor, anchorer, genesisRoot),
- * all from env below. The governor (the DAO timelock) is the only address
- * that may anchor an epoch or retune the service fee. GENESIS_ROOT is the
- * fork/split ATN carry-over root from scripts/build_atn_genesis.py; unset
- * (zero) for a fresh network.
+ * Constructor: (treasury, governor, anchorer, registry, serviceFeeBps,
+ * feeTreasuryBps), all from env below. The governor (the DAO timelock) is
+ * the only address that may anchor an epoch or retune the service fee.
+ * REGISTRY is the DAO Registry, where the value index lives
+ * (jurisdiction.parity.<token>). On a local chain without one, a test
+ * Registry and a 6-decimal test token at parity 1e30 are deployed, so
+ * services can be paid at once.
  * Writes the deployed address + network info to
  * deployments/<network>.json so daemons + tests can pick it up.
  *
@@ -32,20 +34,10 @@ async function main() {
     throw new Error("Deployer has zero balance");
   }
 
-  // DAO treasury for the service-fee split (immutable; no admin key to
-  // repoint). Defaults to the deployer for local runs; pass TREASURY for
+  // DAO treasury: the fee's treasury share is owed to it (set once). Defaults to the deployer for local runs; pass TREASURY for
   // real networks (shadownet: the trustless DAO address in registry.json).
   const treasury = process.env.TREASURY || deployer.address;
   console.log(`Treasury: ${treasury}`);
-
-  // Vault minter: the single address allowed to mint purchased ATN via
-  // mintFromVault (AutonetVault, DAO repo). Immutable; no admin key.
-  // Defaults to the zero address (feature off) — pass VAULT_MINTER once the
-  // vault contract address is known.
-  const vaultMinter =
-    process.env.VAULT_MINTER ||
-    "0x0000000000000000000000000000000000000000";
-  console.log(`VaultMinter: ${vaultMinter}`);
 
   // Governor: the DAO timelock. The only address allowed to anchor an
   // epoch (Substrate.anchor, reached through an ordinary DAO proposal) and
@@ -58,22 +50,34 @@ async function main() {
   }
   console.log(`Governor: ${governor}`);
 
+  let registry = process.env.REGISTRY || "";
+  let indexToken = null;
+  if (!registry) {
+    if (network.name !== "localhost" && network.name !== "hardhat") {
+      throw new Error("set REGISTRY: the DAO Registry that holds the value index");
+    }
+    const Registry = await ethers.getContractFactory("MockRegistry");
+    const reg = await Registry.deploy();
+    await reg.waitForDeployment();
+    registry = await reg.getAddress();
+    const Token = await ethers.getContractFactory("MockIndexToken");
+    const tok = await Token.deploy("Test USD", "TUSD", 6);
+    await tok.waitForDeployment();
+    indexToken = await tok.getAddress();
+    await (await reg.setParity(indexToken, 10n ** 30n)).wait();
+    console.log(`Test Registry: ${registry}, index token TUSD: ${indexToken}`);
+  }
+  console.log(`Registry: ${registry}`);
+
   console.log("Deploying Substrate.sol...");
   const Substrate = await ethers.getContractFactory("Substrate");
   const substrate = await Substrate.deploy(
     treasury,
-    vaultMinter,
     governor,
     process.env.ANCHORER || ethers.ZeroAddress,
-    // Fork/split carry-over root (scripts/build_atn_genesis.py); zero for a
-    // fresh network.
-    process.env.GENESIS_ROOT || ethers.ZeroHash,
-    // Wallet-facing token metadata; the werule setup derives these from the
-    // DAO (governor name + " ATN", RepToken symbol + "ATN").
-    process.env.ATN_NAME || "Autonet ATN",
-    process.env.ATN_SYMBOL || "REPATN",
-    // Service fee and the fee's treasury share (the rest burns), in bps.
-    // Set here, governed afterwards (setServiceFeeBps, setFeeTreasuryBps).
+    registry,
+    // Service fee and the fee's treasury share (the rest is the tool
+    // share), in bps. Set here, governed afterwards.
     Number(process.env.SERVICE_FEE_BPS || 250),
     Number(process.env.FEE_TREASURY_BPS || 5000)
   );
@@ -95,7 +99,8 @@ async function main() {
     rpc_url: network.config.url || null,
     substrate_address: address,
     treasury: treasury,
-    vault_minter: vaultMinter,
+    registry: registry,
+    index_token: indexToken,
     governor: governor,
     deployer: deployer.address,
     deployment_tx: tx ? tx.hash : null,

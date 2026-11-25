@@ -34,7 +34,7 @@ contract TestCloner {
 /// @dev Test only: a later Substrate version, to upgrade a proxy to.
 contract SubstrateV2Mock is Substrate {
     constructor()
-        Substrate(address(1), address(0), address(1), address(0), bytes32(0), "impl", "IMPL", 250, 5000)
+        Substrate(address(1), address(1), address(0), address(1), 250, 5000)
     {}
 
     function version2() external pure returns (uint256) {
