@@ -36,9 +36,9 @@ interface IRegistryRead {
 ///      minted: Substrate is not a token.
 ///   4. **Claims from the pools.** Each epoch's close commits, per earner,
 ///      an amount of every token's pool (the same fraction of each, the
-///      basket) and the REP value of the whole, priced by the close at the
-///      index pinned to the anchor. A claim credits the amounts as owed and
-///      adds the value to `earnedValue`, which the DAO's REP claim reads.
+///      basket). A claim credits the amounts as owed and adds their value,
+///      at the parities stored when the epoch was anchored, to
+///      `earnedValue`, which the DAO's REP claim reads.
 ///      Each token is then withdrawn on its own, so a token that freezes
 ///      blocks nothing else.
 ///
