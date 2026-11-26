@@ -11,8 +11,9 @@ One command up, one down, one status:
 ``<state dir>/state.json``:
 
   1. a hardhat node on 127.0.0.1:E2E_LIVE_RPC_PORT (default 18545, chain 1337)
-     with Substrate, ServiceRegistry and PaymentChannel
-     deployed from the compiled artifacts (web3.py, signed
+     with a Registry holding the value index (one 6-decimal test token,
+     funded to the owner and the spare account), Substrate, ServiceRegistry
+     and PaymentChannel deployed from the compiled artifacts (web3.py, signed
      by hardhat account 0 — no ``hardhat run``, no deployments/*.json written);
   2. the deterministic stub (``stub_server.py``) on E2E_LIVE_STUB_PORT (default
      18080): the daemon's model provider AND the ``ATN_REGISTRY_URL`` target;
@@ -288,40 +289,61 @@ def start_chain(state: Dict[str, Any]) -> None:
     log(f"hardhat node up at {RPC_URL} (pid {pid}, chain {chain_id})")
 
 
-def _artifact(name: str, sol: str) -> Dict[str, Any]:
-    p = REPO / "artifacts" / "contracts" / "core" / f"{sol}.sol" / f"{name}.json"
+def _artifact(name: str, sol: str, folder: str = "core") -> Dict[str, Any]:
+    p = REPO / "artifacts" / "contracts" / folder / f"{sol}.sol" / f"{name}.json"
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+# The value index: one 6-decimal test token at parity 1e30 (1 base unit = 1
+# value unit), funded to the owner and the spare account for buying.
+INDEX_TOKEN = ("Test USD", "tUSD", 6)
+INDEX_PARITY = 10 ** 30
+INDEX_FUNDING = 1_000 * 10 ** 6
 
 
 def deploy(w3) -> Dict[str, str]:
     """Deploy the contract set the local E2E scripts use, signed by hardhat
-    account 0. Same constructor args as local_e2e_tool_economy.py."""
+    account 0: a Registry holding the value index (the test MockRegistry,
+    which enumerates its keys as the DAO Registry does), one index token,
+    Substrate, ServiceRegistry and PaymentChannel."""
     from eth_account import Account
     acct = Account.from_key(DEPLOYER[1])
     zero = "0x" + "00" * 20
 
-    def _deploy(name: str, sol: str, *args: Any) -> str:
-        art = _artifact(name, sol)
-        c = w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"])
-        tx = c.constructor(*args).build_transaction({
-            "from": acct.address,
-            "nonce": w3.eth.get_transaction_count(acct.address),
-            "gas": 15_000_000, "gasPrice": w3.eth.gas_price,
-            "chainId": CHAIN_ID,
-        })
+    def _sign_send(buildable: Any):
+        tx = buildable.build_transaction({
+            "from": acct.address, "nonce": w3.eth.get_transaction_count(acct.address),
+            "gas": 15_000_000, "gasPrice": w3.eth.gas_price, "chainId": CHAIN_ID})
         signed = acct.sign_transaction(tx)
         raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
-        rcpt = w3.eth.wait_for_transaction_receipt(
-            w3.eth.send_raw_transaction(raw), timeout=120)
+        return w3.eth.wait_for_transaction_receipt(w3.eth.send_raw_transaction(raw), timeout=120)
+
+    def _deploy(name: str, sol: str, *args: Any, folder: str = "core") -> str:
+        art = _artifact(name, sol, folder)
+        c = w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"])
+        rcpt = _sign_send(c.constructor(*args))
         if rcpt.status != 1 or not rcpt.contractAddress:
             raise RuntimeError(f"deploy {name} failed: {rcpt}")
         return rcpt.contractAddress
 
-    # (treasury, vaultMinter, governor), Decision 2026-10-16: the deployer
-    # is the governor, so a daemon holding its key anchors directly.
-    sub = _deploy("Substrate", "Substrate", acct.address, acct.address,
-                  acct.address, zero, bytes(32), "Test ATN", "REPATN", 250, 5000)
+    def _call(address: str, name: str, sol: str, fn: str, *args: Any, folder: str = "core") -> None:
+        c = w3.eth.contract(address=address, abi=_artifact(name, sol, folder)["abi"])
+        rcpt = _sign_send(getattr(c.functions, fn)(*args))
+        if rcpt.status != 1:
+            raise RuntimeError(f"{name}.{fn} failed: {rcpt}")
+
+    registry = _deploy("MockRegistry", "IndexTokenMocks", folder="test")
+    token = _deploy("MockIndexToken", "IndexTokenMocks", *INDEX_TOKEN, folder="test")
+    _call(registry, "MockRegistry", "IndexTokenMocks", "setParity", token, INDEX_PARITY, folder="test")
+    for who in (OWNER[0], SPARE[0]):
+        _call(token, "MockIndexToken", "IndexTokenMocks", "mint", who, INDEX_FUNDING, folder="test")
+    # (treasury, governor, anchorer, registry, serviceFeeBps, feeTreasuryBps),
+    # Decision 2026-10-16: the deployer is the governor, so a daemon holding
+    # its key anchors directly.
+    sub = _deploy("Substrate", "Substrate", acct.address, acct.address, zero, registry, 250, 5000)
     out = {
+        "registry": registry,
+        "index_token": token,
         "substrate": sub,
         "service_registry": _deploy("ServiceRegistry", "ServiceMarket", sub),
         "payment_channel": _deploy("PaymentChannel", "ServiceMarket", sub, 3600),
@@ -543,21 +565,20 @@ async def seed(state: Dict[str, Any], contracts: Dict[str, str]) -> None:
 
         # 3. e2e-alpha on chain: gas from the deployer, owner-bound to OWNER.
         w3 = Web3(Web3.HTTPProvider(RPC_URL))
-        exported = await client.ok({"type": "export_agent_key",
-                                    "agent_id": "e2e-alpha"})
-        alpha_addr = Web3.to_checksum_address(exported["address"])
-        alpha_key = exported["private_key"]
         deployer = Account.from_key(DEPLOYER[1])
         owner = Account.from_key(OWNER[1])
+        # A key export needs the owner wallet's signature over a one-use challenge.
+        exported = await client.export_key("e2e-alpha", owner)
+        alpha_addr = Web3.to_checksum_address(exported["address"])
+        alpha_key = exported["private_key"]
         xd.fund_gas(w3, deployer, alpha_addr, ether=10)
         substrate = w3.eth.contract(
             address=Web3.to_checksum_address(contracts["substrate"]),
             abi=xd.load_abi("Substrate"))
         shape = xd.resolve_binding_shape(substrate.abi)
-        lineage = bytes(Web3.keccak(text=f"e2e-live:{alpha_addr}"))
         xd.register_agent_on_chain(
             w3, substrate, shape, agent_pk=alpha_key, agent_addr=alpha_addr,
-            owner_acct=owner, lineage_hash=lineage, peer_id=b"e2e-live-alpha")
+            owner_acct=owner, peer_id=b"e2e-live-alpha")
         reg = await client.ok({"type": "check_agent_registration",
                                "agent_id": "e2e-alpha"})
         if not reg.get("registered"):
@@ -570,7 +591,7 @@ async def seed(state: Dict[str, Any], contracts: Dict[str, str]) -> None:
             "type": "register_service", "mode": "request", "name": SERVICE_NAME,
             "description": "Live-harness fixture: upper-cases text.",
             "agent_id": "e2e-alpha",
-            "backing_tool": tool_digest,
+            "backing_tool": tool_digest, "token": contracts["index_token"],
             "price": SERVICE_ASK, "voucher": SERVICE_ASK,
         })
         if not svc.get("on_chain"):
@@ -613,7 +634,9 @@ async def seed(state: Dict[str, Any], contracts: Dict[str, str]) -> None:
                                "author": SPARE[0]},
             "service": {"name": SERVICE_NAME, "digest": svc["digest"],
                         "service_id": svc.get("service_id"),
-                        "ask": SERVICE_ASK},
+                        "ask": SERVICE_ASK, "token": contracts["index_token"]},
+            "index_token": {"address": contracts["index_token"], "symbol": INDEX_TOKEN[1],
+                            "decimals": INDEX_TOKEN[2], "funded": [OWNER[0], SPARE[0]]},
             "stub_turn": {"execution_id": exec_id, "answer": answer},
         }
     finally:

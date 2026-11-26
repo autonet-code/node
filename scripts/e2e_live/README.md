@@ -30,7 +30,7 @@ flutter test integration_test/live -d windows --dart-define=DAEMON_WS=ws://127.0
 | Piece | Where | Notes |
 |---|---|---|
 | hardhat node | `127.0.0.1:18545`, chain 1337 | started with `node node_modules/hardhat/.../cli.js node`. No `hardhat run`, so `deployments/*.json` is never written |
-| contracts | deployed with web3.py from `artifacts/`, signed by hardhat account 0 | Substrate, ServiceRegistry, PaymentChannel (charter hash goes in the registry as `charter`, no contract) |
+| contracts | deployed with web3.py from `artifacts/`, signed by hardhat account 0 | a Registry holding the value index (the test MockRegistry, one 6-decimal token `tUSD` at parity 1e30, 1,000 tUSD minted to the owner and the spare account), Substrate, ServiceRegistry, PaymentChannel (charter hash goes in the registry as `charter`, no contract) |
 | stub | `127.0.0.1:18080` (`stub_server.py`) | `POST /v1/chat/completions` (JSON and SSE) replies `E2E-STUB-REPLY <last user message>`; trigger words in the newest user message switch it: `E2E-TOOL` (or `E2E-TOOL:<name>`) makes one tool call then finishes in text, `E2E-STALL` never answers, `E2E-FAIL` returns a 503. `GET /registry.json` is the `ATN_REGISTRY_URL` target and lists local addresses only. `GET /health` |
 | daemon | `ws://127.0.0.1:7799` | `python -m atn --headless`. Home is `<state>/home`. The remote listener is off |
 
@@ -42,7 +42,7 @@ flutter test integration_test/live -d windows --dart-define=DAEMON_WS=ws://127.0
 | Tool | `e2e_echo_upper`: a pinned tool authored by the owner |
 | Adoptable tool | `e2e_foreign_lower`: a pinned manifest by the spare account, present only as blobs in the tool store (not registered), so `adopt_tool` + approve works offline. The runner passes its digest as `E2E_ADOPTABLE_DIGEST` |
 | On-chain agent | `e2e-alpha` is registered on Substrate, owner-bound to the owner account |
-| Service | `E2E Upper Service`: tool-backed, ask 1000. The daemon lists it on the local ServiceRegistry, signed with `e2e-alpha`'s own key |
+| Service | `E2E Upper Service`: tool-backed, 1000 base units of tUSD per request. The daemon lists it on the local ServiceRegistry, signed with `e2e-alpha`'s own key |
 | Turn check | One `e2e-beta` turn proves the stub answers through the real execution engine |
 
 `up` prints the ws URL, the contract addresses and the funded accounts. All accounts are well-known hardhat keys with 10000 ETH each, valid on the local chain only:
