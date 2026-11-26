@@ -374,6 +374,36 @@ class TestDriver:
         assert b.rounds == {D1: "claimed", D2: "claimed"} and b.status == "settled"
         assert not [c for c in bond.calls if c[0] == "forfeit"]
 
+    async def test_deferred_bounty_parts_are_retried_once_per_epoch(self, tmp_path):
+        rt, bond, addr, store, drv = await _driver_setup(tmp_path)
+        house, token = "0x" + "aa" * 20, "0x" + "bb" * 20
+        owed = [{"household": house, "token": token, "amount": 5}]
+        paused = {"on": True}
+        reads: List[list] = []
+
+        async def deferred_payouts(agents):
+            reads.append(list(agents))
+            return list(owed)
+
+        async def pay_out(key, h, t):
+            bond.calls.append(("payOut", h, t))
+            if paused["on"]:
+                return {"success": False, "error": "would revert: paused"}
+            owed.clear()
+            return {"success": True, "tx_hash": "0xp"}
+
+        bond.deferred_payouts, bond.pay_out = deferred_payouts, pay_out
+        assert (await drv.tick())["paid_out"] == 0       # still paused: not paid
+        assert reads == [[addr.lower()]]
+        # Once per epoch, not every tick.
+        assert "paid_out" not in await drv.tick()
+        assert len(reads) == 1
+        paused["on"] = False
+        bond.epoch = 4
+        assert (await drv.tick())["paid_out"] == 1
+        assert [c for c in bond.calls if c[0] == "payOut"] == [
+            ("payOut", house, token), ("payOut", house, token)]
+
     async def test_review_that_did_not_count_is_skipped(self, tmp_path):
         rt, bond, addr, store, drv = await _driver_setup(tmp_path)
         drv.on_local_close()

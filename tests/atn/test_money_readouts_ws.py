@@ -90,6 +90,7 @@ def test_fleet_voice_and_the_owners_claims(daemon):
     daemon.rt._config.autonet.owner_wallet = daemon.operator
     claim = _ws(daemon, {"type": "owner_claim_status"})["result"]
     assert claim["earned_value"] == "0" and claim["owed"] == []
+    assert claim["claimed"] == []
     assert "claimed_mint_total" not in claim
 
     training = _ws(daemon, {"type": "rpb_agent_training", "address": daemon.operator})
@@ -141,3 +142,17 @@ def test_the_sweep_moves_each_token_to_the_owner(daemon, monkeypatch):
     # Nothing left: the next sweep moves nothing.
     again = _ws(daemon, {"type": "sweep_to_owner"})["result"]["swept"]
     assert again[0]["skipped"] == "no index tokens"
+
+
+def test_withdraw_owed_is_refused_when_nothing_is_owed(daemon):
+    out = _ws(daemon, {"type": "withdraw_owed", "token": daemon.usdc.address})
+    assert not out["ok"] and "owner wallet" in out["error"]
+    daemon.rt._config.autonet.owner_wallet = daemon.w3.eth.accounts[4]
+    assert not _ws(daemon, {"type": "withdraw_owed", "token": "usdc"})["ok"]
+    out = _ws(daemon, {"type": "withdraw_owed", "token": daemon.usdc.address})
+    assert not out["ok"] and "nothing is owed" in out["error"]
+
+
+def test_agent_api_blocks_withdraw_owed():
+    from atn.agent_api import _BLOCKED
+    assert "withdraw_owed" in _BLOCKED

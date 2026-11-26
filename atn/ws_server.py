@@ -1690,8 +1690,10 @@ class WebSocketBridge:
             # (6-decimal value units: what its REP is claimed on), and what
             # is claimed but not yet paid, per token (a claim pays its basket
             # at once; a token whose transfer failed stays owed until
-            # withdrawn).
-            claim: dict[str, Any] = {"earned_value": "0", "owed": []}
+            # withdrawn), and the basket so far: per token, everything the
+            # owner wallet has claimed (ClaimedToken logs, followed
+            # incrementally).
+            claim: dict[str, Any] = {"earned_value": "0", "owed": [], "claimed": []}
             if wallet:
                 try:
                     from .on_chain import OnChainService
@@ -1713,7 +1715,38 @@ class WebSocketBridge:
                 "orphans": orphan_tools[:50],
                 "earned_value": claim.get("earned_value", "0"),
                 "owed": claim.get("owed", []),
+                "claimed": claim.get("claimed", []),
             }}
+
+        # The owner sends what Substrate owes the household in one token (a
+        # transfer a claim deferred: the token was paused or the owner
+        # frozen). The operator signs Substrate.withdraw(owner, token), which
+        # anyone may send and which pays the owner wallet. Owner surface
+        # only: a scoped session is refused (not in SCOPED_INLINE_ALLOWED)
+        # and the agent API reaches no inline handler.
+        if msg_type == "withdraw_owed":
+            wallet = (getattr(self.runtime._config.autonet, "owner_wallet", "")
+                      or "").strip()
+            if not wallet:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "this daemon has no owner wallet"}
+            from .service_prices import norm_token
+            token = norm_token(msg.get("token"))
+            if not token:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "name the token ('token': 0x address)"}
+            from .on_chain import OnChainService
+            svc = OnChainService(self.runtime._config.autonet)
+            if not svc.available:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Substrate not configured on this daemon"}
+            key = self._operator_key()
+            res = await self._offload(lambda: svc.withdraw_owed(key, wallet, token))
+            if not res.get("success"):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": res.get("error") or "withdrawal failed",
+                        "result": res}
+            return {"msg_id": msg_id, "ok": True, "result": res}
 
         if msg_type == "set_tool_published":
             # Owner surface: flip publish state directly (agents use the
@@ -2010,12 +2043,18 @@ class WebSocketBridge:
             include_retired = bool(msg.get("include_retired", False))
             services = []
             from .service_runner import runner_for
+            from .agent_tools import token_infos
             runner = runner_for(self.runtime)
-            for record in self.runtime.service_store.list(
-                    include_retired=include_retired):
+            records = self.runtime.service_store.list(include_retired=include_retired)
+            infos = await token_infos(self.runtime, [r.token for r in records])
+            for record in records:
                 s = record.spec
                 chain = await self._chain_service(record)
                 services.append({
+                    # The token the price list names, with its symbol,
+                    # decimals and whether the value index lists it now.
+                    "token": record.token,
+                    "token_info": infos.get(record.token),
                     "digest": record.digest,
                     "name": record.name,
                     "description": s.get("description", ""),
@@ -2083,6 +2122,10 @@ class WebSocketBridge:
                 await sc.fetch_missing(catalog, store.spec_for, limit=limit)
             rows = await asyncio.to_thread(
                 catalog.search, query, limit, include_inactive=True)
+            from .agent_tools import token_infos
+            infos = await token_infos(self.runtime, [r.get("token") for r in rows])
+            rows = [{**r, "token_info": infos.get(str(r.get("token") or "").lower())}
+                    for r in rows]
             return {"msg_id": msg_id, "ok": True,
                     "result": {"services": rows, "count": len(rows)}}
 

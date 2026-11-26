@@ -212,7 +212,7 @@ def test_unanchored_epoch_fails_cleanly(chain):
     assert not r.success and r.error
 
 
-def test_a_paused_token_is_deferred_and_retried():
+def _paused_fixture():
     w3 = Web3(EthereumTesterProvider())
     deployer = w3.eth.accounts[0]
     reg = _deploy(w3, artifact("test/IndexTokenMocks.sol/MockRegistry"), deployer)
@@ -234,11 +234,21 @@ def test_a_paused_token_is_deferred_and_retried():
           "deployer": deployer, "agent_addrs": list(agents),
           "tokens": [paused, dai], "window": window}
     result, resolver = _close_and_anchor(fx, agents, "e_pause")
-    earner = agents[0]
+    return fx, paused, dai, result, resolver
+
+
+def _set_paused(fx, token, on):
+    fx["w3"].eth.wait_for_transaction_receipt(token.functions.setPaused(on).transact(
+        {"from": fx["deployer"]}))
+
+
+def test_a_paused_token_is_deferred_and_retried():
+    fx, paused, dai, result, resolver = _paused_fixture()
+    contract = fx["contract"]
+    earner = fx["agent_addrs"][0]
     owed = result["claims"][earner.lower()]["tokens"]
 
-    w3.eth.wait_for_transaction_receipt(paused.functions.setPaused(True).transact(
-        {"from": deployer}))
+    _set_paused(fx, paused, True)
     sub = _submitter(fx, earner, resolver)
     r = sub.submit_for_epoch("e_pause")
     assert r.success, r.error                       # the claim itself landed
@@ -251,9 +261,79 @@ def test_a_paused_token_is_deferred_and_retried():
     assert contract.functions.owed(earner, paused.address).call() == owed[paused.address.lower()]
 
     # Unpaused: the next pass withdraws what is left, and nothing twice.
-    w3.eth.wait_for_transaction_receipt(paused.functions.setPaused(False).transact(
-        {"from": deployer}))
+    _set_paused(fx, paused, False)
     r2 = sub.submit_for_epoch("e_pause")
     assert r2.success and list(r2.withdrawn) == [paused.address.lower()]
     assert paused.functions.balanceOf(earner).call() == owed[paused.address.lower()]
     assert contract.functions.owed(earner, paused.address).call() == 0
+
+
+def test_a_deferred_token_is_retried_after_a_restart():
+    fx, paused, _dai, result, resolver = _paused_fixture()
+    earner = fx["agent_addrs"][0]
+    owed = result["claims"][earner.lower()]["tokens"][paused.address.lower()]
+    _set_paused(fx, paused, True)
+    assert _submitter(fx, earner, resolver).submit_for_epoch("e_pause").success
+    _set_paused(fx, paused, False)
+    # A new submitter (a restarted daemon) remembers no pending withdrawal;
+    # it checks every pool token at its pass.
+    r = _submitter(fx, earner, resolver).submit_for_epoch("e_pause")
+    assert r.success and list(r.withdrawn) == [paused.address.lower()]
+    assert paused.functions.balanceOf(earner).call() == owed
+
+
+def _service(fx):
+    """The daemon's OnChainService over the in-process chain."""
+    from types import SimpleNamespace
+    from atn import on_chain
+    on_chain._CLAIMED_CACHE.clear()
+    svc = on_chain.OnChainService(SimpleNamespace(
+        rpc_url="http://in-process", substrate_address=fx["addr"], chain_id=0,
+        deploy_block=0))
+    svc._get_web3 = lambda: fx["w3"]
+    return svc
+
+
+def _funded_key(fx) -> str:
+    from eth_account import Account
+    acct = Account.create()
+    fx["w3"].eth.wait_for_transaction_receipt(fx["w3"].eth.send_transaction(
+        {"from": fx["deployer"], "to": acct.address, "value": 10 ** 18}))
+    return acct.key.hex()
+
+
+@pytest.mark.asyncio
+async def test_claim_status_lists_the_basket_and_withdraw_owed_pays_it():
+    fx, paused, dai, result, resolver = _paused_fixture()
+    earner = fx["agent_addrs"][0]
+    owed = result["claims"][earner.lower()]["tokens"]
+    svc = _service(fx)
+    status = await svc.get_claim_status(earner)
+    assert status["claimed"] == [] and status["owed"] == []
+
+    _set_paused(fx, paused, True)
+    assert _submitter(fx, earner, resolver).submit_for_epoch("e_pause").success
+    status = await svc.get_claim_status(earner)
+    claimed = {r["token"]: int(r["amount"]) for r in status["claimed"]}
+    # Every token of the leaf is claimed; the paused one is still owed.
+    assert claimed == owed
+    assert [(r["token"], int(r["amount"])) for r in status["owed"]] == [
+        (paused.address.lower(), owed[paused.address.lower()])]
+    # Read again: incremental, nothing counted twice.
+    again = await svc.get_claim_status(earner)
+    assert {r["token"]: int(r["amount"]) for r in again["claimed"]} == owed
+
+    key = _funded_key(fx)
+    # Still paused: the dry run refuses it and nothing is sent.
+    res = await svc.withdraw_owed(key, earner, paused.address)
+    assert not res["success"] and "would fail" in res["error"]
+    _set_paused(fx, paused, False)
+    res = await svc.withdraw_owed(key, earner, paused.address)
+    assert res["success"], res
+    assert int(res["amount"]) == owed[paused.address.lower()]
+    assert paused.functions.balanceOf(earner).call() == owed[paused.address.lower()]
+    # Nothing owed now: refused.
+    res = await svc.withdraw_owed(key, earner, paused.address)
+    assert not res["success"] and "nothing is owed" in res["error"]
+    res = await svc.withdraw_owed(key, earner, dai.address)
+    assert not res["success"] and "nothing is owed" in res["error"]

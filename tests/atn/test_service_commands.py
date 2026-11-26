@@ -123,6 +123,21 @@ async def _call(d, name, args, caller="buyer"):
 
 
 @pytest.mark.asyncio
+async def test_token_infos_mark_tokens_outside_the_index(daemon, monkeypatch):
+    other = "0x" + "77" * 20
+    at._OUTSIDE_CACHE.clear()
+    infos = await at.token_infos(daemon.rt, [USDC, other, None, ""])
+    assert infos[USDC] == {"symbol": "USDC", "decimals": 6, "in_index": True}
+    # Outside the index (and no chain to read it from here): known not listed.
+    assert infos[other] == {"symbol": "", "decimals": None, "in_index": False}
+
+    async def unreadable(runtime):
+        return None
+    monkeypatch.setattr(at, "_index_tokens", unreadable)
+    assert await at.token_infos(daemon.rt, [USDC]) == {USDC: None}
+
+
+@pytest.mark.asyncio
 async def test_find_services_rows(daemon):
     daemon.cat._last_block = 1
     out = await _call(daemon, "find_services", {})
@@ -132,7 +147,8 @@ async def test_find_services_rows(daemon):
     assert req["mode"] == "request" and req["prices"] == {"requests": 100}
     assert req["measures"] == [{"measure": "requests", "quantity": 1}]
     assert req["voucher"] == 500 and req["protocol"] is None
-    assert req["token"] == USDC and req["token_info"] == {"symbol": "USDC", "decimals": 6}
+    assert req["token"] == USDC and req["token_info"] == {"symbol": "USDC", "decimals": 6,
+                                                         "in_index": True}
     assert req["spec_available"] is True and req["your_credits"] is None
     assert box["mode"] == "session" and box["protocol"]["id"] == "ssh/2"
     # Credits in another token are not this service's credits.

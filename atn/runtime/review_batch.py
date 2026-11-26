@@ -536,6 +536,44 @@ class ReviewBondClient:
         return {**res, "amount": owed, "household": str(house).lower(),
                 "token": str(token).lower()}
 
+    async def deferred_payouts(self, agents: list[str]) -> Optional[list[dict[str, Any]]]:
+        """What ToolBond still owes the households of ``agents`` (each
+        agent's bound owner now, else itself): ``{household, token,
+        amount}`` for every value index or pool token with ``owed > 0``,
+        a bounty part a claim deferred. None when the chain is unreadable."""
+        def fn(b, s):
+            from web3 import Web3
+            from ..on_chain import OnChainService
+            w3 = b.w3
+            sub = w3.eth.contract(address=s.address, abi=_HOUSEHOLD_ABI)
+            houses: list[str] = []
+            for agent in agents:
+                a = Web3.to_checksum_address(agent)
+                owner = sub.functions.getAgentOwner(a).call()
+                h = a if int(owner, 16) == 0 else Web3.to_checksum_address(owner)
+                if h not in houses:
+                    houses.append(h)
+            tokens = OnChainService(self._base._cfg())._index_candidates(w3, s)
+            out = []
+            for h in houses:
+                for t in tokens:
+                    owed = int(b.functions.owed(h, Web3.to_checksum_address(t)).call())
+                    if owed > 0:
+                        out.append({"household": h.lower(), "token": t.lower(),
+                                    "amount": owed})
+            return out
+        return await self._read(fn)
+
+    async def pay_out(self, private_key: str, household: str, token: str) -> dict[str, Any]:
+        """``ToolBond.payOut(household, token)``: pays what it owes there.
+        The gas estimate runs it first, so a token still paused sends
+        nothing ("would revert")."""
+        def build(b, s, a):
+            from web3 import Web3
+            return b.functions.payOut(Web3.to_checksum_address(household),
+                                      Web3.to_checksum_address(token))
+        return await self._write(private_key, build)
+
     async def verdict_of(self, digest: str) -> Optional[dict[str, Any]]:
         """The tool's malware verdict on ToolBond (Decision 2026-11-10):
         ``malware`` 0 none, 1 by the reviewers, 2 by the DAO; ``cleared``

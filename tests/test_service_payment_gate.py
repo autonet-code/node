@@ -23,7 +23,7 @@ from eth_account import Account
 import atn.on_chain as oc
 from atn.events import EventBus
 from atn.service_client import new_request_id, sign_request
-from atn.ws_server import WebSocketBridge
+from atn.ws_server import ClientSession, WebSocketBridge
 
 SUBSTRATE_ADDR = "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25"
 CHANNEL_ADDR = "0x97956A322dC5585157c91840d39292c396032508"
@@ -476,3 +476,21 @@ class TestUnpaid:
         assert rt.service_store.summary()[record.digest]["ok_count"] == 1
         rows = (rt.service_store._requests_path.read_text().strip().splitlines())
         assert '"amount": "0"' in rows[-1] and '"payer": ""' in rows[-1]
+
+
+@pytest.mark.asyncio
+async def test_list_services_rows_carry_token_info(tmp_path, monkeypatch):
+    from atn import agent_tools as at
+
+    async def index(runtime):
+        return [{"token": USDC, "symbol": "USDC", "decimals": 6, "parity": str(10 ** 30)}]
+    monkeypatch.setattr(at, "_index_tokens", index)
+    rt = _make_runtime(tmp_path, chain=True)
+    _register_service(rt)
+    bridge = WebSocketBridge(rt)
+    out = await bridge._handle_message({"msg_id": "1", "type": "list_services"},
+                                       ClientSession(local=True, authed=True, owner=True))
+    assert out["ok"], out
+    (row,) = out["result"]["services"]
+    assert row["token"] == USDC
+    assert row["token_info"] == {"symbol": "USDC", "decimals": 6, "in_index": True}

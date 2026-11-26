@@ -355,6 +355,18 @@ SUBSTRATE_ABI = [
         "name": "ServicePayment",
         "type": "event",
     },
+    # One per token a claim credits: summed per earner for the basket so far.
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "address", "name": "earner",      "type": "address"},
+            {"indexed": True,  "internalType": "bytes32", "name": "epochIdHash", "type": "bytes32"},
+            {"indexed": True,  "internalType": "address", "name": "token",       "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "amount",      "type": "uint256"},
+        ],
+        "name": "ClaimedToken",
+        "type": "event",
+    },
     {
         "anonymous": False,
         "inputs": [
@@ -698,6 +710,11 @@ PAYMENT_CHANNEL_ABI = [
 # eth_getLogs spans are read in chunks of this many blocks (public RPCs cap
 # the range), as the service catalog does.
 CHANNEL_LOG_CHUNK = 1000
+
+# Per (rpc, Substrate, earner): the next block to scan for ClaimedToken logs
+# and the totals summed so far (OnChainService._claimed_totals).
+_CLAIMED_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+_CLAIMED_LOCK = threading.Lock()
 
 
 # The ERC-20 surface of an index token: a payer approves Substrate (a direct
@@ -1635,12 +1652,101 @@ class OnChainService:
                     info = self.token_info(w3, contract, t)
                     owed.append({"token": t, "symbol": info["symbol"],
                                  "decimals": info["decimals"], "amount": str(amount)})
-            return {"earner": who,
-                    "earned_value": str(int(contract.functions.earnedValue(who).call())),
-                    "owed": owed}
+            out: dict[str, Any] = {
+                "earner": who,
+                "earned_value": str(int(contract.functions.earnedValue(who).call())),
+                "owed": owed}
+            # The basket so far: every token's total claimed by the earner
+            # (ClaimedToken logs), a read failure leaving it out.
+            try:
+                totals = self._claimed_totals(w3, contract, who)
+                rows = []
+                for t in sorted(totals):
+                    info = self.token_info(w3, contract, t)
+                    rows.append({"token": t, "symbol": info["symbol"],
+                                 "decimals": info["decimals"],
+                                 "amount": str(totals[t])})
+                out["claimed"] = rows
+            except Exception as e:  # noqa: BLE001
+                log.debug("claimed totals for %s unread: %s", earner, e)
+            return out
         except Exception as e:  # noqa: BLE001
             log.debug("Failed to read claim status for %s: %s", earner, e)
             return None
+
+    def _claimed_totals(self, w3: Any, contract: Any, earner: str) -> dict[str, int]:
+        """Per token, what ``earner`` has claimed from the pools: the sum of
+        its ``ClaimedToken`` logs. Followed incrementally per (chain,
+        Substrate, earner): the first read scans from the jurisdiction's
+        deploy block, later ones only the blocks since. A failed read keeps
+        what was summed so far for the next call."""
+        from web3 import Web3
+        key = (str(getattr(self.config, "rpc_url", "") or ""),
+               str(contract.address).lower(), earner.lower())
+        with _CLAIMED_LOCK:
+            state = _CLAIMED_CACHE.get(key)
+            if state is None:
+                start = int(getattr(self.config, "deploy_block", 0) or 0)
+                state = {"next": start, "totals": {}}
+                _CLAIMED_CACHE[key] = state
+            topic0 = "0x" + Web3.keccak(
+                text="ClaimedToken(address,bytes32,address,uint256)").hex().removeprefix("0x")
+            topic_earner = "0x" + "00" * 12 + earner.lower().removeprefix("0x")
+            event = contract.events.ClaimedToken()
+            last = int(w3.eth.block_number)
+            if int(state["next"]) > last + 1:
+                # A chain behind what was read (a local chain restarted):
+                # sum again from the start.
+                state["next"] = int(getattr(self.config, "deploy_block", 0) or 0)
+                state["totals"] = {}
+            block = int(state["next"])
+            while block <= last:
+                end = min(last, block + CHANNEL_LOG_CHUNK - 1)
+                logs = w3.eth.get_logs({"address": contract.address, "fromBlock": block,
+                                        "toBlock": end, "topics": [topic0, topic_earner]})
+                for lg in logs:
+                    args = event.process_log(lg)["args"]
+                    t = str(args["token"]).lower()
+                    state["totals"][t] = state["totals"].get(t, 0) + int(args["amount"])
+                block = end + 1
+                state["next"] = block
+            return dict(state["totals"])
+
+    async def withdraw_owed(self, private_key: str, earner: str,
+                            token: str) -> dict[str, Any]:
+        """``Substrate.withdraw(earner, token)`` signed by ``private_key``
+        (anyone may send it; it pays the earner what it is owed in that
+        token). Refused when nothing is owed, and dry-run first so a token
+        still paused or frozen costs no gas. ``{success, tx_hash, amount}``
+        or ``{success: False, error}``."""
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            account = Account.from_key(private_key)
+            who = w3.to_checksum_address(earner)
+            t = w3.to_checksum_address(token)
+            owed = int(contract.functions.owed(who, t).call())
+            if owed <= 0:
+                return {"success": False, "error": "nothing is owed in this token",
+                        "amount": "0"}
+            call = contract.functions.withdraw(who, t)
+            try:
+                call.call({"from": account.address})
+            except Exception as e:  # noqa: BLE001
+                return {"success": False, "amount": str(owed),
+                        "error": f"the withdrawal would fail now (the token may be "
+                                 f"paused or the earner frozen): {e}"}
+            out = self._send_signed(w3, account, call, gas_floor=150_000)
+            out["amount"] = str(owed)
+            out["token"] = str(token).lower()
+            return out
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:  # noqa: BLE001
+            log.warning("withdraw(%s, %s) failed: %s", earner, token, e)
+            return {"success": False, "error": str(e)}
 
     def _service_payments_to(self, w3: Any, contract: Any, recipient: str,
                              from_block: int) -> dict[str, int]:

@@ -369,8 +369,9 @@ as `{"model": "llama3.1:70b-instruct-q4_K_M"}`) set it apart.
 `find_services` (`query`), or `GET /agents/<id>/services?q=<topic>`, lists
 each service with its `service_id`, `spec_digest`, `provider`, `name`,
 `description`, `mode`, `settings`, `measures`, `token` (the index token it
-is paid in) with `token_info` (its `symbol` and `decimals`; `null` while
-the token is not in the index, and then the service cannot be bought),
+is paid in) with `token_info` (its `symbol`, `decimals` and `in_index`;
+while `in_index` is false the service cannot be bought; `null` when the
+index cannot be read),
 `prices` (the provider's signed price list: base units of that token per
 each measure's quantity; a request service `{"requests": amount}`),
 `voucher` (how much each voucher pays ahead, in the same token),

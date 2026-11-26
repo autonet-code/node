@@ -43,6 +43,7 @@ DANGEROUS = [
     "claude_session_import", "robot_export_packs", "sanctions",
     "voice_start", "skip_onboarding", "grant_tool", "set_local_model",
     "remove_agent", "clone_agent", "export_agent_key", "secrets_put",
+    "withdraw_owed",
 ]
 
 

@@ -94,6 +94,9 @@ class ReviewDriver:
         self._close_epochs: set[int] = set()
         self._close_pending = False
         self._wake: Optional[asyncio.Event] = None
+        # The ToolBond epoch whose deferred bounty parts were last retried
+        # (once per epoch: a token's issuer may unpause it any time).
+        self._payout_epoch: Optional[int] = None
 
     @property
     def client(self) -> Any:
@@ -229,7 +232,35 @@ class ReviewDriver:
                             agent[:10], batch.epoch, exc)
                 batch.last_error = str(exc)
                 store.save(batch)
+        if keys and self._payout_epoch != int(epoch):
+            done["paid_out"] = await self._retry_payouts(int(epoch), keys)
         return done
+
+    async def _retry_payouts(self, epoch: int, keys: dict[str, str]) -> int:
+        """Bounty parts ToolBond deferred (a paused or frozen token) are
+        owed until someone calls ``payOut``. A claim retries only its own
+        round's token once, so once per epoch this pays every part still
+        owed to this daemon's households, each dry-run by its gas estimate
+        first. Returns how many were paid."""
+        client = self.client
+        if not hasattr(client, "deferred_payouts"):
+            return 0
+        rows = await client.deferred_payouts(sorted(keys))
+        if rows is None:
+            return 0  # unreadable: retried at the next tick
+        self._payout_epoch = epoch
+        key = self._any_key(keys)
+        paid = 0
+        for row in rows:
+            res = await client.pay_out(key, row["household"], row["token"])
+            if res.get("success"):
+                paid += 1
+                log.info("review driver: paid out %s of %s to %s", row["amount"],
+                         row["token"], row["household"])
+            else:
+                log.info("review driver: payOut %s to %s not sent (retried next "
+                         "epoch): %s", row["token"], row["household"], res.get("error"))
+        return paid
 
     # -- steps -------------------------------------------------------------
     def _roll(self, batch: EpochBatch, epoch: int) -> None:

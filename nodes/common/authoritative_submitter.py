@@ -22,8 +22,9 @@ For an anchored epoch:
      claim (``owed(earner, token) > 0``), so normally the claim is the only
      transaction. A withdrawal is dry-run first; one that would fail
      (still paused, blocked) is not sent, is reported in ``owed`` and
-     ``withdraw_errors`` and is retried at the next pass. It never blocks
-     the others.
+     ``withdraw_errors`` and is retried at the next pass (each pass checks
+     every pool token, so a restart forgets nothing). It never blocks the
+     others.
 
 Amounts are integers in each token's base units from end to end: the blob
 carries them as decimal strings and the leaf commits them as they are.
@@ -172,8 +173,19 @@ class AuthoritativeChainSubmitter:
         with self._lock:
             r = self._claim(epoch_id)
             if r.success:
-                self._withdraw_owed(set(r.tokens), r)
+                self._withdraw_owed(set(r.tokens) | self._pool_tokens(), r)
             return r
+
+    def _pool_tokens(self) -> set:
+        """Every token Substrate keeps a pool in (lowercase): each pass
+        checks what the earner is owed in all of them, so a transfer
+        deferred before a restart (not in ``_pending_withdrawals``) is
+        retried once per epoch too. Empty when unreadable."""
+        try:
+            return {str(t).lower() for t in self._get_contract().functions.poolTokens().call()}
+        except Exception as e:  # noqa: BLE001 (the claim's own tokens still go)
+            logger.debug("poolTokens unread: %s", e)
+            return set()
 
     def _claim(self, epoch_id: str) -> AuthoritativeSubmissionResult:
         if epoch_id in self._submitted_epochs:

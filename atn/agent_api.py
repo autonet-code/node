@@ -118,7 +118,10 @@ _NETWORK_READS: dict[str, dict[str, Any]] = {
 
 # Never reachable through this API, whatever the session allows.
 _BLOCKED = frozenset({"export_agent_key", "export_operator_key",
-                      "auth_response", "auth_status"})
+                      "auth_response", "auth_status",
+                      # The owner's money: sending what Substrate owes the
+                      # household is the owner's call.
+                      "withdraw_owed"})
 
 
 class _HTTPError(Exception):

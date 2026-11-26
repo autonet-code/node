@@ -59,7 +59,10 @@ a household earns. It:
   proves), serves blobs and announces in the DHT the tool blobs it holds
   and the evidence of its own malware flags;
 - with a registered agent or operator: runs the federated close, votes epoch elections
-  and submits claims through the operator key. Without one it closes
+  and submits claims through the operator key. Once per epoch it also
+  sends any payment a transfer failure deferred (Substrate `withdraw`,
+  ToolBond `payOut`), dry-run first; the owner can send one at once
+  from the app (WS `withdraw_owed`). Without one it closes
   nothing and installs each anchor's state instead. That state is the
   anchor's carry bundle (registrations, review rounds, ratings, service
   reviews and ratings), the same one a joiner or a rewind installs;

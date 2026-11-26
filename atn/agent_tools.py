@@ -3642,6 +3642,50 @@ async def _index_tokens(runtime: Runtime) -> list[dict[str, Any]] | None:
     return tokens
 
 
+_OUTSIDE_CACHE: dict[str, Any] = {}
+
+
+async def token_infos(runtime: Runtime, tokens: Any) -> dict[str, Any]:
+    """``token -> {symbol, decimals, in_index}`` for a service row's token
+    (lowercase 0x keys). A token of the value index takes the index's row;
+    one outside it is read from the token itself (kept five minutes), with
+    ``in_index`` false: such a service cannot be paid until the DAO lists
+    its token. None for every token when the index cannot be read."""
+    from .on_chain import OnChainService
+    import time as _time
+
+    wanted = sorted({str(t or "").lower() for t in tokens if t})
+    index = await _index_tokens(runtime)
+    if index is None:
+        return {t: None for t in wanted}
+    by_token = {str(r["token"]).lower(): r for r in index}
+    out: dict[str, Any] = {}
+    for t in wanted:
+        row = by_token.get(t)
+        if row is not None:
+            out[t] = {"symbol": row["symbol"], "decimals": row["decimals"],
+                      "in_index": True}
+            continue
+        hit = _OUTSIDE_CACHE.get(t)
+        if hit is not None and _time.monotonic() - hit[0] < _INDEX_TTL_S:
+            out[t] = hit[1]
+            continue
+        info: dict[str, Any] = {"symbol": "", "decimals": None, "in_index": False}
+        try:
+            svc = OnChainService(runtime._config.rpb)
+
+            def read() -> dict[str, Any]:
+                w3 = svc._get_web3()
+                return svc.token_info(w3, svc._get_contract(w3), t)
+            got = await asyncio.to_thread(read)
+            info.update(symbol=got["symbol"], decimals=got["decimals"])
+        except Exception as exc:  # noqa: BLE001 (symbol and decimals are extras)
+            log.debug("token info for %s unread: %s", t, exc)
+        _OUTSIDE_CACHE[t] = (_time.monotonic(), info)
+        out[t] = info
+    return out
+
+
 async def _list_index_tokens(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """The tokens services are priced and paid in."""
     tokens = await _index_tokens(runtime)
@@ -3677,23 +3721,22 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     book = getattr(runtime, "channel_book", None)
     buyer = _buyer(runtime, input.get("_caller_id")) if book is not None else None
     payer = buyer[0] if isinstance(buyer, tuple) else ""
-    index = {t["token"]: t for t in (await _index_tokens(runtime) or [])}
+    infos = await token_infos(runtime, [r.get("token") for r in rows])
     out = []
     for r in rows:
         token = str(r.get("token") or "")
         credits = (book.get(payer, r["provider"], token)
                    if book is not None and payer and token else None)
-        info = index.get(token)
         out.append({
             "service_id": r["service_id"], "provider": r["provider"],
             "spec_digest": r["digest"], "active": r["active"], "name": r["name"],
             "description": r["description"], "mode": r["mode"],
             "settings": r["settings"], "measures": r["measures"],
             "token": token,
-            # Its symbol and decimals; None when the token is not in the
-            # value index now (the service cannot be paid until it is).
-            "token_info": ({"symbol": info["symbol"], "decimals": info["decimals"]}
-                           if info else None),
+            # Its symbol, decimals and whether the value index lists it now
+            # (the service cannot be paid until it does); None when the
+            # index cannot be read.
+            "token_info": infos.get(token.lower()),
             "prices": r["prices"], "voucher": r["voucher"],
             "registry_price": r["registry_price"], "protocol": r["protocol"],
             "input_schema": r["input_schema"], "output_schema": r["output_schema"],
