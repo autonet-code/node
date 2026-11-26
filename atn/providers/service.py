@@ -145,8 +145,14 @@ class ServiceProvider(Provider):
 
     @property
     def cached_ask(self) -> int | None:
-        """Last-read request price in ATN base units (None = not yet read)."""
+        """Last-read request price, in base units of the price list's token
+        (``cached_token``; None = not yet read)."""
         return self._ask_amount
+
+    @property
+    def cached_token(self) -> str:
+        """The token the last-read price list names ("" = not yet read)."""
+        return str(getattr(self, "_token", "") or "")
 
     @property
     def payer_kind(self) -> str:
@@ -221,9 +227,14 @@ class ServiceProvider(Provider):
                 f"service provider: no price list is known yet for "
                 f"{self._spec_digest[:16]}; try again once the catalog has it",
                 provider=self.name)
-        from ..service_prices import request_price, voucher_size
+        from ..service_prices import price_token, request_price, voucher_size
         self._ask_amount = request_price(price_list)
         self._voucher = voucher_size(price_list)
+        self._token = price_token(price_list)
+        if self._ask_amount > 0 and not self._token:
+            raise ProviderError(
+                f"service provider: the price list of {self._spec_digest[:16]} "
+                "names no token", provider=self.name)
         return self._ask_amount
 
     async def _refuse_if_sanctioned(self) -> None:
@@ -264,9 +275,9 @@ class ServiceProvider(Provider):
         return self._client_address
 
     async def _price(self) -> int:
-        """This call's price in ATN base units, after every check that
-        refuses a call before anything is sent; 0 when nothing is paid
-        (no chain config, or a zero ask).
+        """This call's price (base units of the price list's token, kept in
+        ``_token``), after every check that refuses a call before anything
+        is sent; 0 when nothing is paid (no chain config, or a zero ask).
 
         Raises ProviderError when chain IS configured and the call cannot
         be paid: an unpaid request would just be refused by the provider's
@@ -336,25 +347,28 @@ class ServiceProvider(Provider):
         book = self._channel_book()
         payer = self._payer_address()
         provider = self._provider_address
-        if book is not None and smc.channel_available and book.get(payer, provider):
+        token = self.cached_token
+        if (book is not None and smc.channel_available
+                and book.get(payer, provider, token)):
             reply = await request_on_credits(
-                book, smc, self._config, self._owner_key, payer, provider,
+                book, smc, self._config, self._owner_key, payer, provider, token,
                 self._spec_digest, args, price=ask,
                 voucher=int(getattr(self, "_voucher", 0) or 0),
                 endpoint=self._endpoint, **kwargs)
             if reply.get("error") and not reply.get("delivered"):
                 raise ProviderError(f"service provider: payment failed: {reply['error']}",
                                     provider=self.name)
-            self._last_payment = {"credits": reply.get("credits"),
+            self._last_payment = {"credits": reply.get("credits"), "token": token,
                                   "paid": ask if reply.get("ok") else 0}
             return reply
         request_id = service_client.new_request_id()
         paid = await service_client.pay_for_service(self._config, self._owner_key,
-                                                    provider, ask, request_id=request_id)
+                                                    provider, ask, request_id=request_id,
+                                                    token=token)
         if paid.get("error"):
             raise ProviderError(f"service provider: payment failed: {paid['error']}",
                                 provider=self.name)
-        self._last_payment = {"tx_hash": paid.get("tx_hash"), "paid": ask}
+        self._last_payment = {"tx_hash": paid.get("tx_hash"), "token": token, "paid": ask}
         return await service_client.request_service(
             self._config, provider, self._spec_digest, args,
             tx_hash=str(paid.get("tx_hash") or ""),

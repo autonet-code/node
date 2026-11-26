@@ -548,6 +548,9 @@ class ServiceCatalog:
             # What it charges for (a request service: per request), and the
             # provider's signed prices for them ({} until a list arrives).
             "measures": spec_measures(spec),
+            # The token the prices are in (a token of the value index; every
+            # amount is in its base units).
+            "token": str(pl.get("token") or ""),
             "prices": dict(pl.get("prices") or {}),
             "voucher": int(pl.get("voucher") or 0),
             "price_list": pl or None,

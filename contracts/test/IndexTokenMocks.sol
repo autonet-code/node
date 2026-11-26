@@ -113,17 +113,34 @@ contract NoReturnToken {
 ///      jurisdiction.parity.<token, lowercase hex>.
 contract MockRegistry {
     mapping(string => string) private _values;
+    mapping(string => bool) private _known;
+    string[] private _keys;
 
     function getRegistryValue(string memory key) external view returns (string memory) {
         return _values[key];
     }
 
-    function setValue(string memory key, string memory value) external {
+    /// @dev Every key ever written and its value, in write order, as the
+    ///      DAO Registry enumerates them.
+    function getAllKeys() external view returns (string[] memory) {
+        return _keys;
+    }
+
+    function getAllValues() external view returns (string[] memory out) {
+        out = new string[](_keys.length);
+        for (uint256 i = 0; i < _keys.length; i++) out[i] = _values[_keys[i]];
+    }
+
+    function setValue(string memory key, string memory value) public {
+        if (!_known[key]) {
+            _known[key] = true;
+            _keys.push(key);
+        }
         _values[key] = value;
     }
 
     function setParity(address token, uint256 parity) external {
-        _values[string.concat("jurisdiction.parity.", Strings.toHexString(token))] =
-            parity == 0 ? "" : Strings.toString(parity);
+        setValue(string.concat("jurisdiction.parity.", Strings.toHexString(token)),
+                 parity == 0 ? "" : Strings.toString(parity));
     }
 }

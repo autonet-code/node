@@ -2,8 +2,10 @@
 
 The chain surface is ``runtime/tool_bond.py``. Two pieces live here:
 
-  - PUBLISH (``publish_with_stake``): every published tool carries an ATN
-    stake. Publishing requires a novelty claim in the manifest, a successor
+  - PUBLISH (``publish_with_stake``): every published tool carries a
+    ToolBond stake (in a value index token once ToolBond's index-token
+    version exists; until then the bond step refuses, see
+    ``tool_bond.BOND_PENDING``). Publishing requires a novelty claim in the manifest, a successor
     only by the same author, and ``ToolBondClient.register_and_bond`` signed
     with the author's key (the operator's, for an external agent). No
     ToolBond configured = refused (fail closed), except under the dev
@@ -255,15 +257,15 @@ async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
             return {"error": f"you publish as this household's operator "
                              f"({address}), which is not registered on chain "
                              "yet. Ask the owner to register the operator in "
-                             "the Autonet app (Household) and to fund it with "
-                             "ATN for the tool's stake and with gas. Then "
+                             "the Autonet app (Household) and to fund it for "
+                             "the tool's stake and with gas. Then "
                              "publish again; nothing else to redo."}
         if not address or not getattr(identity, "registered_on_chain", False):
             return {"error": f"agent '{local_author}' is not registered on chain "
                              "yet. Publishing needs it: ask the owner to "
                              "connect their wallet in the Autonet app and "
                              "approve your registration (Household), and to "
-                             "fund you with some ATN for the tool's stake. "
+                             "fund you for the tool's stake. "
                              "Then publish again; nothing else to redo."}
         if str(manifest.get("author") or "").lower() != address.lower():
             # Registered before the agent was: re-author it now, the same
@@ -280,7 +282,12 @@ async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
         key = runtime.registry.get_agent_key(local_author)
         if not key:
             return {"error": f"No private key stored for agent '{local_author}'."}
-        res = await client.register_and_bond(key, record.digest)
+        try:
+            res = await client.register_and_bond(key, record.digest)
+        except NotImplementedError as exc:
+            return {"error": f"ToolBond stake not made: {exc}. The tool stays "
+                             "registered and unpublished; publish again once it "
+                             "is deployed."}
         if not res.get("success"):
             return {"error": "ToolBond stake failed"
                              + (f" at {res['step']}" if res.get("step") else "")

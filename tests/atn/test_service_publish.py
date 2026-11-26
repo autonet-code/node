@@ -9,12 +9,12 @@ import pytest
 from atn import on_chain
 from atn.service_publish import form_from, publish_service, read_service_file
 
-from tests.atn.test_service_store import KEY, _make_runtime, _tool
+from tests.atn.test_service_store import KEY, USDC, _make_runtime, _tool
 
 
 def _form(**kw):
     msg = {"name": "echo", "description": "Echo.", "mode": "request",
-           "backing_tool": "echo_tool", "price": "5", "voucher": "50"}
+           "backing_tool": "echo_tool", "token": USDC, "price": "5", "voucher": "50"}
     msg.update(kw)
     return form_from(msg)
 
@@ -127,6 +127,7 @@ async def test_published_on_chain(tmp_path, smc):
     out = await _publish(rt)
     assert out["on_chain"] is True and out["service_id"] == 4
     assert out["tx_hash"] == "0xabc" and out["price_list"]["prices"] == {"requests": 5}
+    assert out["price_list"]["token"] == USDC
     assert smc.calls == [(KEY, out["digest"], 3)]
     assert rt.service_store.get(out["digest"]).service_id == 4
     assert [r.digest for r in announced] == [out["digest"]]
@@ -173,3 +174,24 @@ async def test_a_bad_form_publishes_nothing(tmp_path, smc):
     rt.service_store = None
     out = await publish_service(rt, author="user", signing_key=KEY, form=_form())
     assert "not available" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_the_token_must_be_named_and_in_the_index(tmp_path, smc, monkeypatch):
+    rt = _make_runtime(tmp_path)
+    out = await _publish(rt, token="")
+    assert "name the token" in out["error"] and len(rt.service_store) == 0
+    out = await _publish(rt, token="ATN")
+    assert "name the token" in out["error"]
+    # With a chain, the token must be one Substrate accepts now.
+    index = {USDC}
+
+    async def accepts(self, token):
+        return token in index
+    monkeypatch.setattr(on_chain.OnChainService, "available", property(lambda self: True))
+    monkeypatch.setattr(on_chain.OnChainService, "accepts_token", accepts)
+    out = await _publish(rt, token="0x" + "d1" * 20)
+    assert "not in the jurisdiction's value index" in out["error"]
+    assert len(rt.service_store) == 0 and smc.calls == []
+    out = await _publish(rt, token=USDC.upper().replace("0X", "0x"))
+    assert out["on_chain"] is True and out["price_list"]["token"] == USDC

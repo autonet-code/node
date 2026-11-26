@@ -33,13 +33,15 @@ from atn import on_chain as oc
 _CHANNEL_ADDR = "0x97956A322dC5585157c91840d39292c396032508"
 _SUBSTRATE_ADDR = "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25"
 _CHAIN_ID = 127823
+_USDC = "0x" + "a6" * 20
+_DAI = "0x" + "d1" * 20
 
 
 # ---------------------------------------------------------------------------
 # 1. EIP-712 voucher digest
 # ---------------------------------------------------------------------------
 
-def _manual_voucher_digest(channel_id, cumulative, channel_addr, chain_id):
+def _manual_voucher_digest(channel_id, token, cumulative, channel_addr, chain_id):
     """Independently recompute PaymentChannel.voucherHash via OZ's
     EIP-712 _hashTypedDataV4 formula, from the typehash strings directly."""
     domain_type_hash = keccak(
@@ -54,31 +56,35 @@ def _manual_voucher_digest(channel_id, cumulative, channel_addr, chain_id):
          to_checksum_address(channel_addr)],
     ))
     voucher_type_hash = keccak(
-        text="Voucher(uint256 channelId,uint256 cumulativeAmount)")
+        text="Voucher(uint256 channelId,address token,uint256 cumulativeAmount)")
     struct_hash = keccak(abi_encode(
-        ["bytes32", "uint256", "uint256"],
-        [voucher_type_hash, channel_id, cumulative]))
+        ["bytes32", "uint256", "address", "uint256"],
+        [voucher_type_hash, channel_id, to_checksum_address(token), cumulative]))
     return keccak(b"\x19\x01" + domain_sep + struct_hash)
 
 
 def test_voucher_digest_matches_fixture():
     """build_voucher_digest reproduces the contract's typed-data digest."""
-    for channel_id, cumulative in [(1, 100), (7, 123456), (42, 10**18)]:
+    for channel_id, token, cumulative in [(1, _USDC, 100), (7, _DAI, 123456),
+                                          (42, _DAI, 10**18)]:
         built = oc.build_voucher_digest(
-            channel_id, cumulative, _CHANNEL_ADDR, _CHAIN_ID)
+            channel_id, token, cumulative, _CHANNEL_ADDR, _CHAIN_ID)
         expected = _manual_voucher_digest(
-            channel_id, cumulative, _CHANNEL_ADDR, _CHAIN_ID)
+            channel_id, token, cumulative, _CHANNEL_ADDR, _CHAIN_ID)
         assert built == expected, (channel_id, cumulative)
 
 
-def test_voucher_digest_is_domain_bound():
-    """Digest changes with chainId and verifyingContract (replay safety)."""
-    base = oc.build_voucher_digest(1, 100, _CHANNEL_ADDR, _CHAIN_ID)
-    other_chain = oc.build_voucher_digest(1, 100, _CHANNEL_ADDR, _CHAIN_ID + 1)
+def test_voucher_digest_is_domain_and_token_bound():
+    """Digest changes with chainId, verifyingContract (replay safety) and
+    the token (a voucher never pays in another token)."""
+    base = oc.build_voucher_digest(1, _USDC, 100, _CHANNEL_ADDR, _CHAIN_ID)
+    other_chain = oc.build_voucher_digest(1, _USDC, 100, _CHANNEL_ADDR, _CHAIN_ID + 1)
     other_contract = oc.build_voucher_digest(
-        1, 100, "0x0000000000000000000000000000000000001234", _CHAIN_ID)
+        1, _USDC, 100, "0x0000000000000000000000000000000000001234", _CHAIN_ID)
+    other_token = oc.build_voucher_digest(1, _DAI, 100, _CHANNEL_ADDR, _CHAIN_ID)
     assert base != other_chain
     assert base != other_contract
+    assert base != other_token
 
 
 def test_sign_voucher_recovers_to_client():
@@ -89,11 +95,11 @@ def test_sign_voucher_recovers_to_client():
     smc = oc.ServiceMarketClient(conf)
 
     channel_id, cumulative = 5, 777
-    sig_hex = smc.sign_voucher(client.key.hex(), channel_id, cumulative)
+    sig_hex = smc.sign_voucher(client.key.hex(), channel_id, _USDC, cumulative)
     sig = bytes.fromhex(sig_hex[2:] if sig_hex.startswith("0x") else sig_hex)
 
     digest = oc.build_voucher_digest(
-        channel_id, cumulative, _CHANNEL_ADDR, _CHAIN_ID)
+        channel_id, _USDC, cumulative, _CHANNEL_ADDR, _CHAIN_ID)
     recovered = (Account._recover_hash(digest, signature=sig)
                  if hasattr(Account, "_recover_hash")
                  else Account.recoverHash(digest, signature=sig))
@@ -135,19 +141,21 @@ class _FakeWeb3:
         return to_checksum_address(a)
 
 
-def _craft_service_payment_receipt(payer, recipient, amount, request_id_b):
+def _craft_service_payment_receipt(payer, recipient, amount, request_id_b,
+                                   token=_USDC, emitter=_SUBSTRATE_ADDR):
     """Build a receipt dict with ONE ServicePayment log, ABI-encoded exactly
-    as Substrate.sol would emit it (3 indexed topics + non-indexed amount)."""
+    as Substrate.sol would emit it (3 indexed topics; amount and requestId
+    in the data), by ``emitter``."""
     # event ServicePayment(address indexed payer, address indexed recipient,
-    #                       uint256 amount, bytes32 indexed requestId)
-    sig_topic = keccak(text="ServicePayment(address,address,uint256,bytes32)")
+    #     address indexed token, uint256 amount, bytes32 requestId)
+    sig_topic = keccak(text="ServicePayment(address,address,address,uint256,bytes32)")
     topic_payer = bytes.fromhex("%064x" % int(payer, 16))
     topic_recipient = bytes.fromhex("%064x" % int(recipient, 16))
-    topic_request = request_id_b
-    data = abi_encode(["uint256"], [amount])
+    topic_token = bytes.fromhex("%064x" % int(token, 16))
+    data = abi_encode(["uint256", "bytes32"], [amount, request_id_b])
     log = {
-        "address": to_checksum_address(_SUBSTRATE_ADDR),
-        "topics": [sig_topic, topic_payer, topic_recipient, topic_request],
+        "address": to_checksum_address(emitter),
+        "topics": [sig_topic, topic_payer, topic_recipient, topic_token],
         "data": data,
         "logIndex": 0,
         "transactionIndex": 0,
@@ -180,11 +188,11 @@ def test_verify_service_payment_decodes_and_matches():
     svc = _client_with_receipt(receipt)
 
     out = _run(svc.verify_service_payment(
-        request_id=req, recipient=recipient, min_amount=1000,
+        request_id=req, recipient=recipient, min_amount=1000, token=_USDC,
         payer=payer, tx_hash="0x" + "11" * 32))
 
     assert out["verified"] is True, out
-    assert out["amount"] == amount
+    assert out["amount"] == amount and out["token"] == _USDC
     assert to_checksum_address(out["payer"]) == to_checksum_address(payer)
     assert to_checksum_address(out["recipient"]) == to_checksum_address(recipient)
     assert out["request_id"] == req.hex()
@@ -198,10 +206,36 @@ def test_verify_service_payment_rejects_low_amount():
     svc = _client_with_receipt(receipt)
 
     out = _run(svc.verify_service_payment(
-        request_id=req, recipient=recipient, min_amount=1000, tx_hash="0xabc"))
+        request_id=req, recipient=recipient, min_amount=1000, token=_USDC,
+        tx_hash="0xabc"))
     assert out["verified"] is False
     assert "min_amount" in out["reason"]
     assert out["amount"] == 100  # decoded even though it failed the check
+
+
+def test_verify_service_payment_rejects_another_token():
+    """A payment in DAI against a price in USDC: refused whatever the
+    number (10**18 DAI base units is far above 1000)."""
+    payer, recipient = Account.create().address, Account.create().address
+    req = keccak(text="req")
+    receipt = _craft_service_payment_receipt(payer, recipient, 10 ** 18, req, token=_DAI)
+    out = _run(_client_with_receipt(receipt).verify_service_payment(
+        request_id=req, recipient=recipient, min_amount=1000, token=_USDC,
+        tx_hash="0xabc"))
+    assert out["verified"] is False and "paid in token" in out["reason"]
+    assert out["token"] == _DAI
+
+
+def test_verify_service_payment_ignores_another_contracts_log():
+    """The same event from any address but Substrate's counts for nothing."""
+    payer, recipient = Account.create().address, Account.create().address
+    req = keccak(text="req")
+    receipt = _craft_service_payment_receipt(payer, recipient, 5000, req,
+                                             emitter="0x" + "66" * 20)
+    out = _run(_client_with_receipt(receipt).verify_service_payment(
+        request_id=req, recipient=recipient, min_amount=1, token=_USDC,
+        tx_hash="0xabc"))
+    assert out["verified"] is False and "no ServicePayment event" in out["reason"]
 
 
 def test_verify_service_payment_rejects_recipient_mismatch():
@@ -213,7 +247,7 @@ def test_verify_service_payment_rejects_recipient_mismatch():
     svc = _client_with_receipt(receipt)
 
     out = _run(svc.verify_service_payment(
-        request_id=req, recipient=other, min_amount=1, tx_hash="0xabc"))
+        request_id=req, recipient=other, min_amount=1, token=_USDC, tx_hash="0xabc"))
     assert out["verified"] is False
     assert "matched" in out["reason"] or "recipient" in out["reason"]
 
@@ -227,7 +261,7 @@ def test_verify_service_payment_rejects_payer_mismatch():
     svc = _client_with_receipt(receipt)
 
     out = _run(svc.verify_service_payment(
-        request_id=req, recipient=recipient, min_amount=1,
+        request_id=req, recipient=recipient, min_amount=1, token=_USDC,
         payer=wrong_payer, tx_hash="0xabc"))
     assert out["verified"] is False
     assert out["reason"] == "payer mismatch"
@@ -237,7 +271,7 @@ def test_verify_service_payment_requires_tx_hash():
     svc = _client_with_receipt({"status": 1, "logs": []})
     out = _run(svc.verify_service_payment(
         request_id=keccak(text="x"), recipient=Account.create().address,
-        min_amount=1, tx_hash=None))
+        min_amount=1, token=_USDC, tx_hash=None))
     assert out["verified"] is False
     assert "tx_hash required" in out["reason"]
 
@@ -250,7 +284,8 @@ def test_verify_service_payment_reverted_tx():
     receipt["status"] = 0
     svc = _client_with_receipt(receipt)
     out = _run(svc.verify_service_payment(
-        request_id=req, recipient=recipient, min_amount=1, tx_hash="0xabc"))
+        request_id=req, recipient=recipient, min_amount=1, token=_USDC,
+        tx_hash="0xabc"))
     assert out["verified"] is False
     assert out["reason"] == "transaction reverted"
 
@@ -261,7 +296,7 @@ def test_verify_service_payment_no_matching_event():
     svc = _client_with_receipt(receipt)
     out = _run(svc.verify_service_payment(
         request_id=keccak(text="x"), recipient=Account.create().address,
-        min_amount=1, tx_hash="0xabc"))
+        min_amount=1, token=_USDC, tx_hash="0xabc"))
     assert out["verified"] is False
     assert "no ServicePayment event" in out["reason"]
 
@@ -423,6 +458,42 @@ def test_nothing_to_settle_is_named_in_the_revert_reason():
         "NothingToSettle"
 
 
+def test_errors_with_arguments_are_named_too():
+    from web3.exceptions import ContractCustomError
+    for sig, name in (("TokenNotAccepted(address)", "TokenNotAccepted"),
+                      ("NotInIndex(address)", "NotInIndex")):
+        selector = "0x" + keccak(text=sig)[:4].hex()
+        data = selector + "00" * 12 + "ab" * 20
+        assert oc.revert_reason(ContractCustomError(data, data=data)) == name
+
+
+def test_the_inline_abis_match_the_compiled_contracts():
+    """Every entry of the client's inline ABIs has the compiled contract's
+    inputs, outputs and indexing (skipped without artifacts/)."""
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "artifacts" / "contracts" / "core"
+
+    def sig(e):
+        ins = tuple((i["type"], i.get("indexed")) if e["type"] == "event" else i["type"]
+                    for i in e.get("inputs", []))
+        outs = tuple(o["type"] if o["type"] != "tuple"
+                     else tuple(c["type"] for c in o["components"])
+                     for o in e.get("outputs", []))
+        return e["type"], e["name"], ins, outs if e["type"] == "function" else None
+    for mine, rel in ((oc.SUBSTRATE_ABI, "Substrate.sol/Substrate"),
+                      (oc.SERVICE_REGISTRY_ABI, "ServiceMarket.sol/ServiceRegistry"),
+                      (oc.PAYMENT_CHANNEL_ABI, "ServiceMarket.sol/PaymentChannel")):
+        path = root / f"{rel}.json"
+        if not path.exists():
+            pytest.skip(f"missing artifact: {path}")
+        compiled = {(e["type"], e["name"]): e
+                    for e in json.loads(path.read_text(encoding="utf-8"))["abi"]
+                    if "name" in e}
+        for e in mine:
+            assert sig(compiled[(e["type"], e["name"])]) == sig(e), (rel, e["name"])
+
+
 def _paid_log(channel_id, client, provider, amount, total, block):
     topic = keccak(text="ChannelPaid(uint256,address,address,uint256,uint256)")
     return {
@@ -437,13 +508,33 @@ def _paid_log(channel_id, client, provider, amount, total, block):
     }
 
 
+class _Channel:
+    """A PaymentChannel whose getChannel answers from ``tokens`` (channel
+    id -> token); events and address are the real contract's."""
+
+    def __init__(self, real, tokens):
+        self._real, self.address, self.events = real, real.address, real.events
+        self.reads = []
+        outer = self
+
+        class _Fns:
+            def getChannel(self, cid):
+                outer.reads.append(cid)
+                return type("Call", (), {"call": lambda _s: (
+                    "0x" + "01" * 20, "0x" + "02" * 20, tokens[cid], 0, 0, 0, 1, 0)})()
+        self.functions = _Fns()
+
+
 class _LogsEth:
-    def __init__(self, logs, head, fail=False):
+    def __init__(self, logs, head, fail=False, tokens=None):
         self.logs, self.block_number, self.fail = logs, head, fail
+        self.tokens = tokens or {}
         self.ranges = []
+        self.channel = None
 
     def contract(self, address=None, abi=None):
-        return Web3().eth.contract(address=address, abi=abi)
+        self.channel = _Channel(Web3().eth.contract(address=address, abi=abi), self.tokens)
+        return self.channel
 
     def get_logs(self, flt):
         if self.fail:
@@ -466,17 +557,20 @@ def test_channel_payments_reads_in_chunks_and_decodes():
     client, provider = Account.create().address, Account.create().address
     eth = _LogsEth([_paid_log(3, client, provider, 100, 100, 5),
                     _paid_log(3, client, provider, 250, 350, 1500),
-                    _paid_log(9, client, provider, 7, 7, 2400)], head=2500)
+                    _paid_log(9, client, provider, 7, 7, 2400)], head=2500,
+                   tokens={3: to_checksum_address(_USDC), 9: to_checksum_address(_DAI)})
     out = _run(_logs_client(eth).channel_payments(0))
     assert eth.ranges == [(0, 999), (1000, 1999), (2000, 2500)]
     assert out == [
-        {"channel_id": 3, "client": client, "provider": provider,
+        {"channel_id": 3, "client": client, "provider": provider, "token": _USDC,
          "amount": 100, "paid_total": 100, "block": 5},
-        {"channel_id": 3, "client": client, "provider": provider,
+        {"channel_id": 3, "client": client, "provider": provider, "token": _USDC,
          "amount": 250, "paid_total": 350, "block": 1500},
-        {"channel_id": 9, "client": client, "provider": provider,
+        {"channel_id": 9, "client": client, "provider": provider, "token": _DAI,
          "amount": 7, "paid_total": 7, "block": 2400},
     ]
+    # Each channel's token is read once.
+    assert eth.channel.reads == [3, 9]
     # A pinned window reads only its own blocks.
     eth.ranges.clear()
     out = _run(_logs_client(eth).channel_payments(1000, 1999))

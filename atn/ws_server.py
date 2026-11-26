@@ -148,7 +148,7 @@ def owner_challenge_text(action: str, nonce: str) -> str:
 # channel, its voucher verified on chain, the request signed by the channel's
 # client) or a direct on-chain payment (``_direct_gate``), with the request
 # id consumed against a persisted replay set. That is a strictly stronger
-# credential than a session login: it costs ATN per call.
+# credential than a session login: every call costs its price.
 # See docs/services_market.md §3 ("authenticates the channel, validates
 # vouchers"). Nothing else is reachable from such a session.
 PAYMENT_AUTHORIZED_MESSAGES = frozenset({
@@ -1648,9 +1648,8 @@ class WebSocketBridge:
             return await self._handle_secrets_message(msg_type, msg, msg_id)
 
         if msg_type == "tool_earnings":
-            # Off-chain fee ledger derived from usage receipts. On-chain
-            # settlement (labeled ATN transfer via payForService) is not
-            # wired yet (docs/tool_substrate.md open knobs).
+            # Off-chain fee ledger derived from usage receipts (local
+            # display only; nothing on chain reads it).
             return {"msg_id": msg_id, "ok": True,
                     "result": self.runtime.tool_store.balances()}
 
@@ -1687,17 +1686,16 @@ class WebSocketBridge:
                         "author": consensus,
                     })
 
-            mint_total = "0"
+            # What the owner wallet has claimed from the pools, as value
+            # (6-decimal value units: what its REP is claimed on), and what
+            # is claimed but not yet withdrawn, per token.
+            claim: dict[str, Any] = {"earned_value": "0", "owed": []}
             if wallet:
                 try:
                     from .on_chain import OnChainService
-                    svc = OnChainService(rpb_cfg)
-
-                    async def _read(_svc=svc, _w=wallet) -> int:
-                        w3 = _svc._get_web3()
-                        return int(_svc._get_contract(w3).functions.agentMintTotal(
-                            w3.to_checksum_address(_w)).call())
-                    mint_total = str(await self._offload(_read))
+                    got = await OnChainService(rpb_cfg).get_claim_status(wallet)
+                    if got is not None:
+                        claim = got
                 except Exception as exc:                   # noqa: BLE001
                     log.debug("owner_claim_status chain read failed: %s", exc)
 
@@ -1711,7 +1709,8 @@ class WebSocketBridge:
                 # wallet. Distinct from "earned but unclaimable".
                 "orphan_count": len(orphan_tools),
                 "orphans": orphan_tools[:50],
-                "claimed_mint_total": mint_total,
+                "earned_value": claim.get("earned_value", "0"),
+                "owed": claim.get("owed", []),
             }}
 
         if msg_type == "set_tool_published":
@@ -1987,7 +1986,12 @@ class WebSocketBridge:
                 prices = {str(k): _amount(v, f"the price of {k}") for k, v in prices.items()}
                 voucher = (None if msg.get("voucher") is None
                            else _amount(msg["voucher"], "voucher"))
-                price_list = self.runtime.service_store.set_prices(digest, prices, voucher)
+                token = msg.get("token")
+                if token is not None:
+                    from .service_publish import check_token
+                    token = await check_token(self.runtime, token)
+                price_list = self.runtime.service_store.set_prices(
+                    digest, prices, voucher, token=token)
             except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
             return {"msg_id": msg_id, "ok": True, "result": {"price_list": price_list}}
@@ -3144,11 +3148,11 @@ class WebSocketBridge:
                     "result": {"digest": d, "reviews": reviews}}
 
         if msg_type == "rpb_agent_training":
-            # Substrate-native: returns mint_total (cumulative ATN pool
-            # earnings, MONEY) + ATN balance + native gas for the agent.
-            # The pre-substrate "training tokens / unclaimed rewards" split
-            # is gone. Governance REP is NOT here: it is claimed DAO-side
-            # (RepToken), 1:1 against these ratified earnings.
+            # An address's money: its balance of every value index token
+            # (base units, with each token's symbol and decimals), its
+            # native gas, and the value it has claimed from the pools
+            # (earned_value). Governance REP is NOT here: it is claimed
+            # DAO-side (RepToken) on that value.
             address = msg.get("address", "")
             if not address:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
@@ -3163,12 +3167,11 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
         if msg_type == "fleet_voice":
-            # Owner section (ratified 2026-07-08: ATN = money, reputation
-            # = voice): the owner's fleet — wallet balance + every bound
-            # agent's ATN/reputation — and the derived voice weight the
-            # close prices the household's reviews and usage with. The
-            # voice weight is now REPUTATION-based (fleet reputation / rep
-            # supply); ATN figures are still reported as money info.
+            # Owner section: the household's money (the owner wallet's and
+            # every bound agent's balance of each value index token, in
+            # base units), the value each has claimed from the pools, and
+            # the weight the close gives the household's reviews (its REP
+            # over REP supply).
             owner = msg.get("owner", "")
             if not owner:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'owner'"}
@@ -3192,7 +3195,6 @@ class WebSocketBridge:
                     )
                 except Exception:
                     _eps = 0.05
-                _scale = 1_000_000.0  # chain units are ATN x 1e6
                 local_names: dict[str, str] = {}
                 try:
                     reg = self.runtime.registry
@@ -3217,51 +3219,29 @@ class WebSocketBridge:
                         "agent_id": addr,
                         "name": local_names.get(addr.lower(), ""),
                         "local": addr.lower() in local_names,
-                        "balance": a["balance_raw"] / _scale,
-                        # Cumulative ATN pool earnings (agentMintTotal), NOT
-                        # governance REP. "reputation" is the LEGACY-WIRE
-                        # alias kept for one release.
-                        "mint_total": a["reputation_raw"] / _scale,
-                        "reputation": a["reputation_raw"] / _scale,
+                        # Per token, base units as decimal strings; each row
+                        # carries the token's symbol and decimals.
+                        "tokens": a["tokens"],
+                        "earned_value": a["earned_value"],
                     })
-                # MONEY: ATN supply + fleet ATN total (reported, not voted).
-                supply_raw = int(raw["supply_raw"])
-                # WEIGHT: derived from cumulative ATN EARNINGS (networkMintTotal
-                # / agentMintTotal), which is what an earned voice is priced
-                # against here. Governance REP itself is DAO-side (RepToken).
-                rep_supply_raw = int(raw.get("rep_supply_raw", 0))
-                fleet_rep_raw = int(raw.get("fleet_reputation_raw", 0))
-                # The weight the close uses: household REP / REP supply.
-                # Without a RepToken read, fall back to the earnings share.
+                # The weight the close uses: household REP / REP supply
+                # (none without a RepToken read).
                 h_rep = raw.get("household_rep_raw")
                 rep_total = raw.get("rep_total_supply_raw")
-                if h_rep is not None and rep_total:
-                    share = h_rep / rep_total
-                else:
-                    share = ((fleet_rep_raw / rep_supply_raw)
-                             if rep_supply_raw > 0 else 0.0)
+                share = (h_rep / rep_total) if h_rep is not None and rep_total else None
                 return {"msg_id": msg_id, "ok": True, "result": {
                     "owner": raw["owner"],
                     "available": True,
                     "reason": "",
-                    # Money panel (unchanged fields).
-                    "owner_balance": raw["owner_balance_raw"] / _scale,
-                    "fleet_total": raw["fleet_total_raw"] / _scale,
-                    "supply": supply_raw / _scale,
-                    # Voice panel: weight derives from cumulative ATN
-                    # EARNINGS. fleet_mint_total / mint_supply are the honest
-                    # names; fleet_reputation / rep_supply are the LEGACY-WIRE
-                    # aliases, kept for one release.
-                    "fleet_mint_total": fleet_rep_raw / _scale,
-                    "mint_supply": rep_supply_raw / _scale,
-                    "fleet_reputation": fleet_rep_raw / _scale,
-                    "rep_supply": rep_supply_raw / _scale,
-                    # LEGACY-WIRE version marker: the literal "reputation"
-                    # tells a client this daemon derives the weight from
-                    # agentMintTotal/networkMintTotal rather than from raw
-                    # ATN supply. It is a protocol version tag, not a label.
-                    "weight_source": "reputation",
-                    "voice_weight": round(_eps + share, 6),
+                    # Money: per value index token, in base units.
+                    "owner_tokens": raw["owner_tokens"],
+                    "fleet_tokens": raw["fleet_tokens"],
+                    # Value claimed from the pools (6-decimal value units).
+                    "owner_earned_value": raw["owner_earned_value"],
+                    "fleet_earned_value": raw["fleet_earned_value"],
+                    "total_earned_value": raw["total_earned_value"],
+                    "voice_weight": (round(_eps + share, 6)
+                                     if share is not None else None),
                     # REP (18 decimals) the weight is read from.
                     "household_rep": (h_rep / 1e18) if h_rep is not None else None,
                     "rep_total_supply": (rep_total / 1e18) if rep_total else None,
@@ -4535,10 +4515,10 @@ class WebSocketBridge:
             failure  {ok: false, error: "<human-readable>"}
 
         ``receipt`` is ``{paid, degraded, tx_hash, amount, token,
-        recipient}`` — the buyer's proof of what was spent, and honest
+        recipient}``: the buyer's proof of what was spent, and honest
         about the local-dev case where nothing was (``paid=false,
-        degraded=true``). ``token`` is the constant ``"ATN"``: settlement
-        is ATN-only, the key is kept for wire compatibility.
+        degraded=true``). ``amount`` is in the base units of ``token``, the
+        service's price list token.
 
         Two resolution paths:
 
@@ -4820,28 +4800,24 @@ class WebSocketBridge:
     @staticmethod
     def _receipt(
         *, paid: bool, degraded: bool, tx_hash: str | None,
-        amount: Any, recipient: str, token: str = "ATN",
+        amount: Any, recipient: str, token: str,
     ) -> dict[str, Any]:
-        """The buyer's receipt, in the exact shape the app parses.
-
-        ``token`` is a constant "ATN" label: settlement is ATN-only
-        (ratified 2026-07-10) and the ask no longer names a token, but
-        the receipt key stays on the wire so the Flutter Services page
-        keeps parsing unchanged."""
+        """The buyer's receipt, in the shape the app parses: ``amount`` in
+        the base units of ``token`` (the price list's token)."""
         return {
             "paid": bool(paid),
             "degraded": bool(degraded),
             "tx_hash": tx_hash or None,
             "amount": str(amount if amount is not None else ""),
-            "token": str(token or "ATN"),
+            "token": str(token or ""),
             "recipient": str(recipient or ""),
         }
 
     async def _pay_for_invoke(
-        self, *, recipient: str, amount: int, request_id: str,
+        self, *, recipient: str, amount: int, request_id: str, token: str,
     ) -> dict[str, Any]:
-        """Pay one work item's ask with the operator key (the household's
-        payer).
+        """Pay one work item's price (``amount`` of ``token``, the price
+        list's) with the operator key (the household's payer).
 
         Three outcomes, all of which the receipt distinguishes:
 
@@ -4887,7 +4863,7 @@ class WebSocketBridge:
             return {"error": "Payment failed: could not resolve the service "
                              "provider's payment address."}
         paid = await self._offload(lambda: service_client.pay_for_service(
-            config, key, recipient, amount, request_id=request_id))
+            config, key, recipient, amount, request_id=request_id, token=token))
         if paid.get("error"):
             return {"error": f"Payment failed: {paid['error']}"}
         return {"tx_hash": str(paid.get("tx_hash") or ""),
@@ -4921,6 +4897,7 @@ class WebSocketBridge:
                     "error": "this is a session service: open a session to it"}
         amount = request_price(record.price_list)
         amount_raw = str(amount)
+        token = record.token
         recipient = str(chain.get("provider") or "")
 
         if prepaid is not None:
@@ -4931,11 +4908,12 @@ class WebSocketBridge:
             request_id = prepaid["request_id"]
             receipt = self._receipt(
                 paid=True, degraded=False, tx_hash=tx_hash,
-                amount=amount_raw, recipient=recipient)
+                amount=amount_raw, recipient=recipient, token=token)
         else:
             request_id = service_client.new_request_id()
             payment = await self._pay_for_invoke(
-                recipient=recipient, amount=amount, request_id=request_id)
+                recipient=recipient, amount=amount, request_id=request_id,
+                token=token)
             if payment.get("error"):
                 return {"msg_id": msg_id, "ok": False,
                         "error": payment["error"]}
@@ -4944,7 +4922,7 @@ class WebSocketBridge:
             receipt = self._receipt(
                 paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
                 tx_hash=tx_hash, amount=amount_raw,
-                recipient=recipient)
+                recipient=recipient, token=token)
 
         frame: dict[str, Any] = {
             "spec_digest": record.digest,
@@ -5028,6 +5006,12 @@ class WebSocketBridge:
                     "error": f"no price list is known yet for {digest[:16]}; try "
                              "again once the catalog has it. Nothing was paid."}
         amount = request_price(price_list)
+        from .service_prices import price_token
+        token = price_token(price_list)
+        if amount > 0 and not token:
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"the price list of {digest[:16]} names no token; "
+                             "nothing was paid"}
 
         # Resolve the endpoint off the loop (blocking web3 read) and hand it
         # to request_service so it doesn't read the chain itself; the dial
@@ -5044,8 +5028,8 @@ class WebSocketBridge:
 
         book = getattr(self.runtime, "channel_book", None)
         key, payer = self._buyer_key(), self._buyer_address()
-        credits = (book.get(payer, provider_address)
-                   if book is not None and payer else None)
+        credits = (book.get(payer, provider_address, token)
+                   if book is not None and payer and token else None)
         if prepaid is not None or amount <= 0:
             # The owner paid with its own wallet already (a direct
             # payment), or the service is free.
@@ -5054,7 +5038,8 @@ class WebSocketBridge:
                           else service_client.new_request_id())
             receipt = self._receipt(
                 paid=bool(prepaid), degraded=False, tx_hash=tx_hash or None,
-                amount=amount if prepaid else 0, recipient=provider_address)
+                amount=amount if prepaid else 0, recipient=provider_address,
+                token=token)
             reply = await service_client.request_service(
                 config, provider_address, digest, args,
                 tx_hash=tx_hash, request_id=request_id,
@@ -5068,7 +5053,7 @@ class WebSocketBridge:
                         "error": "PaymentChannel not configured on this daemon, so "
                                  "the purchase cannot be paid; nothing was sent."}
             reply = await request_on_credits(
-                book, smc, config, key, payer, provider_address, digest, args,
+                book, smc, config, key, payer, provider_address, token, digest, args,
                 price=amount, voucher=voucher_size(price_list),
                 endpoint=str(endpoint or ""))
             if reply.get("error") and not reply.get("delivered"):
@@ -5077,20 +5062,23 @@ class WebSocketBridge:
             request_id = str(reply.get("request_id") or "")
             receipt = self._receipt(
                 paid=bool(reply.get("ok")), degraded=False, tx_hash=None,
-                amount=amount if reply.get("ok") else 0, recipient=provider_address)
+                amount=amount if reply.get("ok") else 0, recipient=provider_address,
+                token=token)
             receipt["credits"] = reply.get("credits")
         else:
             # No credits with this provider: pay this one request directly.
             request_id = service_client.new_request_id()
             payment = await self._pay_for_invoke(
-                recipient=provider_address, amount=amount, request_id=request_id)
+                recipient=provider_address, amount=amount, request_id=request_id,
+                token=token)
             if payment.get("error"):
                 return {"msg_id": msg_id, "ok": False, "error": payment["error"]}
             tx_hash = str(payment.get("tx_hash") or "")
             request_id = str(payment.get("request_id") or request_id)
             receipt = self._receipt(
                 paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
-                tx_hash=tx_hash or None, amount=amount, recipient=provider_address)
+                tx_hash=tx_hash or None, amount=amount, recipient=provider_address,
+                token=token)
             reply = await service_client.request_service(
                 config, provider_address, digest, args,
                 tx_hash=tx_hash, request_id=request_id,
@@ -5157,12 +5145,30 @@ class WebSocketBridge:
         payee = "" if entry.get("error") else str(entry.get("provider") or "")
         return payee or self._service_provider_address(record.author)
 
+    async def _token_accepted(self, token: str) -> bool:
+        """``Substrate.acceptsToken(token)``, cached for a minute: a price
+        list whose token left the value index is not served (a session
+        already open keeps billing at the prices it opened with)."""
+        import time as _time
+        from .on_chain import OnChainService
+        cache = self.__dict__.setdefault("_token_accepted_cache", {})
+        hit = cache.get(token)
+        if hit is not None and _time.monotonic() - hit[0] < 60.0:
+            return hit[1]
+        ok = await OnChainService(self.runtime._config.rpb).accepts_token(token)
+        cache[token] = (_time.monotonic(), ok)
+        return ok
+
     async def _accept_voucher(self, record: Any, channel_id: Any, cumulative: Any,
-                              signature: Any, *, payer: str = "") -> dict[str, Any]:
+                              signature: Any, *, payer: str = "",
+                              token: str | None = None) -> dict[str, Any]:
         """Verify a voucher on chain (the channel is open, its provider is this
-        service's provider, the signature is its client's, the total within
-        its deposit, the client is ``payer`` when given) and hold it in the
-        credit ledger. ``{ok, client}`` or ``{ok: False, reason}``."""
+        service's provider, its token is the token the service's price list
+        names, the signature is its client's over that token, the total
+        within its deposit, the client is ``payer`` when given) and hold it
+        in the credit ledger. ``token`` is the token the payment is due in:
+        the price list's (None), or the token a session opened with.
+        ``{ok, client}`` or ``{ok: False, reason}``."""
         from .on_chain import ServiceMarketClient
         smc = ServiceMarketClient(self.runtime._config.rpb)
         if not smc.channel_available:
@@ -5179,14 +5185,26 @@ class WebSocketBridge:
         provider = (await self._service_payee(record)).lower()
         if not provider or str(res.get("provider") or "").lower() != provider:
             return {"ok": False, "reason": "the channel's provider is not this service's provider"}
+        # An amount is only comparable in its own token: credits in another
+        # token than the price list's pay nothing here.
+        want = str(token).lower() if token is not None else record.token
+        if not want or str(res.get("token") or "").lower() != want:
+            return {"ok": False, "reason": f"the channel is in token {res.get('token')}, "
+                                           f"but this service is priced in "
+                                           f"{want or 'no token'}: open credits in "
+                                           f"{want or 'its token'}"}
         if res.get("exceeds_deposit"):
             return {"ok": False, "reason": f"voucher total {cum} exceeds the channel "
                                            f"deposit {res.get('deposit')}: top up"}
         client = str(res.get("client") or "").lower()
         if payer and client != payer.lower():
             return {"ok": False, "reason": "the voucher is not from the channel's client"}
-        self.runtime.service_store.accept_voucher(
-            cid, cum, str(signature), client=client, provider=provider)
+        try:
+            self.runtime.service_store.accept_voucher(
+                cid, cum, str(signature), client=client, provider=provider,
+                token=str(res.get("token")))
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
         return {"ok": True, "client": client}
 
     async def _credit_gate(self, request: dict[str, Any], record: Any, *,
@@ -5208,6 +5226,11 @@ class WebSocketBridge:
                                            f"{entry['error']}"}
         if not entry.get("active"):
             return {"ok": False, "reason": "service retired on chain"}
+        if not record.token or not await self._token_accepted(record.token):
+            return {"ok": False, "reason": f"this service's token "
+                                           f"{record.token or '(none)'} is not in the "
+                                           "value index: it is not sold until its price "
+                                           "list names an index token"}
         provider = str(entry.get("provider") or "")
         rid = store.normalize_request_id(request.get("request_id"))
         if len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid):
@@ -5253,6 +5276,10 @@ class WebSocketBridge:
                     return {"ok": False, "reason": "these credits are not the payer's"}
                 if str(ledger.get("provider") or "").lower() != provider.lower():
                     return {"ok": False, "reason": "these credits are with another provider"}
+                if str(ledger.get("token") or "").lower() != record.token:
+                    return {"ok": False, "reason": f"these credits are in token "
+                                                   f"{ledger.get('token')}, but this "
+                                                   f"service is priced in {record.token}"}
                 if need > 0:
                     store.consume(cid, need)
                 if not store.paid_up(cid):
@@ -5272,10 +5299,10 @@ class WebSocketBridge:
     async def _direct_gate(self, request: dict[str, Any], record: Any, *,
                            price: int, local: bool = False) -> dict[str, Any]:
         """A one-off request paid directly (``Substrate.payForService``): the
-        payment's receipt names this service's provider and covers ``price``,
-        it is younger than the replay horizon, its request id is new, and the
-        request is signed by the key that paid. ``{ok, payer}`` or
-        ``{ok: False, reason}``."""
+        payment's receipt names this service's provider, is in the token the
+        price list names and covers ``price`` in it, it is younger than the
+        replay horizon, its request id is new, and the request is signed by
+        the key that paid. ``{ok, payer}`` or ``{ok: False, reason}``."""
         from .on_chain import OnChainService
         from .service_client import recover_request_signer
 
@@ -5290,6 +5317,11 @@ class WebSocketBridge:
                                            f"{entry['error']}"}
         if not entry.get("active"):
             return {"ok": False, "reason": "service retired on chain"}
+        if not record.token or not await self._token_accepted(record.token):
+            return {"ok": False, "reason": f"this service's token "
+                                           f"{record.token or '(none)'} is not in the "
+                                           "value index: it is not sold until its price "
+                                           "list names an index token"}
         recipient = str(entry.get("provider") or "")
         tx_hash = str(request.get("tx_hash") or "").strip()
         rid = str(request.get("request_id") or "").lower().removeprefix("0x")
@@ -5314,7 +5346,7 @@ class WebSocketBridge:
         try:
             res = await self._offload(lambda: oc.verify_service_payment(
                 request_id=request_id, recipient=recipient, min_amount=int(price),
-                tx_hash=tx_hash, payer=payer))
+                token=record.token, tx_hash=tx_hash, payer=payer))
             if not res.get("verified"):
                 inflight.discard(rid)
                 return {"ok": False, "reason": res.get("reason", "unverified")}
@@ -5365,16 +5397,21 @@ class WebSocketBridge:
         try:
             amount = int(str(msg.get("amount") or msg.get("deposit") or 0))
         except (TypeError, ValueError):
-            return {"ok": False, "error": "amount must be ATN base units"}
+            return {"ok": False, "error": "amount must be base units of the token"}
         if kind == "open_credits":
+            token = msg.get("token")
             res = await self._offload(lambda: sc.open_credits(
-                book, smc, key, payer, provider, amount))
-        elif kind == "top_up_credits":
-            res = await self._offload(lambda: sc.top_up(
-                book, smc, key, payer, provider, amount))
+                book, smc, key, payer, provider, token, amount))
         else:
-            res = await self._offload(lambda: sc.close_credits(
-                book, smc, key, payer, provider))
+            token, err = sc.resolve_credits_token(book, payer, provider, msg.get("token"))
+            if err:
+                return {"ok": False, "error": err}
+            if kind == "top_up_credits":
+                res = await self._offload(lambda: sc.top_up(
+                    book, smc, key, payer, provider, token, amount))
+            else:
+                res = await self._offload(lambda: sc.close_credits(
+                    book, smc, key, payer, provider, token))
         if res.get("error"):
             return {"ok": False, "error": res["error"], "result": res}
         return {"ok": True, "result": res}
@@ -5657,8 +5694,11 @@ class WebSocketBridge:
                 "bound_owner": sub.functions.agentOwner(addr).call(),
                 "binding_nonce": int(sub.functions.bindingNonce(addr).call()),
                 "gas_balance_wei": int(w3.eth.get_balance(addr)),
-                # External agents stake and bond from it (Decision 2026-11-08).
-                "atn_balance": int(sub.functions.balanceOf(addr).call()),
+                # External agents pay for services and bond from it (Decision
+                # 2026-11-08): its balance of every value index token, base
+                # units as decimal strings, with symbol and decimals.
+                "token_balances": svc._balances(
+                    w3, sub, addr, svc._index_candidates(w3, sub)),
             }
             # How many claim/vote transactions the balance still covers at
             # today's gas price (a claim costs well under this per-tx
@@ -5733,10 +5773,11 @@ class WebSocketBridge:
         return await self._offload(lambda: _send())
 
     async def _sweep_to_owner(self, agent_ids: Any = None) -> dict[str, Any]:
-        """Move local agents' ATN to their on-chain owner (the configured
-        owner wallet when unbound). The owner asks for it explicitly; the
-        operator first sends each agent just enough gas for the transfer,
-        since ATN has no permit. Substrate never moves agent funds itself."""
+        """Move local agents' balances of the value index tokens to their
+        on-chain owner (the configured owner wallet when unbound), one
+        transfer per token held. The owner asks for it explicitly; the
+        operator first sends each agent just enough gas for each transfer.
+        Nothing moves agent funds on its own."""
         from eth_account import Account
         from .on_chain import OnChainService
         config = self.runtime.autonet.config
@@ -5764,14 +5805,10 @@ class WebSocketBridge:
         fallback_owner = getattr(config, "owner_wallet", "") or ""
 
         async def _sweep() -> list[dict[str, Any]]:
+            from .on_chain import ERC20_ABI
             w3 = svc._get_web3()
             sub = svc._get_contract(w3)
-            transfer_abi = [{"name": "transfer", "type": "function",
-                             "stateMutability": "nonpayable",
-                             "inputs": [{"name": "to", "type": "address"},
-                                        {"name": "amount", "type": "uint256"}],
-                             "outputs": [{"name": "", "type": "bool"}]}]
-            atn = w3.eth.contract(address=sub.address, abi=transfer_abi)
+            tokens = svc._index_candidates(w3, sub)
             chain_id = int(w3.eth.chain_id)
             op = Account.from_key(op_key)
 
@@ -5787,11 +5824,18 @@ class WebSocketBridge:
             out: list[dict[str, Any]] = []
             for agent_id, addr, key in agents:
                 a = w3.to_checksum_address(addr)
-                row: dict[str, Any] = {"agent_id": agent_id, "address": a}
+                row: dict[str, Any] = {"agent_id": agent_id, "address": a,
+                                       "tokens": []}
                 try:
-                    bal = int(sub.functions.balanceOf(a).call())
-                    if bal == 0:
-                        row["skipped"] = "no ATN"
+                    held = []
+                    for t in tokens:
+                        erc20 = w3.eth.contract(address=w3.to_checksum_address(t),
+                                                abi=ERC20_ABI)
+                        bal = int(erc20.functions.balanceOf(a).call())
+                        if bal > 0:
+                            held.append((t, erc20, bal))
+                    if not held:
+                        row["skipped"] = "no index tokens"
                         out.append(row)
                         continue
                     owner = sub.functions.agentOwner(a).call()
@@ -5802,20 +5846,26 @@ class WebSocketBridge:
                         out.append(row)
                         continue
                     owner = w3.to_checksum_address(owner)
-                    gas_price = int(w3.eth.gas_price)
-                    call = atn.functions.transfer(owner, bal)
-                    gas = int(call.estimate_gas({"from": a}) * 12 // 10)
-                    need = gas * gas_price - int(w3.eth.get_balance(a))
-                    if need > 0:
-                        row["gas_tx"] = _send({
-                            "to": a, "value": need, "gas": 21_000,
-                            "gasPrice": gas_price, "chainId": chain_id,
-                            "nonce": next_nonce(w3, op.address)}, op_key)
-                    row["tx"] = _send(call.build_transaction({
-                        "from": a, "gas": gas, "gasPrice": gas_price,
-                        "chainId": chain_id,
-                        "nonce": next_nonce(w3, a)}), key)
-                    row.update(amount=bal, owner=owner)
+                    row["owner"] = owner
+                    for t, erc20, bal in held:
+                        item: dict[str, Any] = {"token": t, "amount": str(bal)}
+                        try:
+                            gas_price = int(w3.eth.gas_price)
+                            call = erc20.functions.transfer(owner, bal)
+                            gas = int(call.estimate_gas({"from": a}) * 12 // 10)
+                            need = gas * gas_price - int(w3.eth.get_balance(a))
+                            if need > 0:
+                                item["gas_tx"] = _send({
+                                    "to": a, "value": need, "gas": 21_000,
+                                    "gasPrice": gas_price, "chainId": chain_id,
+                                    "nonce": next_nonce(w3, op.address)}, op_key)
+                            item["tx"] = _send(call.build_transaction({
+                                "from": a, "gas": gas, "gasPrice": gas_price,
+                                "chainId": chain_id,
+                                "nonce": next_nonce(w3, a)}), key)
+                        except Exception as e:  # noqa: BLE001 (one token blocks no other)
+                            item["error"] = str(e)
+                        row["tokens"].append(item)
                 except Exception as e:
                     row["error"] = str(e)
                 out.append(row)

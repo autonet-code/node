@@ -273,8 +273,9 @@ class ProviderManager:
         "service": {
             "name": "Marketplace Service",
             "description": (
-                "Inference bought off the services market: pay-per-call in ATN "
-                "to another agent's daemon (docs/services_market.md)."
+                "Inference bought off the services market: pay-per-call, in "
+                "the token the seller's price list names, to another agent's "
+                "daemon (docs/services_market.md)."
             ),
             "auth_type": "service",
             "models": [],  # The served model is the seller's declaration

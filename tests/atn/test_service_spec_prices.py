@@ -195,8 +195,11 @@ def test_canonical_bytes_and_signature():
 # ---------------------------------------------------------------------------
 
 
+USDC = "0x" + "aa" * 20
+
+
 def _pl(**kw):
-    args = dict(service=DIGEST, provider=ADDR, prices={"requests": 5},
+    args = dict(service=DIGEST, provider=ADDR, token=USDC, prices={"requests": 5},
                 voucher=50, seq=1, ts=100)
     args.update(kw)
     return build_price_list(**args)
@@ -208,8 +211,9 @@ def test_price_list_valid_against_its_spec():
     assert validate_price_list(session_pl, _session()) == []
     # Free: no voucher needed.
     assert validate_price_list(_pl(prices={"requests": 0}, voucher=0), _request()) == []
-    # The digest is kept normalized.
+    # The digest and the token are kept normalized.
     assert _pl(service="0x" + DIGEST.upper())["service"] == DIGEST
+    assert _pl(token="0x" + "AA" * 20)["token"] == USDC
 
 
 @pytest.mark.parametrize("pl, err", [
@@ -226,6 +230,9 @@ def test_price_list_valid_against_its_spec():
     ({"service": "ab" * 31}, "spec digest"),
     ({"service": "zz" * 32}, "spec digest"),
     ({"extra": 1}, "unknown fields"),
+    ({"token": ""}, "names the token"),
+    ({"token": "0x1234"}, "names the token"),
+    ({"token": "ATN"}, "names the token"),
     ({"kind": "service_spec"}, "kind"),
 ])
 def test_bad_price_lists(pl, err):
@@ -240,8 +247,18 @@ def test_price_list_signature():
     assert validate_price_list(signed, _request()) == []
     assert not signed_by_provider({**signed, "prices": {"requests": 1}})
     assert not signed_by_provider({**signed, "provider": "0x" + "00" * 20})
+    # The token is signed: a list moved to another token is not the provider's.
+    assert not signed_by_provider({**signed, "token": "0x" + "bb" * 20})
     assert not signed_by_provider(_pl())          # unsigned
     assert price_list_signer({**signed, "sig": "junk"}) == ""
+
+
+def test_norm_token_and_price_token():
+    from atn.service_prices import norm_token, price_token
+    assert norm_token("0x" + "AB" * 20) == "0x" + "ab" * 20
+    assert norm_token("ab" * 20) == "0x" + "ab" * 20
+    assert norm_token("0x12") == "" and norm_token(None) == "" and norm_token("ATN") == ""
+    assert price_token(_pl()) == USDC and price_token(None) == ""
 
 
 def test_request_price_and_voucher_size():

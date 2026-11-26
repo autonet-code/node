@@ -759,7 +759,7 @@ _TOOLS: list[ToolDefinition] = [
             "conclude. This is "
             "a separately granted capability — having register_tool does not imply "
             "having this. You can only publish your own tools. Publishing STAKES "
-            "ATN on ToolBond from your own wallet (you must be registered "
+            "a bond on ToolBond from your own wallet (you must be registered "
             "on-chain); the stake stands behind the tool and is slashed if "
             "more than half the REP reviewing it says malware. A novelty "
             "claim is required: search "
@@ -1359,14 +1359,16 @@ _TOOLS: list[ToolDefinition] = [
             "open), settings (what sets the service apart, such as the model), "
             "measures (what it charges for: a request service per request; a "
             "session service per seconds open, gigabytes, input or output "
-            "tokens, each per a quantity), prices (the provider's signed price "
-            "list: ATN base units per measure's quantity), voucher (how much each "
-            "voucher pays ahead), registry_price (an optional on-chain price "
+            "tokens, each per a quantity), token (the token it is paid in, a token "
+            "of the value index, with its symbol and decimals), prices (the "
+            "provider's signed price list: base units of that token per measure's "
+            "quantity), voucher (how much each voucher pays ahead, in the same "
+            "token), registry_price (an optional on-chain price "
             "nothing enforces), protocol (a session service's, with its "
             "specification's sha256), input_schema, rating (buyers' reviews as of "
             "the latest close), provider_household, sanction, and your_credits "
-            "(your credits with that provider, if any). Use request_service or "
-            "open_session. Read-only."
+            "(your credits with that provider in the service's token, if any). Use "
+            "request_service or open_session. Read-only."
         ),
         input_schema={
             "type": "object",
@@ -1388,7 +1390,9 @@ _TOOLS: list[ToolDefinition] = [
             "it can stay unpublished), name, description, settings (values passed "
             "to the tool as AUTONET_SERVICE_SETTINGS and shown to buyers, such as "
             "{'model': 'llama3.1:70b-instruct-q4_K_M'}: a different model is a "
-            "different service), price (ATN base units per request, a request "
+            "different service), token (the token buyers pay in: one of the "
+            "value index's, see list_index_tokens; every amount is in its base "
+            "units, at its own decimals), price (per request, a request "
             "service) or measures + prices (a session service: measures "
             "[{measure, quantity}] from seconds, gigabytes, input_tokens, "
             "output_tokens, the token ones only if the tool reports them; prices "
@@ -1409,10 +1413,11 @@ _TOOLS: list[ToolDefinition] = [
                 "name": {"type": "string", "description": "How buyers find it; be precise."},
                 "description": {"type": "string", "description": "What it does, in the words a buyer would search for."},
                 "settings": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Values passed to the tool and shown to buyers."},
-                "price": {"type": "integer", "description": "A request service: ATN base units per request."},
+                "token": {"type": "string", "description": "The token buyers pay in (0x address of a value index token: list_index_tokens)."},
+                "price": {"type": "integer", "description": "A request service: base units of the token per request."},
                 "measures": {"type": "array", "items": {"type": "object"}, "description": "A session service: [{measure, quantity}]."},
-                "prices": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "A session service: {measure: ATN base units per its quantity}."},
-                "voucher": {"type": "integer", "description": "ATN base units each voucher pays ahead."},
+                "prices": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "A session service: {measure: base units of the token per its quantity}."},
+                "voucher": {"type": "integer", "description": "Base units of the token each voucher pays ahead."},
                 "registry_price": {"type": "integer", "description": "Optional price recorded on chain (nothing enforces it)."},
                 "image_uri": {"type": "string", "description": "Optional https banner for the listing card."},
                 "input_schema": {"type": "object", "additionalProperties": True, "description": "Optional, a request service: overrides the tool's input schema."},
@@ -1424,17 +1429,20 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="set_service_prices",
         description=(
-            "Change one of your services' prices or voucher size: a new signed "
-            "price list, sent to every daemon. No transaction and no new spec. "
-            "Sessions already open keep the prices they opened with."
+            "Change one of your services' prices, voucher size or token: a new "
+            "signed price list, sent to every daemon. No transaction and no new "
+            "spec. Amounts are base units of the list's token; naming a new "
+            "'token' reprices the service in it (give the prices in its units). "
+            "Sessions already open keep the prices and token they opened with."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "spec_digest": {"type": "string", "description": "The service's spec digest."},
-                "price": {"type": "integer", "description": "A request service: ATN base units per request."},
+                "price": {"type": "integer", "description": "A request service: base units of the token per request."},
                 "prices": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "A session service: {measure: amount}."},
                 "voucher": {"type": "integer", "description": "Optional new voucher size."},
+                "token": {"type": "string", "description": "Optional: a new token to price in (a value index token, 0x address)."},
             },
             "required": ["spec_digest"],
         },
@@ -1444,8 +1452,9 @@ _TOOLS: list[ToolDefinition] = [
         description=(
             "Send one request to a request service and get its reply. Reaches the "
             "provider over libp2p by its on-chain peer id (directly, hole-punched "
-            "or through a relay), else its on-chain wss endpoint. Pays from your "
-            "credits with the provider when you have them (open_credits), else "
+            "or through a relay), else its on-chain wss endpoint. Pays in the "
+            "token the service's price list names: from your credits with the "
+            "provider in that token when you have them (open_credits), else "
             "with one direct payment for this request; 'pay' picks ('credits' or "
             "'direct'). A request the provider refuses or fails costs nothing on "
             "credits; a directly paid request it fails can be sent again on the "
@@ -1472,12 +1481,14 @@ _TOOLS: list[ToolDefinition] = [
             "Open a session to a session service and get a local port for it: "
             "connect one program to 127.0.0.1:<port> and speak the service's "
             "protocol; the bytes reach the provider's tool. Paid from your credits "
-            "with the provider (open_credits first): your daemon signs a voucher, "
+            "with the provider in the service's token (open_credits first): your "
+            "daemon signs a voucher, "
             "each by the provider's voucher size, whenever the provider asks. The "
             "prices quoted at opening hold for the whole session. The session ends "
             "when your program disconnects, when nobody connects within 5 minutes, "
             "or when your credits run out (top them up with top_up_credits). "
-            "Returns {port, path, protocol, prices, measures, voucher, credits}."
+            "Returns {port, path, protocol, token, prices, measures, voucher, "
+            "credits}."
         ),
         input_schema={
             "type": "object",
@@ -1490,31 +1501,52 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="list_index_tokens",
+        description=(
+            "The tokens of the jurisdiction's value index: what services are "
+            "priced and paid in. Each: token (0x address), symbol, decimals (an "
+            "amount is in base units: 1 whole token is 10**decimals), parity (the "
+            "value of an amount is amount * parity / 1e30, in value units of 6 "
+            "decimals, so 1e6 is one unit of the index). Pick one to price a "
+            "service in, or to open credits in. Read-only."
+        ),
+        input_schema={"type": "object", "properties": {}},
+    ),
+    ToolDefinition(
         name="open_credits",
         description=(
-            "Open credits with a service provider: a payment channel escrowing "
-            "'deposit' (ATN base units) from your balance, used for every service "
-            "of that provider, requests and sessions alike. Nothing opens or tops "
-            "up credits automatically. What you don't use comes back when you "
+            "Open credits with a service provider in a token: a payment channel "
+            "escrowing 'deposit' (base units of 'token', a value index token) "
+            "from your balance of it, used for every service of that provider "
+            "priced in that token, requests and sessions alike. A service is "
+            "paid only in the token its price list names (find_services shows "
+            "it), so open credits in that token. Nothing opens or tops up "
+            "credits automatically. What you don't use comes back when you "
             "close them."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "provider_address": {"type": "string"},
-                "deposit": {"type": "integer", "description": "ATN base units to escrow."},
+                "token": {"type": "string", "description": "The token to escrow (0x address of a value index token)."},
+                "deposit": {"type": "integer", "description": "Base units of the token to escrow."},
             },
-            "required": ["provider_address", "deposit"],
+            "required": ["provider_address", "token", "deposit"],
         },
     ),
     ToolDefinition(
         name="top_up_credits",
-        description="Add ATN base units to your open credits with a provider.",
+        description=(
+            "Add to your open credits with a provider, in their token (base "
+            "units). 'token' may be left out when you hold credits with that "
+            "provider in one token only."
+        ),
         input_schema={
             "type": "object",
             "properties": {
                 "provider_address": {"type": "string"},
-                "amount": {"type": "integer"},
+                "token": {"type": "string", "description": "The credits' token (0x address)."},
+                "amount": {"type": "integer", "description": "Base units of the token."},
             },
             "required": ["provider_address", "amount"],
         },
@@ -1522,19 +1554,27 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="close_credits",
         description=(
-            "Close your credits with a provider. The provider has one challenge "
-            "window to cash in what your vouchers cover; the rest comes back to "
-            "you automatically after it."
+            "Close your credits with a provider in a token. The provider has one "
+            "challenge window to cash in what your vouchers cover; the rest comes "
+            "back to you automatically after it. 'token' may be left out when "
+            "you hold credits with that provider in one token only."
         ),
         input_schema={
             "type": "object",
-            "properties": {"provider_address": {"type": "string"}},
+            "properties": {
+                "provider_address": {"type": "string"},
+                "token": {"type": "string", "description": "The credits' token (0x address)."},
+            },
             "required": ["provider_address"],
         },
     ),
     ToolDefinition(
         name="list_credits",
-        description="Your open credits with service providers: deposit, used, paid ahead, left.",
+        description=(
+            "Your open credits with service providers, one row per provider and "
+            "token: token, deposit, used, paid ahead, left (base units of the "
+            "token)."
+        ),
         input_schema={"type": "object", "properties": {}},
     ),
     ToolDefinition(
@@ -3240,7 +3280,7 @@ async def _publish_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     work, nobody else's.
 
     Decision 2026-10-13: publishing needs a novelty claim in the manifest
-    and stakes ATN on ToolBond (tool_security.publish_with_stake). The
+    and a stake on ToolBond (tool_security.publish_with_stake). The
     claim is inside the signed manifest, so ``novelty`` given here on a
     private tool without it (or with a different one) stamps it in: the
     published tool is that NEW digest, and the private original is
@@ -3569,6 +3609,44 @@ async def _service_terms(runtime: Runtime, digest: str, provider: str) -> tuple:
     return catalog.spec(digest) or {}, price_list
 
 
+_INDEX_CACHE: dict[str, Any] = {}
+_INDEX_TTL_S = 300.0
+
+
+async def _index_tokens(runtime: Runtime) -> list[dict[str, Any]] | None:
+    """The value index's tokens (``OnChainService.index_tokens``), kept for
+    five minutes; None when the chain is not configured or unreadable."""
+    from .on_chain import OnChainService
+    import time as _time
+
+    config = runtime._config.rpb
+    svc = OnChainService(config)
+    if not svc.available:
+        return None
+    key = f"{getattr(config, 'rpc_url', '')}|{svc._substrate_address().lower()}"
+    hit = _INDEX_CACHE.get(key)
+    if hit is not None and _time.monotonic() - hit[0] < _INDEX_TTL_S:
+        return hit[1]
+    try:
+        tokens = await svc.index_tokens()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("index token read failed: %s", exc)
+        return None
+    _INDEX_CACHE[key] = (_time.monotonic(), tokens)
+    return tokens
+
+
+async def _list_index_tokens(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """The tokens services are priced and paid in."""
+    tokens = await _index_tokens(runtime)
+    if tokens is None:
+        return {"error": "the value index cannot be read: this daemon has no chain "
+                         "configured, or its RPC is unreachable"}
+    return {"tokens": tokens, "count": len(tokens),
+            "value_units": "value = amount * parity / 1e30; 1e6 value units is one "
+                           "unit of the index"}
+
+
 async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Search the jurisdiction's services: the daemon's catalog, keyword and
     semantic like tools, newest first without a query."""
@@ -3593,14 +3671,23 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     book = getattr(runtime, "channel_book", None)
     buyer = _buyer(runtime, input.get("_caller_id")) if book is not None else None
     payer = buyer[0] if isinstance(buyer, tuple) else ""
+    index = {t["token"]: t for t in (await _index_tokens(runtime) or [])}
     out = []
     for r in rows:
-        credits = book.get(payer, r["provider"]) if book is not None and payer else None
+        token = str(r.get("token") or "")
+        credits = (book.get(payer, r["provider"], token)
+                   if book is not None and payer and token else None)
+        info = index.get(token)
         out.append({
             "service_id": r["service_id"], "provider": r["provider"],
             "spec_digest": r["digest"], "active": r["active"], "name": r["name"],
             "description": r["description"], "mode": r["mode"],
             "settings": r["settings"], "measures": r["measures"],
+            "token": token,
+            # Its symbol and decimals; None when the token is not in the
+            # value index now (the service cannot be paid until it is).
+            "token_info": ({"symbol": info["symbol"], "decimals": info["decimals"]}
+                           if info else None),
             "prices": r["prices"], "voucher": r["voucher"],
             "registry_price": r["registry_price"], "protocol": r["protocol"],
             "input_schema": r["input_schema"], "output_schema": r["output_schema"],
@@ -3653,7 +3740,11 @@ async def _set_service_prices(runtime: Runtime, input: dict[str, Any]) -> dict[s
             raise ValueError("name the prices: 'price' or 'prices'")
         prices = {str(k): _amount(v, f"the price of {k}") for k, v in prices.items()}
         voucher = None if input.get("voucher") is None else _amount(input["voucher"], "voucher")
-        price_list = store.set_prices(digest, prices, voucher)
+        token = input.get("token")
+        if token is not None:
+            from .service_publish import check_token
+            token = await check_token(runtime, token)
+        price_list = store.set_prices(digest, prices, voucher, token=token)
     except ValueError as exc:
         return {"error": str(exc)}
     return {"ok": True, "price_list": price_list}
@@ -3681,7 +3772,7 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     from . import service_client
     from .on_chain import ServiceMarketClient
     from .service_channels import request_on_credits
-    from .service_prices import request_price, voucher_size
+    from .service_prices import price_token, request_price, voucher_size
 
     payload = input.get("payload")
     if not isinstance(payload, dict):
@@ -3711,17 +3802,21 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     if isinstance(buyer, dict):
         return buyer
     payer, key = buyer
+    token = price_token(price_list)
+    if not token:
+        return {"error": "the service's price list names no token, so it cannot be paid"}
     book = getattr(runtime, "channel_book", None)
     smc = ServiceMarketClient(config)
     pay = str(input.get("pay") or "").strip()
-    credits = book.get(payer, provider) if book is not None else None
+    credits = book.get(payer, provider, token) if book is not None else None
     if pay == "credits" and credits is None:
-        return {"error": "no credits with this provider: open_credits first"}
+        return {"error": f"no credits with this provider in the service's token "
+                         f"{token}: open_credits in it first"}
     if credits is not None and pay != "direct":
         if not smc.channel_available:
             return {"error": "PaymentChannel not configured on this daemon"}
-        return await request_on_credits(book, smc, config, key, payer, provider, digest,
-                                        payload, price=price,
+        return await request_on_credits(book, smc, config, key, payer, provider, token,
+                                        digest, payload, price=price,
                                         voucher=voucher_size(price_list))
     resend = input.get("paid_directly")
     if isinstance(resend, dict) and resend.get("tx_hash") and resend.get("request_id"):
@@ -3731,7 +3826,7 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     else:
         request_id = service_client.new_request_id()
         paid = await service_client.pay_for_service(config, key, provider, price,
-                                                    request_id=request_id)
+                                                    request_id=request_id, token=token)
         if paid.get("error"):
             return {"error": paid["error"]}
         paid["request_id"] = str(paid.get("request_id") or request_id)
@@ -3739,7 +3834,8 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         config, provider, digest, payload, tx_hash=str(paid.get("tx_hash") or ""),
         request_id=paid["request_id"], client_address=payer, payer_key=key)
     reply["paid_directly"] = {"tx_hash": paid.get("tx_hash"),
-                              "request_id": paid["request_id"], "amount": price}
+                              "request_id": paid["request_id"], "token": token,
+                              "amount": price}
     return reply
 
 
@@ -3769,11 +3865,13 @@ async def _open_session(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # A priced session is paid from credits only, never directly.
         if isinstance(buyer, dict):
             return buyer
+        from .service_prices import price_token
+        token = price_token(price_list)
         book = getattr(runtime, "channel_book", None)
-        if book is None or book.get(buyer[0], ref["provider"]) is None:
-            return {"error": "a session is paid from your credits with its provider: "
-                             "open_credits first (a deposit in ATN base units), then "
-                             "open the session"}
+        if not token or book is None or book.get(buyer[0], ref["provider"], token) is None:
+            return {"error": "a session is paid from your credits with its provider "
+                             f"in the service's token {token or '(none named)'}: "
+                             "open_credits in that token first, then open the session"}
     payer, key = buyer if isinstance(buyer, tuple) else ("", "")
     return await open_local_session(
         runtime, payer_key=key, payer=payer, provider_address=ref["provider"],
@@ -3800,7 +3898,7 @@ async def _credits(runtime: Runtime, input: dict[str, Any], kind: str) -> dict[s
         try:
             amount = int(input.get("deposit") if kind == "open" else input.get("amount"))
         except (TypeError, ValueError):
-            return {"error": "the amount must be ATN base units"}
+            return {"error": "the amount must be whole base units of the token"}
     if kind == "open":
         blocked = await _sanctioned(runtime, provider, "buy services from")
         if blocked:
@@ -3808,11 +3906,15 @@ async def _credits(runtime: Runtime, input: dict[str, Any], kind: str) -> dict[s
     smc = ServiceMarketClient(runtime._config.rpb)
     if book is None or not smc.channel_available:
         return {"error": "PaymentChannel not configured on this daemon"}
-    if kind == "close":
-        return await sc.close_credits(book, smc, key, payer, provider)
     if kind == "open":
-        return await sc.open_credits(book, smc, key, payer, provider, amount)
-    return await sc.top_up(book, smc, key, payer, provider, amount)
+        return await sc.open_credits(book, smc, key, payer, provider,
+                                     input.get("token"), amount)
+    token, err = sc.resolve_credits_token(book, payer, provider, input.get("token"))
+    if err:
+        return {"error": err}
+    if kind == "close":
+        return await sc.close_credits(book, smc, key, payer, provider, token)
+    return await sc.top_up(book, smc, key, payer, provider, token, amount)
 
 
 async def _open_credits(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -4541,12 +4643,13 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # find_services is read-only discovery; register_service and
     # set_service_prices sell; the rest buy (requests, sessions, credits,
     # reviews). Kept off the progressive surface.
-    "services": {"find_services", "register_service", "set_service_prices",
-                 "request_service", "open_session", "open_credits",
+    "services": {"find_services", "list_index_tokens", "register_service",
+                 "set_service_prices", "request_service", "open_session", "open_credits",
                  "top_up_credits", "close_credits", "list_credits",
                  "review_service"},
     # The buying half alone, granted to external agents by default.
-    "services_buy": {"find_services", "request_service", "open_session",
+    "services_buy": {"find_services", "list_index_tokens", "request_service",
+                     "open_session",
                      "open_credits", "top_up_credits", "close_credits",
                      "list_credits", "review_service"},
     # User-memory bundle: read + write the dossier (USER.md). One grant —
@@ -5055,8 +5158,8 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
                          "your reviews go on chain." if registered else
                          "The operator is not registered yet: the owner "
                          "registers it in the Autonet app (Household, "
-                         "operator), funds it with ATN for stakes and bonds "
-                         "and with gas, and delegates their REP to it. Until "
+                         "operator), funds it with index tokens for bonds and "
+                         "services and with gas, and delegates their REP to it. Until "
                          "then your reviews are held and submitted once it "
                          "is registered."))}
     if defn.identity.registered_on_chain:
@@ -5798,6 +5901,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "set_service_prices": _set_service_prices,
     "request_service": _request_service,
     "open_session": _open_session,
+    "list_index_tokens": _list_index_tokens,
     "open_credits": _open_credits,
     "top_up_credits": _top_up_credits,
     "close_credits": _close_credits,

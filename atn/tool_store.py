@@ -1613,9 +1613,8 @@ class ToolStore:
         """Off-chain fee ledger, derived from the receipts log.
 
         Earned accrues to tool authors, spent to callers, on successful
-        invocations of fee-bearing tools. Settlement on-chain (labeled
-        ATN transfer at epoch close via payForService) is deliberately
-        NOT wired yet.
+        invocations of fee-bearing tools. It is local display only:
+        nothing settles it on chain.
         """
         earned: dict[str, float] = {}
         spent: dict[str, float] = {}

@@ -28,6 +28,7 @@ from tests.test_service_payment_gate import (
     DEPOSIT,
     PAYER_KEY,
     PRICE,
+    USDC,
     VOUCHER,
     Chain,
     _make_runtime,
@@ -56,20 +57,25 @@ class Market:
         self.chain, self.provider = chain, provider
         self.signed: list[int] = []
 
-    async def open_channel(self, key, provider, deposit):
+    async def accepts_token(self, token):
+        return token in self.chain.index
+
+    async def open_channel(self, key, provider, token, deposit):
         cid = len(self.chain.channels) + 1
-        self.chain.open(cid, provider, deposit=deposit)
+        self.chain.open(cid, provider, deposit=deposit, token=token)
         return {"success": True, "channel_id": cid}
 
     async def get_channel(self, cid):
         ch = self.chain.channels.get(cid)
-        return None if ch is None else {"status": ch.get("status", OPEN), "closes_at": 0}
+        return None if ch is None else {"status": ch.get("status", OPEN), "closes_at": 0,
+                                        "token": ch["token"]}
 
     async def start_close(self, key, cid):
         self.chain.channels[cid]["status"] = CLIENT_CLOSING
         return {"success": True, "tx_hash": "0xc"}
 
-    def sign_voucher(self, key, cid, cumulative):
+    def sign_voucher(self, key, cid, token, cumulative):
+        assert token == self.chain.channels[cid]["token"]
         self.signed.append(cumulative)
         return f"{_payer()}:{cid}:{cumulative}"
 
@@ -102,9 +108,10 @@ async def _buy(rt, chain, record, args=None, book=None):
     m = Market(chain, provider)
     if book is None:
         book = ChannelBook(rt._config.data_dir / f"buyer_{record.digest[:8]}.json")
-        assert (await open_credits(book, m, PAYER_KEY, _payer(), provider, DEPOSIT))["ok"]
+        assert (await open_credits(book, m, PAYER_KEY, _payer(), provider, USDC,
+                                   DEPOSIT))["ok"]
     out = await request_on_credits(
-        book, m, rt._config.rpb, PAYER_KEY, _payer(), provider, record.digest,
+        book, m, rt._config.rpb, PAYER_KEY, _payer(), provider, USDC, record.digest,
         args or {"messages": [{"role": "user", "content": "hi"}]},
         price=PRICE, voucher=VOUCHER, p2p_host=_Host(), peer_id="peer", timeout=30)
     return out, book, m
@@ -132,9 +139,9 @@ async def test_a_served_request_stays_charged(market):
     out, _, _ = await _buy(rt, chain, record, book=book)
     assert out["ok"] and m.signed == [VOUCHER]
     assert rt.service_store.balance(1) == (2 * PRICE, VOUCHER)
-    assert book.get(_payer(), record.test_listing["provider"])["consumed"] == 2 * PRICE
-    assert [(r["ok"], r["amount"], r["payer"]) for r in _rows(rt)] == \
-        [(True, str(PRICE), _payer().lower())] * 2
+    assert book.get(_payer(), record.test_listing["provider"], USDC)["consumed"] == 2 * PRICE
+    assert [(r["ok"], r["amount"], r["token"], r["payer"]) for r in _rows(rt)] == \
+        [(True, str(PRICE), USDC, _payer().lower())] * 2
 
 
 @pytest.mark.asyncio
@@ -160,7 +167,7 @@ async def test_a_session_service_is_not_served_requests(market):
                  "max_sessions": 1, "process": "shared"})
     res = rt.service_store.register(
         name="chat", description="Chat.", mode="session", author="user",
-        backing_tool=tool["digest"], prices={"seconds": 10}, voucher=VOUCHER,
+        backing_tool=tool["digest"], token=USDC, prices={"seconds": 10}, voucher=VOUCHER,
         measures=[{"measure": "seconds", "quantity": 60}])
     record = rt.service_store.get(res["digest"])
     record.test_listing = _register_service(rt, name="other").test_listing
@@ -235,9 +242,9 @@ def _buyer_side(chain, record, monkeypatch):
         return "peer"
     paid: list[dict] = []
 
-    async def pay(config, key, recipient, amount, request_id=""):
-        paid.append({"recipient": recipient, "amount": amount})
-        return {"tx_hash": chain.pay(request_id, recipient, amount, key=key),
+    async def pay(config, key, recipient, amount, request_id="", *, token):
+        paid.append({"recipient": recipient, "amount": amount, "token": token})
+        return {"tx_hash": chain.pay(request_id, recipient, amount, key=key, token=token),
                 "request_id": request_id}
     monkeypatch.setattr(service_client, "lookup_service_ask", entry)
     monkeypatch.setattr(service_client, "read_service", entry)
@@ -270,14 +277,23 @@ async def test_a_model_call_is_paid_from_credits_else_directly(market, monkeypat
     resp = await prov.send(messages=[{"role": "user", "content": "one"}])
     assert resp.text == "re: one" and resp.model == "seller-1"
     assert resp.usage.input_tokens == 3
-    assert paid == [{"recipient": record.test_listing["provider"], "amount": PRICE}]
+    assert paid == [{"recipient": record.test_listing["provider"], "amount": PRICE,
+                     "token": USDC}]
     assert prov.last_payment["paid"] == PRICE and m.signed == []
-    # With credits: a voucher, no payment.
+    assert prov.cached_token == USDC
+    # Credits in another token do not pay for it: still a direct payment.
     assert (await open_credits(book, m, PAYER_KEY, _payer(),
-                               record.test_listing["provider"], DEPOSIT))["ok"]
+                               record.test_listing["provider"], "0x" + "d1" * 20,
+                               10 ** 21))["ok"]
+    resp = await prov.send(messages=[{"role": "user", "content": "dai"}])
+    assert resp.text == "re: dai" and len(paid) == 2 and m.signed == []
+    # With credits in the price list's token: a voucher, no payment.
+    assert (await open_credits(book, m, PAYER_KEY, _payer(),
+                               record.test_listing["provider"], USDC, DEPOSIT))["ok"]
     resp = await prov.send(messages=[{"role": "user", "content": "two"}])
-    assert resp.text == "re: two" and len(paid) == 1 and m.signed == [VOUCHER]
-    assert prov.last_payment == {"credits": prov.last_payment["credits"], "paid": PRICE}
+    assert resp.text == "re: two" and len(paid) == 2 and m.signed == [VOUCHER]
+    assert prov.last_payment == {"credits": prov.last_payment["credits"], "token": USDC,
+                                 "paid": PRICE}
     assert prov.last_payment["credits"]["used"] == PRICE
 
 
@@ -319,7 +335,9 @@ async def test_the_owner_buys_from_its_own_service(market, monkeypatch):
     receipt = out["result"]["receipt"]
     assert receipt["paid"] is True and receipt["amount"] == str(PRICE)
     assert receipt["recipient"] == record.test_listing["provider"]
-    assert paid == [{"recipient": record.test_listing["provider"], "amount": PRICE}]
+    assert receipt["token"] == USDC
+    assert paid == [{"recipient": record.test_listing["provider"], "amount": PRICE,
+                     "token": USDC}]
     # The gate verified the operator's own payment.
     assert chain.verified[-1]["payer"] == record.test_listing["provider"]
 
@@ -365,18 +383,23 @@ async def test_the_owner_buys_from_another_daemon_on_credits_else_directly(
     out = await invoke("one")
     assert out["ok"], out
     assert out["result"]["output"]["result"]["content"] == "re: one"
-    assert paid == [{"recipient": provider, "amount": PRICE}]
+    assert paid == [{"recipient": provider, "amount": PRICE, "token": USDC}]
     assert out["result"]["receipt"]["tx_hash"]
+    assert out["result"]["receipt"]["token"] == USDC
     # The owner opens credits: the next purchase sends a voucher, no payment.
-    opened = await buyer._owner_credits(
+    no_token = await buyer._owner_credits(
         "open_credits", {"provider_address": provider, "amount": DEPOSIT})
+    assert no_token["ok"] is False and "name the token" in no_token["error"]
+    opened = await buyer._owner_credits(
+        "open_credits", {"provider_address": provider, "token": USDC, "amount": DEPOSIT})
     assert opened["ok"] and opened["result"]["credits"]["deposit"] == DEPOSIT
     out = await invoke("two")
     assert out["ok"] and len(paid) == 1 and m.signed == [VOUCHER]
     assert out["result"]["receipt"]["credits"]["used"] == PRICE
     listed = await buyer._owner_credits("list_credits", {})
-    assert [(r["provider"], r["used"]) for r in listed["result"]["credits"]] == [
-        (provider, PRICE)]
+    assert [(r["provider"], r["token"], r["used"])
+            for r in listed["result"]["credits"]] == [(provider, USDC, PRICE)]
+    # One credits entry with the provider: the token may be left out.
     closed = await buyer._owner_credits("close_credits", {"provider_address": provider})
     assert closed["ok"]
     assert (await buyer._owner_credits("list_credits", {}))["result"]["credits"] == []

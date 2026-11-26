@@ -140,7 +140,7 @@ async def test_sessions_share_the_operators_credits(tmp_path, monkeypatch):
     more with the next voucher."""
     from atn import agent_tools, on_chain, service_client
     from atn.service_channels import ChannelBook
-    from tests.atn.test_service_commands import _Market
+    from tests.atn.test_service_commands import USDC, _Market
 
     rt = _runtime(tmp_path)
     for aid in ("cc-a", "cc-b"):
@@ -168,13 +168,15 @@ async def test_sessions_share_the_operators_credits(tmp_path, monkeypatch):
         return {"ok": True, "result": {}, "credit": {"channel_id": 1, **held}}
 
     async def terms(runtime, digest, prov):
-        return {"mode": "request"}, {"prices": {"requests": price}, "voucher": price}
+        return {"mode": "request"}, {"token": USDC, "prices": {"requests": price},
+                                     "voucher": price}
 
     monkeypatch.setattr(on_chain, "ServiceMarketClient", lambda cfg: market)
     monkeypatch.setattr(service_client, "request_service", request)
     monkeypatch.setattr(agent_tools, "_service_terms", terms)
     opened = await execute_tool("open_credits", {"provider_address": provider,
-                                                 "deposit": 1000}, rt, caller_id="cc-a")
+                                                 "token": USDC, "deposit": 1000},
+                                rt, caller_id="cc-a")
     assert opened.get("ok"), opened
     args = {"provider_address": provider, "spec_digest": "ab" * 32, "payload": {}}
     out = await asyncio.gather(
@@ -182,7 +184,7 @@ async def test_sessions_share_the_operators_credits(tmp_path, monkeypatch):
         execute_tool("request_service", args, rt, caller_id="cc-b"))
     assert [o["ok"] for o in out] == [True, True], out
     assert vouchers == [100, 200] and len(market.opened) == 1
-    ch = book.get(_operator_address(rt), provider)
+    ch = book.get(_operator_address(rt), provider, USDC)
     assert (ch["cumulative"], ch["consumed"]) == (200, 200)
 
 

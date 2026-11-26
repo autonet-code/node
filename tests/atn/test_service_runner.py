@@ -89,7 +89,8 @@ def _service(rt, *, process="shared", max_sessions=0, code=TOOL, name="echo"):
                  "reports_usage": ["output_tokens"]})
     res = rt.service_store.register(
         name=name, description="Bytes back.", mode="session", author="user",
-        backing_tool=tool["digest"], prices={"output_tokens": 1}, voucher=100,
+        backing_tool=tool["digest"], token="0x" + "a6" * 20,
+        prices={"output_tokens": 1}, voucher=100,
         measures=[{"measure": "output_tokens", "quantity": 1}],
         settings={"model": "echo-large"})
     return rt.service_store.get(res["digest"])

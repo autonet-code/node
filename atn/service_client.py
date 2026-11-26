@@ -3,8 +3,9 @@
 The mechanics a buyer needs:
 
   1. ``new_request_id()``     a fresh bytes32 request id per call.
-  2. ``pay_for_service()``    sign a ``Substrate.payForService`` transfer
-                              (a one-off request paid directly) and return
+  2. ``pay_for_service()``    sign a ``Substrate.payForService`` payment
+                              in the price list's token (a one-off request
+                              paid directly) and return
                               ``{tx_hash, request_id}``.
   3. ``request_service()``    send a ``service_request`` carrying the
                               payment (the buyer's credits, or a direct
@@ -370,20 +371,28 @@ async def pay_for_service(
     recipient: str,
     amount: int,
     request_id: str = "",
+    *,
+    token: str,
 ) -> dict[str, Any]:
-    """Sign + submit ``Substrate.payForService``.
+    """Sign + submit ``Substrate.payForService`` in ``token`` (the
+    service's price list token; ``amount`` gross, in its base units), with
+    an ``approve`` of the token first when the allowance falls short.
 
     Returns ``{tx_hash, request_id}`` on success, or ``{"error": ...}``.
     ``config`` is the ``AutonetConfig`` (``ATNConfig.rpb``).
     """
     from .on_chain import OnChainService
+    from .service_prices import norm_token
 
     if not recipient:
         return {"error": "Missing recipient for payment"}
+    if not norm_token(token):
+        return {"error": "the payment names no token: the service's price list "
+                         "must name the token it is paid in"}
     try:
         amount = int(amount)
     except (TypeError, ValueError):
-        return {"error": "amount must be an integer (ATN base units)"}
+        return {"error": "amount must be an integer (base units of the token)"}
     if amount <= 0:
         return {"error": "amount must be positive"}
     if not private_key:
@@ -395,7 +404,8 @@ async def pay_for_service(
     if not svc.available:
         return {"error": "Substrate not configured (missing substrate_address "
                          "or rpc_url)."}
-    result = await svc.pay_for_service(private_key, recipient, amount, request_id)
+    result = await svc.pay_for_service(private_key, norm_token(token), recipient,
+                                       amount, request_id)
     if not result.get("success"):
         return {"error": f"Payment failed: {result.get('error')}",
                 "tx_hash": result.get("tx_hash")}

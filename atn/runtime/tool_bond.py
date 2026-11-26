@@ -176,10 +176,16 @@ TOOL_BOND_CLIENT_ABI = [
 SUBSTRATE_TOOL_ABI = [
     _fn("registerTool", [("manifestDigest", "bytes32")]),
     _fn("toolAuthor", [("", "bytes32")], [("", "address")], "view"),
-    _fn("approve", [("spender", "address"), ("amount", "uint256")], [("", "bool")]),
-    _fn("allowance", [("owner", "address"), ("spender", "address")], [("", "uint256")], "view"),
-    _fn("balanceOf", [("account", "address")], [("", "uint256")], "view"),
 ]
+
+# Bonding waits for ToolBond's index-token version: Substrate is no longer
+# a token, so there is nothing to approve on it, and the version of ToolBond
+# that takes its stake in a token of the value index (a token per bond,
+# minStake as a value) is not written yet. Its ABI is not guessed here.
+BOND_PENDING = ("bonding waits for ToolBond's index-token version: Substrate is "
+                "no longer a token, and the ToolBond that takes a stake in a "
+                "value index token (a token per bond, minStake as a value) is "
+                "not deployed yet")
 
 
 def _b32(hex_digest: str) -> bytes:
@@ -296,11 +302,12 @@ class ToolBondClient:
     # -- writes: author ------------------------------------------------
     async def register_and_bond(self, private_key: str, digest: str,
                                 amount: Optional[int] = None) -> dict[str, Any]:
-        """Substrate.registerTool (if unclaimed), approve, ToolBond.bond.
+        """Substrate.registerTool (if unclaimed), then the bond.
 
-        ``amount`` defaults to the current minStake. Safe to retry after a
-        partial attempt: skips a registration the caller already holds and an
-        approval that already covers the amount.
+        The bond itself raises NotImplementedError (``BOND_PENDING``) until
+        ToolBond's index-token version exists: its stake is approved on a
+        token of the value index, not on Substrate. Safe to retry: skips a
+        registration the caller already holds.
         """
         from eth_account import Account
         me = Account.from_key(private_key).address
@@ -319,12 +326,8 @@ class ToolBondClient:
             amount = await self.min_stake()
             if amount is None:
                 return {"success": False, "error": "could not read minStake"}
-        allowance = await self._read(lambda b, s: int(s.functions.allowance(me, b.address).call()))
-        if allowance is None or allowance < amount:
-            res = await self._write(private_key, lambda b, s, a: s.functions.approve(b.address, int(amount)))
-            if not res.get("success"):
-                return {**res, "step": "approve", "txs": txs}
-            txs.append(res["tx_hash"])
+        # The stake's approval was made on Substrate when it was a token.
+        raise NotImplementedError(BOND_PENDING)
         res = await self._write(private_key, lambda b, s, a: b.functions.bond(_b32(digest), int(amount)))
         if not res.get("success"):
             return {**res, "step": "bond", "txs": txs}

@@ -6,14 +6,18 @@ channel's best voucher and what it has served against it (``consumed``)
 as it serves (``ServiceStore.accept_voucher``, ``consume``) and cashes it
 in with ``settle``, which pays up to what was served (``upTo``) over what
 the channel has paid so far (the contract's ``claimed``) and leaves the
-channel open, so the buyer's credit carries on and the service fee burns
-as the provider earns. Vouchers pay ahead, so the best voucher can cover
+channel open, so the buyer's credit carries on and the service fee is
+taken as the provider earns. Vouchers pay ahead, so the best voucher can cover
 more than was served: that part stays the buyer's, and comes back to it
 when the channel closes. What a channel owes the provider (its unsettled
 amount) is min(served, best voucher, deposit) minus ``claimed``. The sweep
 
-- settles an open channel once its unsettled amount reaches
-  ``settle_min`` (default 1 ATN, ``autonet.channel_settle_min``);
+- settles an open channel once its unsettled amount is worth
+  ``settle_min`` (a value, in 6-decimal value units: default 1e6, one unit
+  of the value index, ``autonet.channel_settle_min``). Each channel is in
+  its own token, so the unsettled amount is valued at today's index
+  (``Substrate.valueOf``); a token that left the index is worth 0 there
+  and its channels settle on the period alone;
 - settles an open channel with any unsettled amount once ``settle_period_s``
   has passed since it was last settled, or since the sweep first saw it
   (about when it opened: default a day, ``autonet.channel_idle_close_s``;
@@ -52,7 +56,8 @@ log = logging.getLogger(__name__)
 
 OPEN, CLOSING, SETTLED, CLIENT_CLOSING = 1, 2, 3, 4
 
-# 1 ATN (6 decimals): settle once this much is unpaid on a channel.
+# A value (6-decimal value units, so 1e6 is one unit of the value index):
+# settle once what is unpaid on a channel is worth this much.
 DEFAULT_SETTLE_MIN = 1_000_000
 # Settle whatever is unpaid at least this often (the default of
 # ``autonet.channel_idle_close_s``).
@@ -126,12 +131,13 @@ async def settle_channels(
     now: Optional[float] = None,
 ) -> list[dict[str, Any]]:
     """One sweep. ``client`` is a ServiceMarketClient; ``key_for(provider)``
-    returns the provider's private key or None; ``ledger`` keeps what was
-    paid and when (one per daemon; in memory if not given). Returns what
-    was done: per channel acted on, ``{channel_id, action, ...}`` with
-    action ``settled`` (by settle, reason ``threshold``, ``period`` or
-    ``client_closing``; ``amount`` what it owed), ``forgot`` or
-    ``window_passed``."""
+    returns the provider's private key or None; ``settle_min`` is a value
+    (6-decimal value units, see the module docstring); ``ledger`` keeps
+    what was paid and when (one per daemon; in memory if not given).
+    Returns what was done: per channel acted on, ``{channel_id, action,
+    ...}`` with action ``settled`` (by settle, reason ``threshold``,
+    ``period`` or ``client_closing``; ``amount`` what it owed, in base
+    units of ``token``), ``forgot`` or ``window_passed``."""
     out: list[dict[str, Any]] = []
     ledger = ledger if ledger is not None else SettlementLog()
     clock = time.time() if now is None else float(now)
@@ -187,7 +193,9 @@ async def settle_channels(
             if unsettled <= 0:
                 continue
             since = float((logged or {}).get("since") or clock)
-            if settle_min > 0 and unsettled >= settle_min:
+            worth = (await client.value_of(str(ch.get("token") or ""), unsettled)
+                     if settle_min > 0 else None)
+            if worth is not None and worth >= settle_min:
                 reason = "threshold"
             elif settle_period_s > 0 and clock - since >= settle_period_s:
                 reason = "period"
@@ -217,5 +225,6 @@ async def settle_channels(
         else:
             log.warning("collecting channel %s failed: %s", cid, res.get("error"))
         out.append({"channel_id": cid, "action": action, "reason": reason,
-                    "amount": unsettled, "ok": ok, "error": res.get("error")})
+                    "token": str(ch.get("token") or ""), "amount": unsettled,
+                    "ok": ok, "error": res.get("error")})
     return out

@@ -3,7 +3,7 @@
 Every review of a tool is one entry in its agent's batch for the epoch: the
 four fixed fields (correctness, simplicity, novelty, malware), the charter
 axes the reviewer scored, and an evidence hash. The agent commits the batch
-once per epoch (a hash and the review count; no ATN stake) and reveals it
+once per epoch (a hash and the review count; no stake) and reveals it
 after the epoch is anchored, within ToolBond's reveal window. ToolBond
 settles each tool's round on chain: the REP-weighted sums per field and
 axis, each reviewer's accuracy over all of them, and REP moved by accuracy
@@ -125,7 +125,7 @@ TOOL_BOND_REVIEW_ABI = [
                          ("reviews", "ReviewInput[]"), ("salt", "bytes32")],
         [("", "bytes32")], "pure"),
     # The commit declares its review count (public); the reveal must hold
-    # exactly that many. No ATN rides on it.
+    # exactly that many. No money rides on it.
     _fn("commit", [("commitment", "bytes32"), ("reviews", "uint256")]),
     _fn("reveal", [("epoch", "uint256"), ("agent", "address"),
                    ("reviews", "ReviewInput[]"), ("salt", "bytes32")]),

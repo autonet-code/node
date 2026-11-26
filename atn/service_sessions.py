@@ -6,8 +6,9 @@ Provider (``DaemonSessionHandler``): an opening is checked before anything
 is paid: the service exists, is a session service and is not retired; its
 tool is up and not full (``atn/service_runner.py`` leases it); the buyer's
 credits (a payment channel, with any new voucher verified on chain) belong
-to the payer who signed the opening and are paid up. The quoted prices (the
-current price list) hold for the whole session. The session is then piped
+to the payer who signed the opening, are in the price list's token and are
+paid up. The quoted prices (the current price list, its token included)
+hold for the whole session. The session is then piped
 to the tool's port as its own local connection and metered: seconds while
 it is open and gigabytes carried either way are counted by the daemon,
 tokens come from the tool's usage reports. Every charge goes to the
@@ -35,7 +36,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from .service_prices import Meter, voucher_size
+from .service_prices import Meter, price_token, voucher_size
 from .service_spec import BYTES_PER_GIGABYTE, MODE_SESSION, session_protocol
 
 log = logging.getLogger(__name__)
@@ -193,11 +194,11 @@ class DaemonSessionHandler(SessionHandler):  # type: ignore[misc,valid-type]
         meter = _SessionMeter(record.spec, prices, ledger)
         self._open[rid] = {"record": record, "lease": lease, "meter": meter,
                            "channel_id": cid, "payer": (credit or {}).get("payer", ""),
-                           "opened": time.time()}
+                           "token": record.token, "opened": time.time()}
         consumed, cumulative = store.balance(cid) if cid is not None else (0, 0)
         reply = {"ok": True, "result": {
             "request_id": rid, "protocol": session_protocol(record.spec),
-            "prices": prices, "measures": record.measures,
+            "token": record.token, "prices": prices, "measures": record.measures,
             "voucher": record.voucher, "settings": record.settings,
             "consumed": consumed, "cumulative": cumulative,
             "channel_id": int(cid) if cid is not None else None}}
@@ -214,7 +215,8 @@ class DaemonSessionHandler(SessionHandler):  # type: ignore[misc,valid-type]
             return VoucherCheck(ok=False, error="a voucher on another channel")
         res = await self.bridge._accept_voucher(
             state["record"], frame.get("channel_id"), frame.get("cumulative_amount"),
-            frame.get("signature"), payer=state.get("payer", ""))
+            frame.get("signature"), payer=state.get("payer", ""),
+            token=state.get("token"))
         if not res.get("ok"):
             return VoucherCheck(ok=False, error=str(res.get("reason") or "invalid"))
         return VoucherCheck(ok=True)
@@ -266,7 +268,8 @@ class DaemonSessionHandler(SessionHandler):  # type: ignore[misc,valid-type]
                 store.end_use(state["channel_id"])
             store.record_request(state["record"].digest, session.request_id,
                                  state.get("payer", ""), ok=True,
-                                 amount=str(state["meter"].charged))
+                                 amount=str(state["meter"].charged),
+                                 token=state.get("token") or "")
         await self._on_loop(run, STORE_TIMEOUT)
 
     def _error(self, state: dict, error: str) -> None:
@@ -381,6 +384,10 @@ async def open_local_session(runtime: Any, *, payer_key: str, payer: str,
     price_list = catalog_for(runtime).price_list(spec_digest, provider_address)
     priced = bool(price_list) and any(
         int(v or 0) > 0 for v in (price_list.get("prices") or {}).values())
+    # The session is paid from the credits in the price list's token.
+    pay_token = price_token(price_list)
+    if priced and not pay_token:
+        return {"error": "the service's price list names no token"}
     book = getattr(runtime, "channel_book", None)
     smc = ServiceMarketClient(config)
     loop = asyncio.get_running_loop()
@@ -388,20 +395,22 @@ async def open_local_session(runtime: Any, *, payer_key: str, payer: str,
     msg: dict[str, Any] = {"type": "service_session", "msg_id": uuid.uuid4().hex[:12],
                            "spec_digest": spec_digest, "request_id": open_rid,
                            "args": args, "client": payer}
-    ch = book.get(payer, provider_address) if book is not None else None
+    ch = (book.get(payer, provider_address, pay_token)
+          if book is not None and pay_token else None)
     if priced or ch is not None:
         if ch is None:
-            return {"error": "no credits with this provider: open credits first "
-                             "(open_credits with a deposit)"}
+            return {"error": f"no credits with this provider in the service's token "
+                             f"{pay_token}: open credits first (open_credits with a "
+                             "deposit in that token)"}
         if not payer_key:
             return {"error": "paying for a session needs a key (call as an agent)"}
         voucher = voucher_size(price_list) if price_list else 0
-        async with channel_lock(book, payer, provider_address):
-            ch = book.get(payer, provider_address) or ch
+        async with channel_lock(book, payer, provider_address, pay_token):
+            ch = book.get(payer, provider_address, pay_token) or ch
             msg["channel_id"] = int(ch["channel_id"])
             if int(ch["cumulative"]) - int(ch.get("consumed") or 0) <= 0:
                 fields = await next_voucher(book, smc, payer_key, payer, provider_address,
-                                            need=1, voucher=voucher)
+                                            pay_token, need=1, voucher=voucher)
                 if fields.get("error"):
                     return {"error": str(fields["error"]), "credits": fields.get("credits")}
                 msg.update({k: fields[k] for k in ("cumulative_amount", "signature")})
@@ -415,12 +424,13 @@ async def open_local_session(runtime: Any, *, payer_key: str, payer: str,
     def on_balance(consumed: int, cumulative: int) -> None:
         if book is not None and cid is not None:
             loop.call_soon_threadsafe(book.note_balance, payer, provider_address,
-                                      int(cid), int(consumed), int(cumulative))
+                                      pay_token, int(cid), int(consumed), int(cumulative))
 
     async def make_voucher(consumed: int, cumulative: int) -> dict:
-        async with channel_lock(book, payer, provider_address):
+        async with channel_lock(book, payer, provider_address, pay_token):
             return await next_voucher(book, smc, payer_key, payer, provider_address,
-                                      need=1, voucher=quoted["voucher"], consumed=consumed)
+                                      pay_token, need=1, voucher=quoted["voucher"],
+                                      consumed=consumed)
 
     async def voucher_source(consumed: int, cumulative: int) -> Optional[dict]:
         import trio
@@ -457,6 +467,7 @@ async def open_local_session(runtime: Any, *, payer_key: str, payer: str,
                                   "path": sess.path, "relay": sess.relay,
                                   "request_id": open_rid,
                                   "protocol": result.get("protocol"),
+                                  "token": result.get("token") or pay_token,
                                   "prices": result.get("prices"),
                                   "measures": result.get("measures"),
                                   "voucher": result.get("voucher")})
@@ -490,8 +501,8 @@ async def open_local_session(runtime: Any, *, payer_key: str, payer: str,
         out = await asyncio.wait_for(asyncio.wrap_future(ready), timeout + 60)
     except asyncio.TimeoutError:
         return {"error": "the session did not open in time"}
-    if out.get("ok") and book is not None:
-        out["credits"] = credits_view(book.get(payer, provider_address))
+    if out.get("ok") and book is not None and pay_token:
+        out["credits"] = credits_view(book.get(payer, provider_address, pay_token))
     return out
 
 

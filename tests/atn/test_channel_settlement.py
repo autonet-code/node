@@ -1,7 +1,8 @@
 """Provider-side channel settlement (atn/channel_settlement.py): a channel
 is settled up to what was served (vouchers pay ahead, and the unserved
 rest stays the buyer's); an open one (it stays open) once its unpaid
-amount reaches the threshold, or once it has had unpaid value for the
+amount is worth the threshold (a value: each channel's token at its
+parity), or once it has had unpaid value for the
 settle period since its last settle; nothing is sent when there is nothing
 new to pay; a channel whose client started a close is settled inside the
 window (up to what was served, leaving the client's close as it is); a
@@ -19,7 +20,12 @@ from atn.channel_settlement import (
 
 PROV = "0x" + "aa" * 20
 NOW = 1_000_000.0
-ATN = 1_000_000
+# One unit of value (1e6 value units): the default threshold. The channels
+# here are in a 6-decimal token at parity 1e30, so one whole token (1e6
+# base units) is worth exactly that.
+UNIT = 1_000_000
+USDC, DAI, GONE = "0x" + "c6" * 20, "0x" + "d1" * 20, "0x" + "0f" * 20
+PARITY = {USDC: 10 ** 30, DAI: 10 ** 18, GONE: 0}
 
 
 class Store:
@@ -47,9 +53,16 @@ class Client:
         for cid, ch in channels.items():
             if isinstance(ch, int):
                 ch = {"status": ch}
-            self.channels[cid] = {"provider": PROV, "deposit": str(10 * ATN),
+            self.channels[cid] = {"provider": PROV, "token": USDC,
+                                  "deposit": str(10 * UNIT),
                                   "claimed": "0", "closes_at": NOW + 60, **ch}
         self.settled, self.closed, self.up_to = [], [], []
+        self.valued = []
+
+    async def value_of(self, token, amount):
+        """Substrate.valueOf: amount x parity / 1e30 (0 outside the index)."""
+        self.valued.append((token, amount))
+        return int(amount) * PARITY[token] // 10 ** 30
 
     async def get_channel(self, cid):
         ch = self.channels.get(cid)
@@ -96,19 +109,41 @@ def _v(cumulative, sig="0xs1", ts=NOW, consumed=None):
 
 
 def test_settles_at_the_threshold_and_the_channel_stays_open():
-    store = Store({"1": _v(ATN)})
+    store = Store({"1": _v(UNIT)})
     client = Client({1: OPEN})
     out = _sweep(store, client)
-    assert client.settled == [("0xkey", 1, ATN, "0xs1")] and client.closed == []
+    assert client.settled == [("0xkey", 1, UNIT, "0xs1")] and client.closed == []
     assert out == [{"channel_id": "1", "action": "settled", "reason": "threshold",
-                    "amount": ATN, "ok": True, "error": None}]
+                    "token": USDC, "amount": UNIT, "ok": True, "error": None}]
+    assert client.valued == [(USDC, UNIT)]
     # The voucher is kept (the gate's floor) and the channel is still open.
     assert "1" in store.v and client.channels[1]["status"] == OPEN
 
 
+def test_the_threshold_is_a_value_whatever_the_decimals():
+    """An 18-decimal token: 1e18 base units is one unit of value and is
+    settled at once; 1e12 base units is worth 1 value unit and waits."""
+    store = Store({"1": _v(10 ** 18), "2": _v(10 ** 12)})
+    client = Client({1: {"status": OPEN, "token": DAI, "deposit": str(10 ** 19)},
+                     2: {"status": OPEN, "token": DAI, "deposit": str(10 ** 19)}})
+    out = _sweep(store, client, settle_period_s=3600)
+    assert [(o["channel_id"], o["reason"], o["token"], o["amount"]) for o in out] == [
+        ("1", "threshold", DAI, 10 ** 18)]
+    assert client.settled == [("0xkey", 1, 10 ** 18, "0xs1")]
+
+
+def test_a_token_out_of_the_index_settles_on_the_period_alone():
+    ledger = SettlementLog()
+    store = Store({"1": _v(50 * UNIT)})
+    client = Client({1: {"status": OPEN, "token": GONE, "deposit": str(100 * UNIT)}})
+    assert _sweep(store, client, ledger, settle_period_s=3600) == []
+    out = _sweep(store, client, ledger, settle_period_s=3600, now=NOW + 3600)
+    assert out[0]["reason"] == "period" and out[0]["token"] == GONE
+
+
 def test_below_the_threshold_waits_for_the_period():
     ledger = SettlementLog()
-    store = Store({"1": _v(ATN - 1)})
+    store = Store({"1": _v(UNIT - 1)})
     client = Client({1: OPEN})
     assert _sweep(store, client, ledger, settle_period_s=3600) == []
     # First seen at NOW: the period runs from there.
@@ -116,9 +151,9 @@ def test_below_the_threshold_waits_for_the_period():
     assert _sweep(store, client, ledger, settle_period_s=3600,
                   now=NOW + 3599) == []
     out = _sweep(store, client, ledger, settle_period_s=3600, now=NOW + 3600)
-    assert out[0]["reason"] == "period" and out[0]["amount"] == ATN - 1
-    assert client.settled == [("0xkey", 1, ATN - 1, "0xs1")]
-    assert ledger.get("1") == {"paid": ATN - 1, "since": NOW + 3600}
+    assert out[0]["reason"] == "period" and out[0]["amount"] == UNIT - 1
+    assert client.settled == [("0xkey", 1, UNIT - 1, "0xs1")]
+    assert ledger.get("1") == {"paid": UNIT - 1, "since": NOW + 3600}
 
 
 def test_the_period_restarts_at_each_settle():
@@ -137,12 +172,12 @@ def test_the_period_restarts_at_each_settle():
 def test_nothing_new_sends_nothing():
     """What the channel paid is read from chain (claimed): a voucher at or
     below it is not sent again, whatever the period."""
-    store = Store({"1": _v(3 * ATN)})
-    client = Client({1: {"status": OPEN, "claimed": str(3 * ATN)}})
+    store = Store({"1": _v(3 * UNIT)})
+    client = Client({1: {"status": OPEN, "claimed": str(3 * UNIT)}})
     assert _sweep(store, client, settle_period_s=1, now=NOW + 10 ** 6) == []
     assert client.settled == [] and client.closed == []
     # Two sweeps in a row after one settle: the second sends nothing.
-    store = Store({"2": _v(2 * ATN)})
+    store = Store({"2": _v(2 * UNIT)})
     client = Client({2: OPEN})
     ledger = SettlementLog()
     assert len(_sweep(store, client, ledger)) == 1
@@ -153,7 +188,7 @@ def test_a_lagging_read_of_claimed_does_not_resend():
     """The chain read still shows the old claimed right after a settle: the
     ledger's record of what was paid wins."""
     ledger = SettlementLog()
-    store = Store({"1": _v(2 * ATN)})
+    store = Store({"1": _v(2 * UNIT)})
     client = Client({1: OPEN})
     _sweep(store, client, ledger)
     client.channels[1]["claimed"] = "0"           # a stale RPC
@@ -161,28 +196,28 @@ def test_a_lagging_read_of_claimed_does_not_resend():
 
 
 def test_unsettled_amount_is_capped_at_the_deposit():
-    store = Store({"1": _v(50 * ATN)})
-    client = Client({1: {"status": OPEN, "deposit": str(5 * ATN),
-                         "claimed": str(4 * ATN)}})
+    store = Store({"1": _v(50 * UNIT)})
+    client = Client({1: {"status": OPEN, "deposit": str(5 * UNIT),
+                         "claimed": str(4 * UNIT)}})
     out = _sweep(store, client)
-    assert out[0]["amount"] == ATN and client.channels[1]["claimed"] == str(5 * ATN)
+    assert out[0]["amount"] == UNIT and client.channels[1]["claimed"] == str(5 * UNIT)
     assert _sweep(store, client, settle_period_s=1, now=NOW + 100) == []
 
 
 def test_only_what_was_served_is_claimed():
-    """Vouchers pay ahead: a voucher for 5 ATN with 2 ATN served settles up
-    to 2 ATN; the rest stays the buyer's until more is served."""
+    """Vouchers pay ahead: a voucher for 5 units with 2 units served settles up
+    to 2 units; the rest stays the buyer's until more is served."""
     ledger = SettlementLog()
-    store = Store({"1": _v(5 * ATN, consumed=2 * ATN)})
+    store = Store({"1": _v(5 * UNIT, consumed=2 * UNIT)})
     client = Client({1: OPEN})
     out = _sweep(store, client, ledger)
-    assert out[0]["amount"] == 2 * ATN and client.up_to == [2 * ATN]
-    assert client.channels[1]["claimed"] == str(2 * ATN)
+    assert out[0]["amount"] == 2 * UNIT and client.up_to == [2 * UNIT]
+    assert client.channels[1]["claimed"] == str(2 * UNIT)
     assert _sweep(store, client, ledger, settle_period_s=1, now=NOW + 100) == []
     # Served past the voucher (one reply's overshoot): capped at the voucher.
-    store.v["1"] = _v(5 * ATN, consumed=6 * ATN)
+    store.v["1"] = _v(5 * UNIT, consumed=6 * UNIT)
     out = _sweep(store, client, ledger)
-    assert out[0]["amount"] == 3 * ATN and client.up_to[-1] == 5 * ATN
+    assert out[0]["amount"] == 3 * UNIT and client.up_to[-1] == 5 * UNIT
 
 
 def test_a_client_close_is_settled_up_to_what_was_served():
@@ -201,8 +236,8 @@ def test_a_client_close_is_settled_up_to_what_was_served():
 def test_a_spent_deposit_no_longer_closes_the_channel():
     """The old rule closed a channel whose deposit no longer covered the
     price; the buyer tops up instead, so the provider only settles."""
-    store = Store({"1": _v(10 * ATN)})
-    client = Client({1: OPEN})                    # deposit 10 ATN, all used
+    store = Store({"1": _v(10 * UNIT)})
+    client = Client({1: OPEN})                    # deposit 10 units, all used
     out = _sweep(store, client)
     assert out[0]["action"] == "settled" and client.closed == []
     assert client.channels[1]["status"] == OPEN
@@ -251,14 +286,14 @@ def test_no_key_leaves_the_voucher_for_a_later_sweep():
     client = Client({1: CLIENT_CLOSING})
     asyncio.run(settle_channels(store, client, lambda p: None, now=NOW))
     assert client.closed == [] and "1" in store.v
-    store = Store({"2": _v(2 * ATN)})
+    store = Store({"2": _v(2 * UNIT)})
     client = Client({2: OPEN})
     asyncio.run(settle_channels(store, client, lambda p: None, now=NOW))
     assert client.settled == []
 
 
 def test_a_channel_serving_a_request_is_left_for_the_next_sweep():
-    store = Store({"1": _v(5 * ATN)}, pending={"1"})
+    store = Store({"1": _v(5 * UNIT)}, pending={"1"})
     client = Client({1: OPEN})
     assert _sweep(store, client, settle_period_s=1, now=NOW + 10 ** 6) == []
     assert client.settled == []
@@ -274,7 +309,7 @@ def test_client_close_window_passed_is_forgotten_without_a_send():
 
 def test_a_failed_settle_keeps_the_voucher_and_the_period():
     ledger = SettlementLog()
-    store = Store({"1": _v(2 * ATN)})
+    store = Store({"1": _v(2 * UNIT)})
     client = Client({1: OPEN})
 
     async def fail(key, cid, cumulative, signature, up_to=None):
@@ -359,8 +394,12 @@ def test_daemon_sweep_settles_with_the_operator_key(tmp_path, monkeypatch):
             raise ConnectionError("no window read in this test")
 
         async def get_channel(self, cid):
-            return {"status": OPEN, "provider": operator, "deposit": "10000",
-                    "claimed": str(claimed[str(cid)]), "closes_at": 0}
+            return {"status": OPEN, "provider": operator, "token": USDC,
+                    "deposit": "10000", "claimed": str(claimed[str(cid)]),
+                    "closes_at": 0}
+
+        async def value_of(self, token, amount):
+            return int(amount) * PARITY[token] // 10 ** 30
 
         async def settle_channel(self, k, cid, cumulative, signature, up_to=None):
             settled.append((k, cid, cumulative, up_to))
@@ -370,7 +409,7 @@ def test_daemon_sweep_settles_with_the_operator_key(tmp_path, monkeypatch):
     monkeypatch.setattr(oc, "ServiceMarketClient", Market)
     store = rt.service_store
     client = "0x" + "12" * 20
-    store.accept_voucher(3, 5000, "0xs", client=client, provider=operator)
+    store.accept_voucher(3, 5000, "0xs", client=client, provider=operator, token=USDC)
     store.consume(3, 1000)
     out = asyncio.run(rt.settle_channels_once())
     assert settled == [] and out["settled"] == []          # just seen
@@ -383,7 +422,7 @@ def test_daemon_sweep_settles_with_the_operator_key(tmp_path, monkeypatch):
     # Kept: the channel stays open and its voucher is the gate's floor.
     assert "3" in store.channel_vouchers()
     # 5000 more served on a new voucher: at the threshold, settled at once.
-    store.accept_voucher(3, 10000, "0xs2", client=client, provider=operator)
+    store.accept_voucher(3, 10000, "0xs2", client=client, provider=operator, token=USDC)
     store.consume(3, 5000)
     out = asyncio.run(rt.settle_channels_once())
     assert settled[-1] == (key, 3, 10000, 6000) and out["settled"][0]["reason"] == "threshold"

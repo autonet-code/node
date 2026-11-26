@@ -28,6 +28,7 @@ from tests.atn.test_service_runner import TOOL, _make_runtime
 PAYER_KEY = "0x" + "11" * 32
 PROVIDER = "0x" + "a1" * 20
 CID = "7"
+USDC = "0x" + "a6" * 20
 SCHEMA = {"type": "object"}
 
 
@@ -49,14 +50,14 @@ def _service(rt, *, measures, prices, voucher=100, process="shared", max_session
                  "reports_usage": ["output_tokens"]})
     res = rt.service_store.register(
         name=name, description="Bytes back.", mode="session", author="user",
-        backing_tool=tool["digest"], prices=prices, voucher=voucher,
+        backing_tool=tool["digest"], token=USDC, prices=prices, voucher=voucher,
         measures=[{"measure": m, "quantity": q} for m, q in measures.items()],
         settings={"model": "echo-large"})
     return rt.service_store.get(res["digest"])
 
 
 def _per_byte(rt, **kw):
-    """1 ATN base unit per byte carried either way."""
+    """1 base unit of the token per byte carried either way."""
     return _service(rt, measures={"gigabytes": 1}, prices={"gigabytes": 10 ** 9}, **kw)
 
 
@@ -89,12 +90,14 @@ class _Bridge:
             return {"ok": False, "reason": "voucher needed"}
         return {"ok": True, "payer": PAYER, "channel_id": cid}
 
-    async def _accept_voucher(self, record, channel_id, cumulative, signature, *, payer=""):
-        self.voucher_calls.append((str(channel_id), int(cumulative), payer))
+    async def _accept_voucher(self, record, channel_id, cumulative, signature, *, payer="",
+                              token=None):
+        self.voucher_calls.append((str(channel_id), int(cumulative), payer, token))
         if not str(signature).startswith("0xok"):
             return {"ok": False, "reason": "not the channel's client"}
         self.runtime.service_store.accept_voucher(channel_id, int(cumulative), str(signature),
-                                                  client=payer, provider=PROVIDER)
+                                                  client=payer, provider=PROVIDER,
+                                                  token=token or record.token)
         return {"ok": True, "client": payer}
 
 
@@ -137,7 +140,8 @@ async def env(tmp_path):
 
 def _hold(store, cumulative):
     """The buyer's credits as the provider holds them (a checked voucher)."""
-    store.accept_voucher(CID, cumulative, "0xok", client=PAYER, provider=PROVIDER)
+    store.accept_voucher(CID, cumulative, "0xok", client=PAYER, provider=PROVIDER,
+                         token=USDC)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +166,7 @@ async def test_openings_are_refused_before_anything_is_paid(env):
         code="print('{}')\n")
     req = env.store.register(name="once", description="One reply.", mode="request",
                              author="user", backing_tool=tool["digest"],
-                             prices={"requests": 5}, voucher=50)
+                             token=USDC, prices={"requests": 5}, voucher=50)
     assert "request service" in await refused(_opening(store.get(req["digest"])))
     store.retire(req["digest"])
     assert "retired" in await refused(_opening(store.get(req["digest"])))
@@ -207,6 +211,7 @@ async def test_accepting_quotes_the_prices_and_ending_gives_everything_back(env)
     r = out.reply["result"]
     assert r["protocol"]["id"] == "echo/1" and r["settings"] == {"model": "echo-large"}
     assert r["prices"] == {"seconds": 3, "output_tokens": 20} and r["voucher"] == 500
+    assert r["token"] == USDC
     assert r["measures"] == [{"measure": "seconds", "quantity": 60},
                              {"measure": "output_tokens", "quantity": 1000}]
     assert (r["consumed"], r["cumulative"], r["channel_id"]) == (0, 500, 7)
@@ -396,7 +401,8 @@ async def test_a_voucher_in_the_session_lets_it_go_on(env, serving):
     assert consumed == 120 and cumulative - consumed <= 100
     # Checked on the session's channel, for the payer the gate verified.
     assert env.bridge.voucher_calls
-    assert all(c == (CID, c[1], PAYER) for c in env.bridge.voucher_calls)
+    # Each voucher in the session is held in the token the session opened with.
+    assert all(c == (CID, c[1], PAYER, USDC) for c in env.bridge.voucher_calls)
     # A voucher the chain check refuses ends the session.
     bad = _Pays(size=100, signature="0xforged")
 
@@ -434,9 +440,10 @@ def chain(monkeypatch):
     made = []
 
     async def get_channel(self, channel_id):
-        return {"status": service_channels.OPEN}
+        return {"status": service_channels.OPEN, "token": USDC}
 
-    def sign_voucher(self, private_key, channel_id, cumulative_amount):
+    def sign_voucher(self, private_key, channel_id, token, cumulative_amount):
+        assert token == USDC
         return f"0xok{cumulative_amount}"
     monkeypatch.setattr(oc.ServiceMarketClient, "get_channel", get_channel)
     monkeypatch.setattr(oc.ServiceMarketClient, "sign_voucher", sign_voucher)
@@ -470,7 +477,11 @@ async def test_a_session_needs_credits_with_the_provider(env, serving, chain):
     rec = _per_byte(env.rt)
     out = await _open(env, serving, rec)
     assert "open credits first" in out["error"]
-    env.rt.channel_book.set_open(PAYER, PROVIDER, int(CID), 1000)
+    # Credits in another token are not credits for this service.
+    env.rt.channel_book.set_open(PAYER, PROVIDER, "0x" + "d1" * 20, 9, 10 ** 21)
+    out = await _open(env, serving, rec)
+    assert "open credits first" in out["error"] and USDC in out["error"]
+    env.rt.channel_book.set_open(PAYER, PROVIDER, USDC, int(CID), 1000)
     out = await _open(env, serving, rec, payer_key="")
     assert "needs a key" in out["error"]
     assert env.bridge.gate_calls == [] and chain == []   # nothing was sent or signed
@@ -481,10 +492,11 @@ async def test_a_local_port_reaches_the_tool_and_pays_ahead_once(env, serving, c
     local program's bytes reach the tool and come back."""
     rec = _per_byte(env.rt)
     book = env.rt.channel_book
-    book.set_open(PAYER, PROVIDER, int(CID), 1000)
+    book.set_open(PAYER, PROVIDER, USDC, int(CID), 1000)
     out = await _open(env, serving, rec)
     assert out.get("ok"), out
     assert out["path"] == "direct" and out["protocol"]["id"] == "echo/1"
+    assert out["token"] == USDC
     assert out["prices"] == {"gigabytes": 10 ** 9} and out["voucher"] == 100
     assert out["credits"]["paid_ahead"] == 100
     first = env.bridge.gate_calls[-1][0]
@@ -509,7 +521,7 @@ async def test_vouchers_in_the_session_are_the_quoted_size(env, serving, chain, 
     listed = dict(rec.price_list, voucher=50)
     monkeypatch.setattr(ServiceCatalog, "price_list", lambda self, d, p="": dict(listed))
     book = env.rt.channel_book
-    book.set_open(PAYER, PROVIDER, int(CID), 5000)
+    book.set_open(PAYER, PROVIDER, USDC, int(CID), 5000)
     out = await _open(env, serving, rec)
     assert out.get("ok"), out
     assert await _through(out, b"q" * 300) == b"q" * 300
@@ -522,12 +534,12 @@ async def test_vouchers_in_the_session_are_the_quoted_size(env, serving, chain, 
         prev = total
     consumed, cumulative = env.store.balance(CID)
     assert consumed == 600 and 0 <= cumulative - consumed <= 100
-    assert book.get(PAYER, PROVIDER)["cumulative"] == cumulative
+    assert book.get(PAYER, PROVIDER, USDC)["cumulative"] == cumulative
 
 
 async def test_a_refused_session_is_an_error(env, serving, chain):
     rec = _per_byte(env.rt)
-    env.rt.channel_book.set_open(PAYER, PROVIDER, int(CID), 1000)
+    env.rt.channel_book.set_open(PAYER, PROVIDER, USDC, int(CID), 1000)
     env.store.retire(rec.digest)
     out = await _open(env, serving, rec)
     assert "refused the session" in out["error"] and "retired" in out["error"]

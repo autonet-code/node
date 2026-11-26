@@ -293,6 +293,25 @@ class TestPublish:
         assert "at bond" in out["error"] and out["txs"] == ["0xreg"]
         assert not rt.tool_store.get(res["digest"]).published
 
+    async def test_the_bond_waits_for_the_index_token_tool_bond(self, tmp_path):
+        """Until ToolBond takes its stake in an index token, the bond step
+        refuses with a clear reason and the tool stays private."""
+        rt = _make_runtime(tmp_path)
+        await _agent(rt, "a")
+        client = FakeClient()
+
+        async def pending(key, digest, amount=None):
+            from atn.runtime.tool_bond import BOND_PENDING
+            raise NotImplementedError(BOND_PENDING)
+        client.register_and_bond = pending
+        rt.tool_bond_client = client
+        res = await _register(rt, "a", novelty=NOVEL)
+        out = await execute_tool("publish_tool", {"digest": res["digest"]}, rt,
+                                 caller_id="a")
+        assert "ToolBond stake not made" in out["error"]
+        assert "index-token version" in out["error"]
+        assert not rt.tool_store.get(res["digest"]).published
+
     async def test_owner_authored_refused(self, tmp_path):
         rt = _make_runtime(tmp_path)
         rt._config.autonet.owner_wallet = "0x" + "44" * 20
@@ -572,3 +591,30 @@ async def test_publish_after_registration_reauthors_without_a_redo(tmp_path):
     if before.lower() != defn.identity.address.lower():
         assert out["digest"] != res["digest"]
     assert client.bonds and client.bonds[-1][1] == out["digest"]
+
+
+async def test_register_and_bond_registers_then_refuses_the_bond(monkeypatch):
+    """The real client: registerTool goes out when the digest is unclaimed,
+    then the bond raises NotImplementedError (Substrate is no longer a token
+    to approve, and ToolBond's index-token version is not written yet);
+    nothing is approved or bonded."""
+    from atn.runtime.tool_bond import BOND_PENDING, ToolBondClient
+    client = ToolBondClient(None)
+    writes = []
+
+    async def tool_author(digest):
+        return "0x" + "00" * 20
+
+    async def min_stake():
+        return 100
+
+    async def write(key, build, gas_floor=300_000):
+        writes.append(build)
+        return {"success": True, "tx_hash": "0xreg"}
+    monkeypatch.setattr(client, "tool_author", tool_author)
+    monkeypatch.setattr(client, "min_stake", min_stake)
+    monkeypatch.setattr(client, "_write", write)
+    with pytest.raises(NotImplementedError, match="index-token version"):
+        await client.register_and_bond("0x" + "11" * 32, "ab" * 32)
+    assert len(writes) == 1          # registerTool only
+    assert "ToolBond" in BOND_PENDING

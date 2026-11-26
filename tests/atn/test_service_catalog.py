@@ -53,6 +53,9 @@ def _spec(name: str, description: str, key: str = KEY_A, mode: str = "request",
     return spec
 
 
+USDC = "0x" + "a6" * 20
+
+
 def _prices(spec: dict, key: str = KEY_A, *, prices=None, voucher: int = 500,
             seq: int = 1, provider: str = "") -> dict:
     if prices is None:
@@ -60,7 +63,7 @@ def _prices(spec: dict, key: str = KEY_A, *, prices=None, voucher: int = 500,
                   else {"seconds": 3, "gigabytes": 40})
     pl = build_price_list(service=spec_digest(spec),
                           provider=provider or Account.from_key(key).address,
-                          prices=prices, voucher=voucher, seq=seq, ts=seq)
+                          token=USDC, prices=prices, voucher=voucher, seq=seq, ts=seq)
     return sign_price_list(pl, key)
 
 
@@ -441,6 +444,7 @@ class TestSearch:
         assert row["settings"] == {"model": "llama3.1:70b-instruct"}
         assert row["measures"] == [{"measure": "requests", "quantity": 1}]
         assert row["prices"] == {"requests": 100} and row["voucher"] == 500
+        assert row["token"] == USDC
         assert row["price_list"]["sig"]
         assert row["registry_price"] == 90 and row["protocol"] is None
         assert row["input_schema"] == spec["input_schema"]
@@ -456,6 +460,7 @@ class TestSearch:
         assert [m["measure"] for m in row["measures"]] == ["seconds", "gigabytes"]
         # Until its price list arrives a row shows no prices.
         assert row["prices"] == {} and row["voucher"] == 0 and row["price_list"] is None
+        assert row["token"] == ""
         assert row["registry_price"] is None
 
     def test_relevance_order_and_newest_first_without_a_query(self):

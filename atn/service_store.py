@@ -12,11 +12,14 @@ no verdict claims, no mint.
 This store owns spec and price-list build/sign/persist, the on-chain
 service number each registration returned, the request log, the replay
 guard for direct payments, and the credit ledger: per payment channel (a
-buyer's credits with this provider, for all its services), the best
-voucher (``cumulative``, what the provider can cash in) and what has been
-served against it (``consumed``). A request or a session is served while
-``consumed`` stays within ``cumulative``; vouchers pay ahead by the price
-list's voucher size, so the most a buyer has at risk is one voucher.
+buyer's credits with this provider in one token, for all its services),
+the channel's token, the best voucher (``cumulative``, what the provider
+can cash in) and what has been served against it (``consumed``). A
+request or a session is served while ``consumed`` stays within
+``cumulative``; vouchers pay ahead by the price list's voucher size, so
+the most a buyer has at risk is one voucher. Every amount is in the base
+units of the price list's token, and a channel pays for a service only
+when its token is the price list's.
 
 The substrate package (``nodes.*``) is imported lazily; on a standalone
 atn install registration fails loudly instead of degrading silently.
@@ -35,6 +38,8 @@ from typing import TYPE_CHECKING, Any
 
 from .service_prices import (
     build_price_list,
+    norm_token,
+    price_token,
     sign_price_list,
     validate_price_list,
 )
@@ -111,6 +116,11 @@ class ServiceRecord:
         return dict(p) if isinstance(p, dict) else {}
 
     @property
+    def token(self) -> str:
+        """The token the price list names (lowercase 0x; "" when none)."""
+        return price_token(self.price_list)
+
+    @property
     def voucher(self) -> int:
         try:
             return int(self.price_list.get("voucher") or 0) if self.price_list else 0
@@ -143,7 +153,7 @@ class ServiceStore:
         # ask) plus the latest voucher signature the provider settles with.
         self._seen_path = self._dir / "served_requests.jsonl"
         # The credit ledger (see the module docstring): channel id ->
-        # {cumulative, signature, consumed, client, provider, ts}.
+        # {token, cumulative, signature, consumed, client, provider, ts}.
         self._voucher_path = self._dir / "channel_vouchers.json"
         self._records: dict[str, ServiceRecord] = {}
         # Called with the record once the chain numbers a registration, and
@@ -186,6 +196,7 @@ class ServiceStore:
         mode: str,
         author: str,
         backing_tool: str,
+        token: str,
         prices: dict[str, Any],
         voucher: int,
         settings: dict[str, Any] | None = None,
@@ -204,9 +215,11 @@ class ServiceStore:
         service's input and output schema are the tool's unless given; a
         session service's protocol is the one the tool's manifest names
         (its ``session`` block), and it can charge for tokens only when the
-        tool reports them. ``prices`` is ``{measure: amount}`` in ATN base
-        units for the spec's measures (``{"requests": amount}`` for a
-        request service); ``voucher`` how much each voucher pays ahead."""
+        tool reports them. ``token`` is the token the service is paid in (a
+        token of the value index; the caller checks it is accepted);
+        ``prices`` is ``{measure: amount}`` in its base units for the spec's
+        measures (``{"requests": amount}`` for a request service);
+        ``voucher`` how much each voucher pays ahead."""
         blobs = self._blob_store()
         tool = self._backing(backing_tool)
         manifest = tool.manifest
@@ -254,7 +267,7 @@ class ServiceStore:
         # list with a lower sequence than one already announced.
         prior = self._records.get(digest)
         seq = int((prior.price_list or {}).get("seq") or 0) + 1 if prior else 1
-        price_list = self._price_list(author, digest, spec, prices, voucher, seq=seq)
+        price_list = self._price_list(author, digest, spec, token, prices, voucher, seq=seq)
         record = ServiceRecord(digest=digest, spec=spec, backing_tool=tool.digest,
                                registered_ts=int(time.time()), price_list=price_list,
                                service_id=prior.service_id if prior else None)
@@ -264,15 +277,18 @@ class ServiceStore:
         return {"digest": digest, "spec": spec, "price_list": price_list}
 
     def set_prices(self, digest: str, prices: dict[str, Any],
-                   voucher: int | None = None) -> dict[str, Any]:
+                   voucher: int | None = None, token: str | None = None) -> dict[str, Any]:
         """A new price list for one of this daemon's services (no new spec,
-        no transaction). Returns it, or raises ValueError."""
+        no transaction). ``token`` None keeps the list's token; a new token
+        reprices the service in it (every amount is in its base units).
+        Returns the list, or raises ValueError."""
         record = self._records.get(digest)
         if record is None:
             raise ValueError(f"unknown service {digest[:16]}")
         seq = int((record.price_list or {}).get("seq") or 0) + 1
         record.price_list = self._price_list(
-            record.author, digest, record.spec, prices,
+            record.author, digest, record.spec,
+            record.token if token is None else token, prices,
             record.voucher if voucher is None else int(voucher), seq=seq)
         self._persist()
         hook = self.on_prices
@@ -283,15 +299,16 @@ class ServiceStore:
                 log.debug("service price hook failed", exc_info=True)
         return record.price_list
 
-    def _price_list(self, author: str, digest: str, spec: dict[str, Any],
+    def _price_list(self, author: str, digest: str, spec: dict[str, Any], token: str,
                     prices: dict[str, Any], voucher: int, *, seq: int) -> dict[str, Any]:
         try:
             clean = {str(k): int(v) for k, v in (prices or {}).items()}
         except (TypeError, ValueError):
-            raise ValueError("prices must be whole ATN base units per measure") from None
+            raise ValueError("prices must be whole base units of the token, "
+                             "per measure") from None
         pl = build_price_list(service=digest, provider=self._author_address(author),
-                              prices=clean, voucher=int(voucher or 0), seq=seq,
-                              ts=int(time.time()))
+                              token=token, prices=clean, voucher=int(voucher or 0),
+                              seq=seq, ts=int(time.time()))
         errors = validate_price_list(pl, spec)
         if errors:
             raise ValueError("invalid price list: " + "; ".join(errors))
@@ -392,16 +409,18 @@ class ServiceStore:
         payer: str,
         ok: bool,
         amount: str = "",
-        token: str = "ATN",
+        token: str | None = None,
     ) -> None:
         """Log one request the payment gate let through. Local ledger
-        first — never lost to a substrate outage.
+        first: never lost to a substrate outage.
 
         ``payer`` is the address the gate verified as having paid, or ""
         when nothing was paid (a free service, the no-chain dev degrade);
-        never the client the request names. ``token`` is a fixed "ATN"
-        label (settlement is ATN-only, ratified 2026-07-10)."""
+        never the client the request names. ``amount`` is in the base units
+        of ``token``, the service's price list token when None."""
         record = self._records.get(spec_digest)
+        if token is None:
+            token = record.token if record else ""
         payer = str(payer or "").strip().lower()
         self._request_seq += 1
         row = {
@@ -621,17 +640,27 @@ class ServiceStore:
             return consumed <= cumulative
 
     def accept_voucher(self, channel_id: str | int, cumulative: int, signature: str,
-                       *, client: str, provider: str) -> bool:
+                       *, client: str, provider: str, token: str) -> bool:
         """Hold a voucher the gate verified: kept when its running total is
         above the one held (a lower one never regresses what the provider
-        can cash in). Returns whether it was kept."""
+        can cash in). ``token`` is the channel's token (from the chain);
+        a channel's ledger keeps the token it was first credited in, and a
+        voucher naming another is refused (ValueError). Returns whether it
+        was kept."""
+        token = norm_token(token)
+        if not token:
+            raise ValueError("a voucher's channel names its token")
         with self._ledger_lock:
             cid = str(channel_id)
             entry = self._channel_vouchers.get(cid)
+            if entry is not None and norm_token(entry.get("token")) != token:
+                raise ValueError(f"channel {cid} is held in token "
+                                 f"{entry.get('token')}, not {token}")
             if entry is not None and int(cumulative) <= int(entry.get("cumulative") or 0):
                 return False
             new = dict(entry or {"consumed": 0})
-            new.update({"cumulative": int(cumulative), "signature": str(signature),
+            new.update({"token": token, "cumulative": int(cumulative),
+                        "signature": str(signature),
                         "client": str(client or "").lower(),
                         "provider": str(provider or "").lower(), "ts": int(time.time())})
             self._channel_vouchers[cid] = new

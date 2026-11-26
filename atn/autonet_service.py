@@ -122,10 +122,10 @@ class AutonetState:
     gas_symbol: str = "gas"
     gas_decimals: int = 18
     block_explorer: str = ""
-    # The jurisdiction's token symbols, read from its RepToken and
-    # Substrate; the app labels with these and falls back to REP / ATN.
+    # The jurisdiction's REP symbol, read from its RepToken; the app labels
+    # with it and falls back to REP. Money is in the value index's tokens,
+    # each labelled with its own symbol.
     rep_symbol: str = ""
-    atn_symbol: str = ""
     registry_address: str = ""
     token_address: str = ""
     economy_address: str = ""
@@ -185,7 +185,6 @@ class AutonetState:
             "gas_decimals": self.gas_decimals,
             "block_explorer": self.block_explorer,
             "rep_symbol": self.rep_symbol,
-            "atn_symbol": self.atn_symbol,
             "registry_address": self.registry_address,
             "token_address": self.token_address,
             "economy_address": self.economy_address,
@@ -355,7 +354,6 @@ class AutonetBridge:
                                  if self.network_joined else ""))
         from .config import token_symbol
         st.rep_symbol = token_symbol(getattr(c, "rep_token_address", ""), c.rpc_url)
-        st.atn_symbol = token_symbol(st.substrate_address, c.rpc_url)
 
         errors: list[str] = []
         from .config import NO_JURISDICTION_MESSAGE, jurisdiction_configured

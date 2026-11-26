@@ -56,9 +56,13 @@ def _tool(rt, name="echo_tool", session=None):
         author="user", code=ECHO_CODE + (f"# {name}\n"), session=session)["digest"]
 
 
+USDC = "0x" + "aa" * 20
+DAI = "0x" + "bb" * 20
+
+
 def _request_svc(rt, tool=None, **kw):
     args = dict(name="echo", description="Echo service.", mode="request",
-                author="user", backing_tool=tool or _tool(rt),
+                author="user", backing_tool=tool or _tool(rt), token=USDC,
                 prices={"requests": 5}, voucher=50)
     args.update(kw)
     return rt.service_store.register(**args)
@@ -70,7 +74,7 @@ def _session_svc(rt, **kw):
                 settings={"model": "qwen2.5:14b"},
                 measures=[{"measure": "seconds", "quantity": 60},
                           {"measure": "input_tokens", "quantity": 1000}],
-                prices={"seconds": 10, "input_tokens": 3}, voucher=100)
+                token=USDC, prices={"seconds": 10, "input_tokens": 3}, voucher=100)
     args.update(kw)
     return rt.service_store.register(**args)
 
@@ -94,10 +98,12 @@ def test_request_service_copies_the_tools_schema_and_is_signed(rt):
     assert spec["author_pubkey"] == ADDR and signed_by_author(spec)
     assert pl["service"] == res["digest"] and pl["provider"] == ADDR
     assert pl["prices"] == {"requests": 5} and pl["voucher"] == 50 and pl["seq"] == 1
+    assert pl["token"] == USDC
     assert signed_by_provider(pl) and validate_price_list(pl, spec) == []
     record = rt.service_store.get(res["digest"])
     assert record.backing_tool == tool and record.mode == "request"
     assert record.prices == {"requests": 5} and record.voucher == 50
+    assert record.token == USDC
 
 
 def test_backing_tool_by_name_and_explicit_schema(rt):
@@ -154,8 +160,10 @@ def test_price_list_is_validated_at_registration(rt):
         _request_svc(rt, prices={"seconds": 5})
     with pytest.raises(ValueError, match="voucher size above 0"):
         _request_svc(rt, voucher=0)
-    with pytest.raises(ValueError, match="whole ATN"):
+    with pytest.raises(ValueError, match="whole base units"):
         _request_svc(rt, prices={"requests": "five"})
+    with pytest.raises(ValueError, match="names the token"):
+        _request_svc(rt, token="")
     with pytest.raises(ValueError, match="exactly"):
         _session_svc(rt, prices={"seconds": 10})
     assert len(rt.service_store) == 0
@@ -176,6 +184,7 @@ def test_set_prices_bumps_seq_and_keeps_the_spec(rt):
     record = rt.service_store.get(res["digest"])
     assert record.spec == res["spec"] and record.price_list == pl
     assert [r.digest for r in seen] == [res["digest"]] * 2
+    assert pl["token"] == USDC                           # kept when not named
 
     with pytest.raises(ValueError, match="exactly"):
         rt.service_store.set_prices(res["digest"], {"seconds": 1})
@@ -186,6 +195,11 @@ def test_set_prices_bumps_seq_and_keeps_the_spec(rt):
     # A failing hook never fails the change.
     rt.service_store.on_prices = lambda r: 1 / 0
     assert rt.service_store.set_prices(res["digest"], {"requests": 9})["seq"] == 4
+
+    # A new token reprices the service in it.
+    pl = rt.service_store.set_prices(res["digest"], {"requests": 5 * 10 ** 12}, token=DAI)
+    assert (pl["token"], pl["prices"], pl["seq"]) == (DAI, {"requests": 5 * 10 ** 12}, 5)
+    assert rt.service_store.get(res["digest"]).token == DAI and signed_by_provider(pl)
 
 
 def test_service_number_hook_and_persistence(rt):
@@ -273,6 +287,7 @@ def test_request_log_summary_and_rotation(rt):
     rows = [json.loads(line) for name in ("requests.1.jsonl", "requests.jsonl")
             for line in (services / name).read_text().splitlines()]
     assert [r["payer"] for r in rows][-2:] == [f"0x{3:040x}", ""]
+    assert {r["token"] for r in rows} == {USDC}          # the price list's token
 
     # The totals are kept, not re-read from the rows.
     (services / "requests.jsonl").unlink()
@@ -314,8 +329,9 @@ def test_used_up_ids_are_forgotten_past_the_horizon(rt):
 # ---------------------------------------------------------------------------
 
 
-def _accept(store, cid, cum, sig="0xsig"):
-    return store.accept_voucher(cid, cum, sig, client="0xC", provider="0xP")
+def _accept(store, cid, cum, sig="0xsig", token=USDC):
+    return store.accept_voucher(cid, cum, sig, client="0xC", provider="0xP",
+                                token=token)
 
 
 def test_vouchers_only_raise_the_running_total(rt):
@@ -328,7 +344,19 @@ def test_vouchers_only_raise_the_running_total(rt):
     ledger = store.channel_ledger(7)
     assert (ledger["cumulative"], ledger["signature"]) == (150, "0xd")
     assert (ledger["client"], ledger["provider"]) == ("0xc", "0xp")
+    assert ledger["token"] == USDC
     assert store.kept_channel_cumulative(7) == 150 and store.balance(7) == (0, 150)
+
+
+def test_a_channels_ledger_keeps_its_token(rt):
+    store = rt.service_store
+    assert _accept(store, 8, 100, token="0x" + "AA" * 20)  # normalized
+    with pytest.raises(ValueError, match="held in token"):
+        _accept(store, 8, 200, token=DAI)
+    with pytest.raises(ValueError, match="names its token"):
+        _accept(store, 9, 200, token="")
+    assert store.channel_ledger(8)["cumulative"] == 100
+    assert _reload(rt).channel_ledger(8)["token"] == USDC
 
 
 def test_consume_refund_paid_up(rt):

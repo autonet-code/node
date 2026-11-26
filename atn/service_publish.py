@@ -5,11 +5,14 @@ one path the owner's app (WS ``register_service``) and the Agents'
 The form a provider fills in: how buyers use it (``mode``: ``request`` or
 ``session``), the tool that does the work (``backing_tool``, a tool
 registered on this daemon), what sets it apart (``settings``, such as the
-model), the listing (``name``, ``description``, ``image_uri``), what it
-charges for and its prices (``prices``: ``{measure: amount}``; a request
-service may give ``price``, ATN per request), how much each voucher pays
-ahead (``voucher``), and optionally a price recorded in the registry
-(``registry_price``, unenforced). Amounts are ATN base units (6 decimals).
+model), the listing (``name``, ``description``, ``image_uri``), the token
+it is paid in (``token``: a token of the jurisdiction's value index, which
+``list_index_tokens`` lists), what it charges for and its prices
+(``prices``: ``{measure: amount}``; a request service may give ``price``,
+per request), how much each voucher pays ahead (``voucher``), and
+optionally a price recorded in the registry (``registry_price``,
+unenforced). Amounts are whole base units of the token, at its own
+decimals (1 USDC is 1000000, 1 DAI is 10**18).
 A codebase may keep these fields in ``autonet-services/<name>.json``
 (``path``); the arguments given override the file's.
 
@@ -30,7 +33,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 FIELDS = ("name", "description", "mode", "backing_tool", "settings", "measures",
-          "prices", "price", "voucher", "registry_price", "image_uri",
+          "token", "prices", "price", "voucher", "registry_price", "image_uri",
           "version_of", "input_schema", "output_schema")
 
 
@@ -38,10 +41,34 @@ def _amount(value: Any, what: str) -> int:
     try:
         n = int(str(value).strip())
     except (TypeError, ValueError):
-        raise ValueError(f"{what} must be a whole number of ATN base units") from None
+        raise ValueError(f"{what} must be a whole number of the token's base "
+                         "units") from None
     if n < 0:
         raise ValueError(f"{what} must not be negative")
     return n
+
+
+async def check_token(runtime: Any, token: Any) -> str:
+    """The token a price list may name: a token address (normalized), which
+    Substrate accepts now (``acceptsToken``) when this daemon has a chain.
+    Raises ValueError otherwise. Without a chain (local dev) a well-formed
+    address is taken as it is."""
+    from .on_chain import OnChainService
+    from .service_prices import norm_token
+
+    tok = norm_token(token)
+    if not tok:
+        raise ValueError("name the token the service is paid in ('token': a token "
+                         "of the value index, 0x address; list_index_tokens lists "
+                         "them)")
+    svc = OnChainService(runtime._config.rpb)
+    if not svc.available:
+        return tok
+    if not await svc.accepts_token(tok):
+        raise ValueError(f"token {tok} is not in the jurisdiction's value index, so "
+                         "the service cannot be paid in it (list_index_tokens lists "
+                         "the tokens that can)")
+    return tok
 
 
 def read_service_file(path: str) -> dict[str, Any]:
@@ -75,9 +102,9 @@ def form_from(msg: dict[str, Any]) -> dict[str, Any]:
     if mode == "request" and prices is None and fields.get("price") is not None:
         prices = {"requests": fields["price"]}
     if not isinstance(prices, dict) or not prices:
-        raise ValueError("name the prices: 'price' (ATN base units per request) for "
-                         "a request service, or 'prices' ({measure: amount}) for a "
-                         "session service")
+        raise ValueError("name the prices: 'price' (base units of the token per "
+                         "request) for a request service, or 'prices' ({measure: "
+                         "amount}) for a session service")
     fields["prices"] = {str(k): _amount(v, f"the price of {k}") for k, v in prices.items()}
     fields["voucher"] = _amount(fields.get("voucher") or 0, "voucher")
     fields["registry_price"] = _amount(fields.get("registry_price") or 0, "registry_price")
@@ -102,12 +129,14 @@ async def publish_service(runtime: Any, *, author: str, signing_key: str,
     if store is None:
         return {"error": "Service store not available on this daemon."}
     try:
+        token = await check_token(runtime, form.get("token"))
         built = store.register(
             name=str(form.get("name") or ""),
             description=str(form.get("description") or ""),
             mode=str(form.get("mode") or ""),
             author=author,
             backing_tool=str(form.get("backing_tool") or ""),
+            token=token,
             prices=form["prices"],
             voucher=int(form["voucher"]),
             settings=form.get("settings"),

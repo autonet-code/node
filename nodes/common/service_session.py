@@ -105,7 +105,7 @@ class Ledger:
         return True
 
     def balance(self) -> tuple:
-        """``(consumed, cumulative)`` in ATN base units."""
+        """``(consumed, cumulative)`` in base units of the session's token."""
         return (0, 0)
 
 
@@ -245,8 +245,8 @@ class ServiceSession:
             return b""
 
     def charge(self, amount: int) -> None:
-        """Provider: record ``amount`` (ATN base units) served. Never
-        blocks; ``paid_up`` decides whether serving goes on."""
+        """Provider: record ``amount`` (base units of the session's token)
+        served. Never blocks; ``paid_up`` decides whether serving goes on."""
         if self.ledger is not None and int(amount) > 0:
             self.ledger.charge(int(amount))
 

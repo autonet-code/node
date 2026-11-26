@@ -1,6 +1,6 @@
 """The buyer's credits with service providers (atn/service_channels.py,
-Decision 2026-11-12): one payment channel per (buyer, provider), opened and
-closed by the Agent; vouchers pay ahead by the provider's voucher size,
+Decision 2026-11-12): one payment channel per (buyer, provider, token),
+opened and closed by the Agent, only in a token of the value index; vouchers pay ahead by the provider's voucher size,
 never past the deposit; a request carries a voucher only when the credit
 the provider holds does not cover its price; the remainder of closed
 credits comes back after the challenge window. Top-ups are tested in
@@ -22,10 +22,12 @@ from atn.service_channels import (
     next_voucher,
     open_credits,
     request_on_credits,
+    resolve_credits_token,
     sweep_refunds,
 )
 
 PAYER, PROVIDER, OTHER = "0xPayer", "0xProvider", "0xOther"
+USDC, DAI, STRAY = "0x" + "aa" * 20, "0x" + "bb" * 20, "0x" + "cc" * 20
 DIGEST = "ab" * 32
 PRICE, VOUCHER, DEPOSIT = 1000, 3000, 10_000
 
@@ -36,11 +38,15 @@ class Market:
     def __init__(self):
         self.state: dict[int, dict] = {}
         self.opened, self.closed, self.withdrawn = [], [], []
+        self.index = {USDC, DAI}
 
-    async def open_channel(self, key, provider, deposit):
+    async def accepts_token(self, token):
+        return token in self.index
+
+    async def open_channel(self, key, provider, token, deposit):
         cid = len(self.opened) + 1
-        self.opened.append((provider, deposit))
-        self.state[cid] = {"status": OPEN, "closes_at": 0}
+        self.opened.append((provider, token, deposit))
+        self.state[cid] = {"status": OPEN, "closes_at": 0, "token": token}
         return {"success": True, "channel_id": cid, "tx_hash": "0xo"}
 
     async def get_channel(self, cid):
@@ -49,57 +55,111 @@ class Market:
 
     async def start_close(self, key, cid):
         self.closed.append(cid)
-        self.state[cid] = {"status": CLIENT_CLOSING, "closes_at": 100}
+        self.state[cid] = {**self.state[cid], "status": CLIENT_CLOSING, "closes_at": 100}
         return {"success": True, "tx_hash": "0xc"}
 
     async def withdraw_remainder(self, key, cid):
         self.withdrawn.append(cid)
-        self.state[cid] = {"status": SETTLED, "closes_at": 0}
+        self.state[cid] = {**self.state[cid], "status": SETTLED, "closes_at": 0}
         return {"success": True}
 
-    def sign_voucher(self, key, cid, cumulative):
-        return f"sig:{cid}:{cumulative}"
+    def sign_voucher(self, key, cid, token, cumulative):
+        return f"sig:{cid}:{token[:4]}:{cumulative}"
 
 
-async def _opened(tmp_path, deposit=DEPOSIT):
+async def _opened(tmp_path, deposit=DEPOSIT, token=USDC):
     book, m = ChannelBook(tmp_path / "ch.json"), Market()
-    assert (await open_credits(book, m, "k", PAYER, PROVIDER, deposit))["ok"]
+    assert (await open_credits(book, m, "k", PAYER, PROVIDER, token, deposit))["ok"]
     return book, m
 
 
 @pytest.mark.asyncio
-async def test_open_credits_once_per_provider(tmp_path):
+async def test_open_credits_once_per_provider_and_token(tmp_path):
     book, m = await _opened(tmp_path)
-    assert book.get(PAYER, PROVIDER)["deposit"] == DEPOSIT
-    again = await open_credits(book, m, "k", PAYER, PROVIDER, 500)
+    assert book.get(PAYER, PROVIDER, USDC)["deposit"] == DEPOSIT
+    assert book.get(PAYER, PROVIDER, USDC)["token"] == USDC
+    again = await open_credits(book, m, "k", PAYER, PROVIDER, USDC, 500)
     assert "already open" in again["error"] and again["credits"]["deposit"] == DEPOSIT
-    assert "deposit above 0" in (await open_credits(book, m, "k", PAYER, OTHER, 0))["error"]
-    assert (await open_credits(book, m, "k", PAYER, OTHER, 500))["ok"]
-    assert m.opened == [(PROVIDER, DEPOSIT), (OTHER, 500)]
+    assert "deposit above 0" in (
+        await open_credits(book, m, "k", PAYER, OTHER, USDC, 0))["error"]
+    assert (await open_credits(book, m, "k", PAYER, OTHER, USDC, 500))["ok"]
+    assert m.opened == [(PROVIDER, USDC, DEPOSIT), (OTHER, USDC, 500)]
     # Kept across a restart.
-    assert ChannelBook(tmp_path / "ch.json").get(PAYER, PROVIDER)["channel_id"] == 1
+    assert ChannelBook(tmp_path / "ch.json").get(PAYER, PROVIDER, USDC)["channel_id"] == 1
     # The provider closed them: new credits replace them, the old channel
     # waits for its refund.
-    m.state[1] = {"status": CLOSING, "closes_at": 100}
-    res = await open_credits(book, m, "k", PAYER, PROVIDER, 700)
+    m.state[1] = {"status": CLOSING, "closes_at": 100, "token": USDC}
+    res = await open_credits(book, m, "k", PAYER, PROVIDER, USDC, 700)
     assert res["ok"] and res["credits"]["channel_id"] == 3
     assert "1" in book.closing()
 
 
 @pytest.mark.asyncio
+async def test_credits_are_opened_only_in_an_index_token(tmp_path):
+    book, m = ChannelBook(tmp_path / "ch.json"), Market()
+    out = await open_credits(book, m, "k", PAYER, PROVIDER, STRAY, DEPOSIT)
+    assert "not in the value index" in out["error"]
+    out = await open_credits(book, m, "k", PAYER, PROVIDER, "", DEPOSIT)
+    assert "name the token" in out["error"]
+    assert m.opened == [] and book.all_open() == []
+
+
+@pytest.mark.asyncio
+async def test_credits_in_two_tokens_are_kept_apart(tmp_path):
+    book, m = await _opened(tmp_path)
+    assert (await open_credits(book, m, "k", PAYER, PROVIDER, DAI, 5 * 10 ** 18))["ok"]
+    usdc, dai = book.get(PAYER, PROVIDER, USDC), book.get(PAYER, PROVIDER, DAI)
+    assert (usdc["channel_id"], usdc["deposit"]) == (1, DEPOSIT)
+    assert (dai["channel_id"], dai["deposit"]) == (2, 5 * 10 ** 18)
+    # A voucher on the USDC credits moves only them, signed over USDC.
+    v = await next_voucher(book, m, "k", PAYER, PROVIDER, USDC, need=PRICE, voucher=VOUCHER)
+    assert v["channel_id"] == 1 and v["signature"].startswith("sig:1:0xaa")
+    assert book.get(PAYER, PROVIDER, USDC)["cumulative"] == VOUCHER
+    assert book.get(PAYER, PROVIDER, DAI)["cumulative"] == 0
+    # A provider's count for one channel never lands on the other.
+    book.note_balance(PAYER, PROVIDER, DAI, 1, 500, VOUCHER)
+    assert book.get(PAYER, PROVIDER, DAI)["consumed"] == 0
+    # The book refuses a voucher when the chain says the channel is in
+    # another token than the credits it is kept under.
+    m.state[2]["token"] = USDC
+    out = await next_voucher(book, m, "k", PAYER, PROVIDER, DAI, need=PRICE, voucher=VOUCHER)
+    assert "is in token" in out["error"]
+    # Closing one leaves the other open.
+    assert (await close_credits(book, m, "k", PAYER, PROVIDER, DAI))["ok"]
+    assert book.get(PAYER, PROVIDER, DAI) is None
+    assert book.get(PAYER, PROVIDER, USDC)["channel_id"] == 1
+    # Kept apart across a restart.
+    again = ChannelBook(tmp_path / "ch.json")
+    assert again.get(PAYER, PROVIDER, USDC)["deposit"] == DEPOSIT
+    assert [r["token"] for r in again.with_provider(PAYER, PROVIDER)] == [USDC]
+
+
+@pytest.mark.asyncio
+async def test_resolve_credits_token(tmp_path):
+    book, m = await _opened(tmp_path)
+    assert resolve_credits_token(book, PAYER, PROVIDER, None) == (USDC, "")
+    assert resolve_credits_token(book, PAYER, PROVIDER, "0x" + "BB" * 20) == (DAI, "")
+    assert "not a token address" in resolve_credits_token(book, PAYER, PROVIDER, "x")[1]
+    assert "no credits" in resolve_credits_token(book, PAYER, OTHER, None)[1]
+    assert (await open_credits(book, m, "k", PAYER, PROVIDER, DAI, 1))["ok"]
+    tok, err = resolve_credits_token(book, PAYER, PROVIDER, "")
+    assert tok == "" and "several tokens" in err
+
+
+@pytest.mark.asyncio
 async def test_a_voucher_pays_ahead_by_the_voucher_size(tmp_path):
     book, m = await _opened(tmp_path)
-    v = await next_voucher(book, m, "k", PAYER, PROVIDER, need=PRICE, voucher=VOUCHER)
+    v = await next_voucher(book, m, "k", PAYER, PROVIDER, USDC, need=PRICE, voucher=VOUCHER)
     assert v == {"channel_id": 1, "cumulative_amount": VOUCHER,
-                 "signature": f"sig:1:{VOUCHER}"}
+                 "signature": f"sig:1:0xaa:{VOUCHER}"}
     # Counted as soon as signed: the provider may hold it.
-    assert book.get(PAYER, PROVIDER)["cumulative"] == VOUCHER
+    assert book.get(PAYER, PROVIDER, USDC)["cumulative"] == VOUCHER
     # The provider served it all: the next one pays ahead again.
-    v = await next_voucher(book, m, "k", PAYER, PROVIDER, need=PRICE, voucher=VOUCHER,
+    v = await next_voucher(book, m, "k", PAYER, PROVIDER, USDC, need=PRICE, voucher=VOUCHER,
                            consumed=VOUCHER)
     assert v["cumulative_amount"] == 2 * VOUCHER
     # A price above the voucher size is covered whole.
-    v = await next_voucher(book, m, "k", PAYER, PROVIDER, need=3500, voucher=VOUCHER,
+    v = await next_voucher(book, m, "k", PAYER, PROVIDER, USDC, need=3500, voucher=VOUCHER,
                            consumed=2 * VOUCHER)
     assert v["cumulative_amount"] == 2 * VOUCHER + 3500
 
@@ -107,30 +167,30 @@ async def test_a_voucher_pays_ahead_by_the_voucher_size(tmp_path):
 @pytest.mark.asyncio
 async def test_a_voucher_stops_at_the_deposit_and_spent_credits_refuse(tmp_path):
     book, m = await _opened(tmp_path)
-    book.set_signed(PAYER, PROVIDER, 1, 9000)
-    v = await next_voucher(book, m, "k", PAYER, PROVIDER, need=PRICE, voucher=VOUCHER,
+    book.set_signed(PAYER, PROVIDER, USDC, 1, 9000)
+    v = await next_voucher(book, m, "k", PAYER, PROVIDER, USDC, need=PRICE, voucher=VOUCHER,
                            consumed=9000)
     assert v["cumulative_amount"] == DEPOSIT
-    out = await next_voucher(book, m, "k", PAYER, PROVIDER, need=PRICE, voucher=VOUCHER,
-                             consumed=DEPOSIT)
+    out = await next_voucher(book, m, "k", PAYER, PROVIDER, USDC, need=PRICE,
+                             voucher=VOUCHER, consumed=DEPOSIT)
     assert "spent" in out["error"] and "top them up" in out["error"]
-    assert out["credits"] == {"channel_id": 1, "deposit": DEPOSIT, "used": DEPOSIT,
-                              "paid_ahead": 0, "left": 0}
+    assert out["credits"] == {"channel_id": 1, "token": USDC, "deposit": DEPOSIT,
+                              "used": DEPOSIT, "paid_ahead": 0, "left": 0}
     # Not enough left for the price: refused too, nothing signed.
     book2, m2 = await _opened(tmp_path / "b", deposit=1500)
-    book2.set_signed(PAYER, PROVIDER, 1, 1000)
-    out = await next_voucher(book2, m2, "k", PAYER, PROVIDER, need=PRICE, voucher=VOUCHER,
-                             consumed=1000)
-    assert "spent" in out["error"] and book2.get(PAYER, PROVIDER)["cumulative"] == 1000
+    book2.set_signed(PAYER, PROVIDER, USDC, 1, 1000)
+    out = await next_voucher(book2, m2, "k", PAYER, PROVIDER, USDC, need=PRICE,
+                             voucher=VOUCHER, consumed=1000)
+    assert "spent" in out["error"] and book2.get(PAYER, PROVIDER, USDC)["cumulative"] == 1000
 
 
 @pytest.mark.asyncio
 async def test_closed_credits_leave_the_book(tmp_path):
     book, m = await _opened(tmp_path)
     m.state[1]["status"] = CLOSING
-    out = await next_voucher(book, m, "k", PAYER, PROVIDER, need=PRICE, voucher=VOUCHER)
+    out = await next_voucher(book, m, "k", PAYER, PROVIDER, USDC, need=PRICE, voucher=VOUCHER)
     assert "closed" in out["error"]
-    assert book.get(PAYER, PROVIDER) is None and "1" in book.closing()
+    assert book.get(PAYER, PROVIDER, USDC) is None and "1" in book.closing()
 
 
 class Provider:
@@ -165,7 +225,7 @@ class Provider:
 
 
 async def _request(book, m):
-    return await request_on_credits(book, m, None, "k", PAYER, PROVIDER, DIGEST, {},
+    return await request_on_credits(book, m, None, "k", PAYER, PROVIDER, USDC, DIGEST, {},
                                     price=PRICE, voucher=VOUCHER)
 
 
@@ -178,8 +238,9 @@ async def test_a_voucher_goes_only_when_the_held_credit_falls_short(tmp_path, mo
     assert out["ok"] and prov.sent[0]["voucher"]["cumulative_amount"] == VOUCHER
     assert prov.sent[0]["client"] == PAYER
     # The provider's count is kept: three requests per voucher.
-    assert out["credits"] == {"channel_id": 1, "deposit": DEPOSIT, "used": PRICE,
-                              "paid_ahead": VOUCHER - PRICE, "left": DEPOSIT - PRICE}
+    assert out["credits"] == {"channel_id": 1, "token": USDC, "deposit": DEPOSIT,
+                              "used": PRICE, "paid_ahead": VOUCHER - PRICE,
+                              "left": DEPOSIT - PRICE}
     for _ in range(2):
         assert (await _request(book, m))["ok"]
     assert [s["voucher"] is None for s in prov.sent] == [False, True, True]
@@ -203,7 +264,7 @@ async def test_one_retry_with_a_voucher_when_the_provider_asks(tmp_path, monkeyp
     assert prov.sent[1]["voucher"] is None and prov.sent[2]["voucher"] is not None
     assert prov.sent[1]["request_id"] != prov.sent[2]["request_id"]
     assert out["request_id"] == prov.sent[2]["request_id"]
-    assert book.get(PAYER, PROVIDER)["consumed"] == VOUCHER + PRICE
+    assert book.get(PAYER, PROVIDER, USDC)["consumed"] == VOUCHER + PRICE
     # A refusal of the retry, voucher and all, is final: no third send.
     prov.short = True
     out = await _request(book, m)
@@ -227,10 +288,12 @@ async def test_without_credits_nothing_is_sent(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_close_credits_and_sweep_the_refund(tmp_path):
     book, m = await _opened(tmp_path)
-    assert "no credits" in (await close_credits(book, m, "k", PAYER, OTHER))["error"]
-    res = await close_credits(book, m, "k", PAYER, PROVIDER)
-    assert res == {"ok": True, "channel_id": 1, "tx_hash": "0xc"} and m.closed == [1]
-    assert book.get(PAYER, PROVIDER) is None and "1" in book.closing()
+    assert "no credits" in (await close_credits(book, m, "k", PAYER, OTHER, USDC))["error"]
+    assert "no credits" in (await close_credits(book, m, "k", PAYER, PROVIDER, DAI))["error"]
+    res = await close_credits(book, m, "k", PAYER, PROVIDER, USDC)
+    assert res == {"ok": True, "channel_id": 1, "token": USDC, "tx_hash": "0xc"}
+    assert m.closed == [1]
+    assert book.get(PAYER, PROVIDER, USDC) is None and "1" in book.closing()
 
     def key_for(addr):
         return "k" if addr == PAYER else None
@@ -244,26 +307,28 @@ async def test_close_credits_and_sweep_the_refund(tmp_path):
 @pytest.mark.asyncio
 async def test_the_sweep_follows_the_chain(tmp_path):
     book, m = await _opened(tmp_path)
-    assert (await open_credits(book, m, "k", PAYER, OTHER, 500))["ok"]
+    assert (await open_credits(book, m, "k", PAYER, OTHER, USDC, 500))["ok"]
     key_for = lambda addr: "k"  # noqa: E731
     # The provider closed channel 1; channel 2's close was never sent.
-    m.state[1] = {"status": CLOSING, "closes_at": 100}
-    book.retire(PAYER, OTHER)
+    m.state[1] = {"status": CLOSING, "closes_at": 100, "token": USDC}
+    book.retire(PAYER, OTHER, USDC)
     out = await sweep_refunds(book, m, key_for, now=0)
     assert {"channel_id": "1", "action": "closed_by_provider"} in out
     assert {"channel_id": "2", "action": "close_started", "error": None} in out
     assert m.closed == [2] and book.all_open() == []
     # A channel settled elsewhere is forgotten.
-    m.state[1] = {"status": SETTLED, "closes_at": 0}
+    m.state[1] = {"status": SETTLED, "closes_at": 0, "token": USDC}
     out = await sweep_refunds(book, m, key_for, now=0)
     assert {"channel_id": "1", "action": "forgot"} in out and "1" not in book.closing()
 
 
 def test_credits_view():
     assert credits_view(None) == {}
-    ch = {"channel_id": 4, "deposit": DEPOSIT, "cumulative": VOUCHER, "consumed": PRICE}
-    assert credits_view(ch) == {"channel_id": 4, "deposit": DEPOSIT, "used": PRICE,
-                                "paid_ahead": VOUCHER - PRICE, "left": DEPOSIT - PRICE}
+    ch = {"channel_id": 4, "token": DAI, "deposit": DEPOSIT, "cumulative": VOUCHER,
+          "consumed": PRICE}
+    assert credits_view(ch) == {"channel_id": 4, "token": DAI, "deposit": DEPOSIT,
+                                "used": PRICE, "paid_ahead": VOUCHER - PRICE,
+                                "left": DEPOSIT - PRICE}
     # One reply past the voucher: nothing paid ahead, never negative.
     ch["consumed"] = VOUCHER + PRICE
     assert credits_view(ch)["paid_ahead"] == 0

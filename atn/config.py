@@ -259,7 +259,8 @@ class RPBConfig:
     anchor_election_address: str = ""   # AnchorElection: epoch anchors are
                                         # elections (registry anchor_election).
     rep_claim_address: str = ""         # AutonetRepClaim: REP claimed on the
-                                        # household's ATN earnings (rep_claim).
+                                        # value the household claimed from
+                                        # the pools (rep_claim).
     deploy_block: int = 0               # Block the jurisdiction's contracts
                                         # were deployed at; every close log
                                         # scan starts here. 0 = search.
@@ -297,9 +298,13 @@ class RPBConfig:
                                         # atn/channel_settlement.py); <= 0
                                         # never settles on time alone.
     channel_settle_min: int = 1_000_000  # A provider settles a payment
-                                        # channel once this much (base units,
-                                        # 1 ATN by default) is unpaid on it;
-                                        # <= 0 never settles on the amount.
+                                        # channel once what is unpaid on it
+                                        # is worth this much: a value in
+                                        # 6-decimal value units (1e6 = one
+                                        # unit of the value index), the
+                                        # channel's token valued at today's
+                                        # parity; <= 0 never settles on the
+                                        # amount.
     token_address: str = ""             # Discovered from Governor.token()
     economy_address: str = ""           # Discovered from RepToken.economyAddress()
     timelock_address: str = ""          # Discovered from Governor.timelock()
@@ -830,9 +835,9 @@ _TOKEN_SYMBOLS: dict[tuple[str, str], str] = {}
 
 
 def token_symbol(token: str, rpc_url: str) -> str:
-    """A token contract's ``symbol()`` (the jurisdiction's REP or ATN, which
-    the DAO names at setup). "" when unset or unreadable, e.g. a Substrate
-    deployed before ATN had a symbol. Cached per process once read."""
+    """A token contract's ``symbol()`` (the jurisdiction's REP, which the
+    DAO names at setup, or an index token). "" when unset or unreadable.
+    Cached per process once read."""
     from web3.exceptions import BadFunctionCallOutput, ContractLogicError
     if not token or not rpc_url:
         return ""

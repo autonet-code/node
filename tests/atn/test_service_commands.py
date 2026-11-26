@@ -17,7 +17,9 @@ from atn.service_catalog import spec_digest
 from atn.service_channels import ChannelBook
 from atn.service_review_store import ReviewStore
 from nodes.common import service_reviews as sr
-from tests.atn.test_service_catalog import ADDR_A, KEY_A, _catalog, _listed, _prices, _spec
+from tests.atn.test_service_catalog import (
+    ADDR_A, KEY_A, USDC, _catalog, _listed, _prices, _spec,
+)
 
 BUYER_KEY = "0x" + "b7" * 32
 BUYER = Account.from_key(BUYER_KEY).address
@@ -25,6 +27,9 @@ OPERATOR_KEY = "0x" + "0e" * 32
 OPERATOR = Account.from_key(OPERATOR_KEY).address
 JUR = "0xjurisdiction"
 FIELDS = {"correctness": 0.5, "simplicity": 1, "novelty": 0, "malware": False}
+DAI = "0x" + "d1" * 20
+INDEX = [{"token": USDC, "symbol": "USDC", "decimals": 6, "parity": str(10 ** 30)},
+         {"token": DAI, "symbol": "DAI", "decimals": 18, "parity": str(10 ** 18)}]
 
 
 class _Market:
@@ -37,10 +42,13 @@ class _Market:
         self.opened, self.closed, self.topped = [], [], []
         self.state: dict[int, dict] = {}
 
-    async def open_channel(self, key, provider, deposit):
+    async def accepts_token(self, token):
+        return token in {USDC, DAI}
+
+    async def open_channel(self, key, provider, token, deposit):
         cid = len(self.opened) + 1
-        self.opened.append((provider, deposit))
-        self.state[cid] = {"status": 1, "deposit": deposit}
+        self.opened.append((provider, token, deposit))
+        self.state[cid] = {"status": 1, "deposit": deposit, "token": token}
         return {"success": True, "channel_id": cid, "tx_hash": "0xo"}
 
     async def top_up_channel(self, key, cid, amount):
@@ -56,7 +64,8 @@ class _Market:
     async def get_channel(self, cid):
         return self.state.get(cid)
 
-    def sign_voucher(self, key, cid, cumulative):
+    def sign_voucher(self, key, cid, token, cumulative):
+        assert token == self.state[cid]["token"]
         return f"sig:{cid}:{cumulative}"
 
 
@@ -84,12 +93,16 @@ def daemon(tmp_path, monkeypatch):
                                    "cumulative_amount", 0)}
         return reply
 
-    async def pay(config, key, recipient, amount, request_id=""):
-        paid.append((Account.from_key(key).address, recipient, amount))
+    async def pay(config, key, recipient, amount, request_id="", *, token):
+        paid.append((Account.from_key(key).address, recipient, amount, token))
         return {"tx_hash": "0xpaid", "request_id": request_id}
+
+    async def index_tokens(runtime):
+        return list(INDEX)
 
     monkeypatch.setattr(service_client, "request_service", request)
     monkeypatch.setattr(service_client, "pay_for_service", pay)
+    monkeypatch.setattr(at, "_index_tokens", index_tokens)
     keys = {"buyer": BUYER_KEY, "operator": OPERATOR_KEY}
     rt = SimpleNamespace(
         _config=SimpleNamespace(rpb=SimpleNamespace(network_joined=True)),
@@ -119,12 +132,18 @@ async def test_find_services_rows(daemon):
     assert req["mode"] == "request" and req["prices"] == {"requests": 100}
     assert req["measures"] == [{"measure": "requests", "quantity": 1}]
     assert req["voucher"] == 500 and req["protocol"] is None
+    assert req["token"] == USDC and req["token_info"] == {"symbol": "USDC", "decimals": 6}
     assert req["spec_available"] is True and req["your_credits"] is None
     assert box["mode"] == "session" and box["protocol"]["id"] == "ssh/2"
-    daemon.rt.channel_book.set_open(BUYER, ADDR_A, 7, 1000)
+    # Credits in another token are not this service's credits.
+    daemon.rt.channel_book.set_open(BUYER, ADDR_A, DAI, 8, 10 ** 18)
+    out = await _call(daemon, "find_services", {"query": "speech"})
+    assert out["services"][0]["your_credits"] is None
+    daemon.rt.channel_book.set_open(BUYER, ADDR_A, USDC, 7, 1000)
     out = await _call(daemon, "find_services", {"query": "speech"})
     assert out["services"][0]["your_credits"] == {
-        "channel_id": 7, "deposit": 1000, "used": 0, "paid_ahead": 0, "left": 1000}
+        "channel_id": 7, "token": USDC, "deposit": 1000, "used": 0, "paid_ahead": 0,
+        "left": 1000}
     daemon.rt._config.rpb.network_joined = False
     assert (await _call(daemon, "find_services", {}))["status"] == "not_joined"
 
@@ -135,26 +154,36 @@ class TestRequestService:
         out = await _call(daemon, "request_service", _ref(daemon.req, payload={"a": 1}))
         assert out["ok"] and out["paid_directly"]["tx_hash"] == "0xpaid"
         assert out["paid_directly"]["amount"] == 100 and out["paid_directly"]["request_id"]
-        assert daemon.paid == [(BUYER, ADDR_A, 100)]
+        assert out["paid_directly"]["token"] == USDC
+        assert daemon.paid == [(BUYER, ADDR_A, 100, USDC)]
         assert daemon.sent[-1]["tx_hash"] == "0xpaid"
         assert daemon.sent[-1]["client_address"] == BUYER
         # Paying from credits needs credits.
         refused = await _call(daemon, "request_service",
                               _ref(daemon.req, payload={}, pay="credits"))
-        assert "open_credits first" in refused["error"]
+        assert "open_credits in it first" in refused["error"]
 
     @pytest.mark.asyncio
     async def test_with_credits_a_voucher_and_no_transaction(self, daemon):
+        # Credits in DAI do not pay a service priced in USDC: paid directly.
+        assert (await _call(daemon, "open_credits", {
+            "provider_address": ADDR_A, "token": DAI, "deposit": 10 ** 18}))["ok"]
+        out = await _call(daemon, "request_service", _ref(daemon.req, payload={}))
+        assert out["ok"] and out["paid_directly"]["token"] == USDC and len(daemon.paid) == 1
+        refused = await _call(daemon, "request_service",
+                              _ref(daemon.req, payload={}, pay="credits"))
+        assert "open_credits in it first" in refused["error"] and USDC in refused["error"]
+        daemon.paid.clear()
         opened = await _call(daemon, "open_credits",
-                             {"provider_address": ADDR_A, "deposit": 1000})
+                             {"provider_address": ADDR_A, "token": USDC, "deposit": 1000})
         assert opened["ok"] and opened["credits"]["deposit"] == 1000
         out = await _call(daemon, "request_service", _ref(daemon.req, payload={}))
         assert out["ok"] and daemon.paid == []
         # The voucher pays ahead by the provider's voucher size.
         assert daemon.sent[-1]["voucher"] == {
-            "channel_id": 1, "cumulative_amount": 500, "signature": "sig:1:500"}
-        assert out["credits"] == {"channel_id": 1, "deposit": 1000, "used": 100,
-                                  "paid_ahead": 400, "left": 900}
+            "channel_id": 2, "cumulative_amount": 500, "signature": "sig:2:500"}
+        assert out["credits"] == {"channel_id": 2, "token": USDC, "deposit": 1000,
+                                  "used": 100, "paid_ahead": 400, "left": 900}
         # pay='direct' still pays directly.
         direct = await _call(daemon, "request_service",
                              _ref(daemon.req, payload={}, pay="direct"))
@@ -205,8 +234,11 @@ class TestOpenSession:
     @pytest.mark.asyncio
     async def test_a_priced_session_needs_credits(self, daemon, opened):
         out = await _call(daemon, "open_session", _ref(daemon.box))
-        assert "open_credits first" in out["error"] and opened == []
-        daemon.rt.channel_book.set_open(BUYER, ADDR_A, 7, 1000)
+        assert "open_credits in that token first" in out["error"] and opened == []
+        daemon.rt.channel_book.set_open(BUYER, ADDR_A, DAI, 6, 10 ** 18)
+        out = await _call(daemon, "open_session", _ref(daemon.box))
+        assert "open_credits in that token first" in out["error"] and opened == []
+        daemon.rt.channel_book.set_open(BUYER, ADDR_A, USDC, 7, 1000)
         out = await _call(daemon, "open_session", _ref(daemon.box, args={"user": "me"}))
         assert out == {"ok": True, "port": 4242}
         assert opened[0]["payer"] == BUYER and opened[0]["payer_key"] == BUYER_KEY
@@ -227,23 +259,54 @@ class TestOpenSession:
 
 @pytest.mark.asyncio
 async def test_credits_open_top_up_list_close(daemon):
-    args = {"provider_address": ADDR_A}
+    args = {"provider_address": ADDR_A, "token": USDC}
     assert "deposit above 0" in (await _call(daemon, "open_credits",
                                              {**args, "deposit": 0}))["error"]
+    assert "name the token" in (await _call(daemon, "open_credits", {
+        "provider_address": ADDR_A, "deposit": 1000}))["error"]
+    assert "not in the value index" in (await _call(daemon, "open_credits", {
+        "provider_address": ADDR_A, "token": "0x" + "0f" * 20, "deposit": 1000}))["error"]
     await _call(daemon, "open_credits", {**args, "deposit": 1000})
     again = await _call(daemon, "open_credits", {**args, "deposit": 5})
     assert "already open" in again["error"]
-    topped = await _call(daemon, "top_up_credits", {**args, "amount": 250})
-    assert topped["ok"] and topped["deposit"] == 1250
+    # With one credits entry the token can be left out.
+    topped = await _call(daemon, "top_up_credits",
+                         {"provider_address": ADDR_A, "amount": 250})
+    assert topped["ok"] and topped["deposit"] == 1250 and topped["token"] == USDC
     listed = await _call(daemon, "list_credits", {})
-    assert listed["credits"] == [{"provider": ADDR_A, "channel_id": 1,
+    assert listed["credits"] == [{"provider": ADDR_A, "channel_id": 1, "token": USDC,
                                   "deposit": 1250, "used": 0, "paid_ahead": 0,
                                   "left": 1250}]
+    # Credits in a second token are their own channel; now the token must
+    # be named.
+    assert (await _call(daemon, "open_credits", {
+        "provider_address": ADDR_A, "token": DAI, "deposit": 10 ** 18}))["ok"]
+    assert daemon.market.opened == [(ADDR_A, USDC, 1000), (ADDR_A, DAI, 10 ** 18)]
+    assert "several tokens" in (await _call(daemon, "top_up_credits", {
+        "provider_address": ADDR_A, "amount": 1}))["error"]
+    topped = await _call(daemon, "top_up_credits",
+                         {"provider_address": ADDR_A, "token": DAI, "amount": 5})
+    assert topped["ok"] and topped["channel_id"] == 2
+    assert daemon.market.topped == [(1, 250), (2, 5)]
     # The operator's credits are its own.
     assert (await _call(daemon, "list_credits", {}, caller=None))["credits"] == []
     closed = await _call(daemon, "close_credits", args)
     assert closed["ok"] and daemon.market.closed == [1]
+    listed = await _call(daemon, "list_credits", {})
+    assert [(r["channel_id"], r["token"]) for r in listed["credits"]] == [(2, DAI)]
+    assert (await _call(daemon, "close_credits", {"provider_address": ADDR_A}))["ok"]
     assert (await _call(daemon, "list_credits", {}))["credits"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_index_tokens(daemon, monkeypatch):
+    out = await _call(daemon, "list_index_tokens", {})
+    assert out["tokens"] == INDEX and out["count"] == 2
+
+    async def unreadable(runtime):
+        return None
+    monkeypatch.setattr(at, "_index_tokens", unreadable)
+    assert "cannot be read" in (await _call(daemon, "list_index_tokens", {}))["error"]
 
 
 class TestReviewService:
@@ -300,19 +363,19 @@ async def test_set_service_prices_only_by_its_author(daemon):
     d = spec_digest(daemon.req)
     changed = []
 
-    def set_prices(digest, prices, voucher):
-        changed.append((digest, prices, voucher))
+    def set_prices(digest, prices, voucher, token=None):
+        changed.append((digest, prices, voucher, token))
         return {"prices": prices, "voucher": voucher}
     daemon.rt.service_store = SimpleNamespace(
         get=lambda digest: SimpleNamespace(author="seller") if digest == d else None,
         set_prices=set_prices)
     out = await _call(daemon, "set_service_prices",
                       {"spec_digest": "0x" + d, "price": 70}, caller="seller")
-    assert out["ok"] and changed == [(d, {"requests": 70}, None)]
+    assert out["ok"] and changed == [(d, {"requests": 70}, None, None)]
     await _call(daemon, "set_service_prices",
                 {"spec_digest": d, "prices": {"seconds": "5"}, "voucher": 50},
                 caller="seller")
-    assert changed[-1] == (d, {"seconds": 5}, 50)
+    assert changed[-1] == (d, {"seconds": 5}, 50, None)
     assert "only the service's author" in (await _call(
         daemon, "set_service_prices", {"spec_digest": d, "price": 1}))["error"]
     assert "name the prices" in (await _call(
@@ -336,12 +399,13 @@ async def test_register_service_publishes_under_the_agents_key(daemon, monkeypat
     daemon.rt.get_agent = lambda aid: SimpleNamespace(identity=identity)
     out = await _call(daemon, "register_service", {
         "mode": "request", "backing_tool": "cd" * 32, "name": "echo",
-        "description": "d", "price": "25", "voucher": 100})
+        "description": "d", "token": USDC, "price": "25", "voucher": 100})
     assert out == {"service_id": 3, "tx_hash": "0xr", "spec_digest": "ab" * 32,
                    "provider": BUYER, "price_list": {"seq": 1}, "on_chain": True}
     author, key, form = published[0]
     assert (author, key) == ("buyer", BUYER_KEY)
     assert form["prices"] == {"requests": 25} and form["voucher"] == 100
+    assert form["token"] == USDC
     assert "prices" in (await _call(daemon, "register_service",
                                     {"mode": "request"}))["error"]
     owner = await _call(daemon, "register_service", {"mode": "request"}, caller=None)
@@ -350,9 +414,9 @@ async def test_register_service_publishes_under_the_agents_key(daemon, monkeypat
 
 def test_the_command_set():
     names = {t.name for t in at.get_tool_definitions()}
-    assert {"find_services", "register_service", "set_service_prices",
-            "request_service", "open_session", "open_credits", "top_up_credits",
-            "close_credits", "list_credits", "review_service"} <= names
+    assert {"find_services", "list_index_tokens", "register_service",
+            "set_service_prices", "request_service", "open_session", "open_credits",
+            "top_up_credits", "close_credits", "list_credits", "review_service"} <= names
     assert not {"pay_for_service", "close_service_channel",
                 "open_service_stream"} & names
     assert at._TOOL_CATEGORIES["services_buy"] == \

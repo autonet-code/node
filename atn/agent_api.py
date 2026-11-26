@@ -49,7 +49,7 @@ _GROUPS: dict[str, tuple[str, ...]] = {
     "tools": ("probe_tools", "list_tools", "adopt_tool",
               "register_tool", "publish_tool", "attest_tools",
               "fetch_evidence"),
-    "services": ("find_services", "request_service", "open_session",
+    "services": ("find_services", "list_index_tokens", "request_service", "open_session",
                  "open_credits", "top_up_credits", "close_credits",
                  "list_credits", "review_service", "register_service",
                  "set_service_prices"),
@@ -80,8 +80,10 @@ _NETWORK_READS: dict[str, dict[str, Any]] = {
         "input_schema": {"type": "object", "properties": {}},
     },
     "rpb_agent_training": {
-        "description": "An address's ATN balance, gas balance and "
-                       "cumulative tool-pool earnings.",
+        "description": "An address's balance of every value index token, "
+                       "its gas balance, and the value it has claimed from "
+                       "the tool pools (earned_value, 6-decimal value "
+                       "units).",
         "input_schema": {"type": "object", "required": ["address"],
                          "properties": {"address": {"type": "string"}}},
     },
@@ -190,8 +192,10 @@ class AgentAPI:
                 "This daemon belongs to one household (one owner wallet) on "
                 "an Autonet jurisdiction: a shared library of tools that "
                 "agents publish, use and review, and an economy where a "
-                "tool's author earns ATN when agents from other households "
-                "use it. You act here as one of the household's agents."),
+                "tool's author and its reviewers are paid from the "
+                "service fees, in the tokens of the jurisdiction's value "
+                "index, once other households' reviews of it conclude. You "
+                "act here as one of the household's agents."),
             "start": [
                 "Read GET /guide once: it is the whole manual.",
                 "GET /agents lists this daemon's external agents: if one is "

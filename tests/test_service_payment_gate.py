@@ -2,10 +2,12 @@
 
 A request is paid from the buyer's credits with the provider
 (``_credit_gate``: a payment channel, vouchers paying ahead) or directly
-(``_direct_gate``: one ``payForService``); a free service needs neither, and
-a daemon without chain serves unpaid only on its local listener. The chain
-is faked: the registry entry, the channels the vouchers name, and the
-payments by transaction.
+(``_direct_gate``: one ``payForService``), always in the token the price
+list names: credits or a payment in another token are refused, and so is
+every payment while the price list's token is out of the value index. A
+free service needs neither, and a daemon without chain serves unpaid only
+on its local listener. The chain is faked: the registry entry, the index,
+the channels the vouchers name, and the payments by transaction.
 
 Run: pytest tests/test_service_payment_gate.py
 """
@@ -31,6 +33,8 @@ OTHER_KEY = "0x" + "22" * 32
 PRICE = 1000
 VOUCHER = 5000
 DEPOSIT = 20_000
+USDC = "0x" + "a6" * 20      # the price lists' token
+DAI = "0x" + "d1" * 20
 
 ECHO = """
 import json, os, sys
@@ -78,7 +82,7 @@ def _register_service(rt, *, provider: str = "", active: bool = True, price: int
                                   code=code)
     res = rt.service_store.register(
         name=name, description="Echo.", mode="request", author="user",
-        backing_tool=tool["digest"], prices={"requests": price},
+        backing_tool=tool["digest"], token=USDC, prices={"requests": price},
         voucher=VOUCHER if price else 0, settings=settings)
     record = rt.service_store.get(res["digest"])
     operator = _addr(rt.registry.daemon_operator_key())
@@ -109,7 +113,11 @@ class Chain:
         self.channels: dict[int, dict] = {}
         self.payments: dict[str, dict] = {}
         self.verified: list[dict] = []
+        self.index = {USDC, DAI}
         chain = self
+
+        async def accepts_token(_self, token):
+            return str(token).lower() in chain.index
 
         async def verify_voucher(_self, cid, cum, signature):
             ch = chain.channels.get(int(cid))
@@ -118,18 +126,23 @@ class Chain:
             if str(signature).split(":")[0].lower() != ch["client"].lower():
                 return {"valid": False, "reason": "signer is not the channel client"}
             return {"valid": True, "reason": "ok", "client": ch["client"],
-                    "provider": ch["provider"], "deposit": str(ch["deposit"]),
+                    "provider": ch["provider"], "token": ch["token"],
+                    "deposit": str(ch["deposit"]),
                     "exceeds_deposit": int(cum) > ch["deposit"]}
 
-        async def verify_payment(_self, *, request_id, recipient, min_amount,
+        async def verify_payment(_self, *, request_id, recipient, min_amount, token,
                                  tx_hash=None, payer=None):
             chain.verified.append({"request_id": request_id, "recipient": recipient,
-                                   "min_amount": min_amount, "payer": payer})
+                                   "min_amount": min_amount, "token": token,
+                                   "payer": payer})
             p = chain.payments.get(tx_hash)
             if p is None or p["request_id"] != request_id:
                 return {"verified": False, "reason": "no ServicePayment matched"}
             if p["recipient"].lower() != recipient.lower():
                 return {"verified": False, "reason": "recipient mismatch"}
+            if p["token"] != token:
+                return {"verified": False,
+                        "reason": f"paid in token {p['token']}, but the price is in {token}"}
             if p["amount"] < min_amount:
                 return {"verified": False,
                         "reason": f"amount {p['amount']} < min_amount {min_amount}"}
@@ -140,16 +153,19 @@ class Chain:
         self.verify_voucher = verify_voucher
         monkeypatch.setattr(oc.ServiceMarketClient, "verify_voucher", verify_voucher)
         monkeypatch.setattr(oc.OnChainService, "verify_service_payment", verify_payment)
+        monkeypatch.setattr(oc.OnChainService, "accepts_token", accepts_token)
 
-    def open(self, cid: int, provider: str, *, client: str = "", deposit: int = DEPOSIT):
+    def open(self, cid: int, provider: str, *, client: str = "", deposit: int = DEPOSIT,
+             token: str = USDC):
         self.channels[cid] = {"client": client or _payer(), "provider": provider,
-                              "deposit": deposit}
+                              "deposit": deposit, "token": token}
 
     def pay(self, rid: str, recipient: str, amount: int, *, key: str = PAYER_KEY,
-            paid_at: int = 0) -> str:
+            paid_at: int = 0, token: str = USDC) -> str:
         tx = "0x" + f"{len(self.payments) + 1:064x}"
         self.payments[tx] = {"request_id": rid, "recipient": recipient, "amount": amount,
-                             "payer": _addr(key), "paid_at": paid_at or int(time.time())}
+                             "token": token, "payer": _addr(key),
+                             "paid_at": paid_at or int(time.time())}
         return tx
 
 
@@ -205,7 +221,7 @@ class TestCredits:
         assert out["ok"] is True, out
         assert out["credit"] == {"channel_id": 5, "consumed": PRICE, "cumulative": VOUCHER}
         ledger = rt.service_store.channel_ledger(5)
-        assert ledger["client"] == _payer().lower()
+        assert ledger["client"] == _payer().lower() and ledger["token"] == USDC
         assert ledger["signature"] == f"{_payer()}:5:{VOUCHER}"
         assert len(served.calls) == 1
 
@@ -278,6 +294,43 @@ class TestCredits:
         assert rt.service_store.channel_ledger(6) is None and served.calls == []
 
     @pytest.mark.asyncio
+    async def test_a_voucher_for_a_channel_in_another_token_is_refused(self, tmp_path,
+                                                                       monkeypatch):
+        """Credits in DAI do not pay for a service priced in USDC, even
+        with a total that is a huge number of DAI base units."""
+        rt, record, server, chain, served = _setup(tmp_path, monkeypatch)
+        chain.open(5, record.test_listing["provider"], token=DAI, deposit=10 ** 21)
+        out = await _send(server, _request(record, **_voucher(5, 10 ** 20)))
+        assert out["ok"] is False and "the channel is in token" in out["error"], out
+        assert USDC in out["error"]
+        assert rt.service_store.channel_ledger(5) is None and served.calls == []
+
+    @pytest.mark.asyncio
+    async def test_credits_held_in_another_token_do_not_pay(self, tmp_path, monkeypatch):
+        """Credits held for one service do not pay for the same provider's
+        service in another token (a repricing to DAI, here)."""
+        rt, record, server, chain, served = _setup(tmp_path, monkeypatch)
+        chain.open(5, record.test_listing["provider"])
+        assert (await _send(server, _request(record, **_voucher(5, VOUCHER))))["ok"]
+        rt.service_store.set_prices(record.digest, {"requests": 10 ** 15}, token=DAI)
+        out = await _send(server, _request(record, channel_id=5))
+        assert out["ok"] is False and "these credits are in token" in out["error"], out
+        assert rt.service_store.balance(5) == (PRICE, VOUCHER) and len(served.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_token_out_of_the_index_is_not_served(self, tmp_path, monkeypatch):
+        rt, record, server, chain, served = _setup(tmp_path, monkeypatch)
+        chain.open(5, record.test_listing["provider"])
+        chain.index.discard(USDC)
+        out = await _send(server, _request(record, **_voucher(5, VOUCHER)))
+        assert out["ok"] is False and "not in the value index" in out["error"], out
+        rid = new_request_id()
+        tx = chain.pay(rid, record.test_listing["provider"], PRICE)
+        out = await _send(server, _request(record, rid=rid, tx_hash=tx))
+        assert out["ok"] is False and "not in the value index" in out["error"], out
+        assert served.calls == [] and rt.service_store.channel_ledger(5) is None
+
+    @pytest.mark.asyncio
     async def test_a_voucher_past_the_deposit_is_refused(self, tmp_path, monkeypatch):
         rt, record, server, chain, served = _setup(tmp_path, monkeypatch)
         chain.open(5, record.test_listing["provider"], deposit=VOUCHER)
@@ -308,7 +361,8 @@ class TestDirect:
                                            tx_hash=chain.pay(rid, provider, PRICE)))
         assert out["ok"] is True, out
         assert chain.verified[-1] == {"request_id": rid, "recipient": provider,
-                                      "min_amount": PRICE, "payer": _payer()}
+                                      "min_amount": PRICE, "token": USDC,
+                                      "payer": _payer()}
         assert rt.service_store.has_served_request(rid)
         # The price list changes (no transaction): the old price falls short.
         rt.service_store.set_prices(record.digest, {"requests": 2 * PRICE})
@@ -318,6 +372,17 @@ class TestDirect:
         assert out["ok"] is False and "min_amount 2000" in out["error"]
         assert not rt.service_store.has_served_request(rid)
         assert len(served.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_payment_in_another_token_is_refused(self, tmp_path, monkeypatch):
+        """A DAI payment against a USDC price: 10**18 is far more than the
+        price as a number, and still pays nothing."""
+        rt, record, server, chain, served = _setup(tmp_path, monkeypatch)
+        rid = new_request_id()
+        tx = chain.pay(rid, record.test_listing["provider"], 10 ** 18, token=DAI)
+        out = await _send(server, _request(record, rid=rid, tx_hash=tx))
+        assert out["ok"] is False and "paid in token" in out["error"], out
+        assert not rt.service_store.has_served_request(rid) and served.calls == []
 
     @pytest.mark.asyncio
     async def test_a_payment_serves_once(self, tmp_path, monkeypatch):
