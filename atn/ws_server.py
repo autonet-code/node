@@ -230,6 +230,13 @@ SCOPED_INLINE_ALLOWED = frozenset({
     "rpb_state", "network_status", "rpb_agent_training",
 })
 
+# Inline owner handlers whose names are also agent tools: the owner's app
+# publishes and reprices through the inline handler, and a scoped session
+# (an external agent through the agent API) reaches the agent tool of the
+# same name instead, which its grants gate (selling needs the owner's
+# "services" grant, atn/external_agents.md).
+SCOPED_AS_AGENT_TOOL = frozenset({"register_service", "set_service_prices"})
+
 # Allowed inline messages that act on ONE agent: a scoped session must name
 # it (and it must be in the subtree). Without one they act fleet-wide.
 SCOPED_REQUIRES_AGENT = frozenset({
@@ -1028,6 +1035,8 @@ class WebSocketBridge:
         among the inline handlers, each clamped to its subtree."""
         if session.scope_ids is None:
             return None
+        if msg_type in SCOPED_AS_AGENT_TOOL:
+            return None   # the agent tool, in the fall-through (gate 3)
         if msg_type in SCOPED_INLINE_ALLOWED:
             if msg_type in SCOPED_REQUIRES_AGENT and not msg.get("agent_id"):
                 return (f"'{msg_type}' needs an agent_id inside the "
@@ -1989,7 +1998,7 @@ class WebSocketBridge:
         # is the PROVIDER-side entry: a paid client's request, dispatched
         # to the backing local tool once its payment checks out
         # (_credit_gate, _direct_gate).
-        if msg_type == "register_service":
+        if msg_type == "register_service" and session.scope_ids is None:
             # The publish form (atn/service_publish.py, Decision 2026-11-12):
             # how buyers use it, the backing tool, settings, prices, the
             # voucher size and an optional registry price. Registered under
@@ -2008,7 +2017,7 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
-        if msg_type == "set_service_prices":
+        if msg_type == "set_service_prices" and session.scope_ids is None:
             # A new price list (no new spec, no transaction).
             digest = str(msg.get("digest") or "")
             record = self.runtime.service_store.get(digest)

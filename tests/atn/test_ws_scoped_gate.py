@@ -39,7 +39,7 @@ def _scoped():
 DANGEROUS = [
     "daemon_restart", "provider_configure", "custom_provider_add",
     "oauth_start", "set_budget", "update_sponsor_budget", "set_owner_wallet",
-    "autonet_stop", "autonet_set_chain", "register_service", "invoke_service",
+    "autonet_stop", "autonet_set_chain", "invoke_service",
     "claude_session_import", "robot_export_packs", "sanctions",
     "voice_start", "skip_onboarding", "grant_tool", "set_local_model",
     "remove_agent", "clone_agent", "export_agent_key", "secrets_put",
@@ -64,6 +64,22 @@ async def test_scoped_session_is_refused_owner_surfaces(tmp_path, msg_type):
         {"msg_id": "1", "type": msg_type, "agent_id": "a"}, _scoped())
     assert out["ok"] is False
     assert "scoped session" in out["error"] or "localhost-only" in out["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("msg_type", ["register_service", "set_service_prices"])
+async def test_selling_reaches_the_agent_tool_and_its_grant(tmp_path, msg_type):
+    """An external agent sells through the agent tool of the same name, not
+    the owner's inline publish: without the owner's "services" grant it is
+    refused there."""
+    from atn.ws_server import SCOPED_AS_AGENT_TOOL
+    assert msg_type in SCOPED_AS_AGENT_TOOL
+    assert msg_type in WebSocketBridge._inline_message_types()
+    bridge = _bridge(tmp_path)
+    out = await bridge._handle_message(
+        {"msg_id": "1", "type": msg_type, "agent_id": "a"}, _scoped())
+    assert out["ok"] is False
+    assert "scoped session" not in out["error"]
 
 
 @pytest.mark.asyncio
