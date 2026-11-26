@@ -71,6 +71,7 @@ from .federated_reconcile import VOICE_EPSILON
 
 from .mint_params import (
     mint_gate_from_writes,
+    registry_uint,
     rep_floor_from_writes,
     review_params_from_writes,
 )
@@ -1006,18 +1007,21 @@ def _last_writes(records: List[Dict[str, Any]], block: int) -> Dict[str, str]:
 
 def parity_from_writes(writes: Dict[str, str]) -> Dict[str, int]:
     """The value index in a Registry's last writes: {token (lowercase 0x):
-    parity} for every non-zero ``jurisdiction.parity.<token>``, sorted. A
-    malformed value counts as 0 (out of the index)."""
+    parity} for every non-zero ``jurisdiction.parity.<token>``, sorted.
+    Read as Substrate's ``parityOf`` reads it: the key's token in lowercase
+    hex exactly, the value 1 to 77 ASCII digits (``registry_uint``); any
+    other value counts as 0 (out of the index)."""
     out: Dict[str, int] = {}
     for key, value in writes.items():
         if not str(key).startswith(PARITY_KEY_PREFIX):
             continue
-        token = str(key)[len(PARITY_KEY_PREFIX):].strip().lower()
-        text = str(value or "").strip()
-        if len(token) != 42 or not token.startswith("0x") or not text.isdigit():
+        token = str(key)[len(PARITY_KEY_PREFIX):]
+        if (len(token) != 42 or not token.startswith("0x")
+                or any(c not in "0123456789abcdef" for c in token[2:])):
             continue
-        if int(text) > 0:
-            out[token] = int(text)
+        parity = registry_uint(value)
+        if parity > 0:
+            out[token] = parity
     return dict(sorted(out.items()))
 
 

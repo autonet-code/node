@@ -48,8 +48,9 @@ the operator. The DAEMON code paths drive every step:
      publishes a second tool, B and C review it, and it concludes in an
      epoch that collected no fees (its pool is only what the first close
      carried). The close seeds the difference between the floor and what
-     the claims are worth to the same earners by weight, the anchor stores
-     the floor, each claim adds its seed to ``earnedValue``, and
+     the claims are worth to the same earners by weight. Each anchor
+     stores the floor for the epoch after it, whose close reads it and
+     whose seeds it caps. Each claim adds its seed to ``earnedValue``, and
      AutonetRepClaim mints the floor in REP across the three households;
   9. B opens credits with C in T18 and buys C's T18 service twice on them
      (vouchers pay ahead); C's sweep settles what it served without
@@ -1373,8 +1374,9 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         check(outs2["A"].get("anchored"),
               f"daemon A's driver anchors e6 ({outs2['A'].get('anchor_error', 'direct')})")
         idx6 = int(substrate.functions.anchorCount().call()) - 1
-        check(substrate.functions.anchorFloor(idx6).call() == floor_v,
-              "the anchor stored the floor in value units")
+        check(substrate.functions.anchorFloor(idx6 - 1).call() == floor_v
+              and substrate.functions.seedCap(idx6).call() == floor_v,
+              "e6's seeds are capped at the floor anchor e5 stored, the one its close read")
         for h in ("B", "C"):
             outs2[h] = await asyncio.to_thread(
                 csd[h].handle_federated_close, dataclasses.replace(fed2, is_winner=False))

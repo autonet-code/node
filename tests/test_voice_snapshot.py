@@ -423,10 +423,23 @@ class TestParity:
         usdc, dai = "0x" + "a6" * 20, "0x" + "1b" * 20
         assert parity_from_writes({
             "jurisdiction.parity." + usdc: str(10 ** 30),
-            "jurisdiction.parity." + dai.upper().replace("0X", "0x"): str(10 ** 18),
+            "jurisdiction.parity." + dai: str(10 ** 18),
             "jurisdiction.parity.0xshort": "5",
             "jurisdiction.parity." + "0x" + "cc" * 20: "",
             "jurisdiction.parity." + "0x" + "dd" * 20: "0",
             "jurisdiction.parity." + "0x" + "ee" * 20: "1.5",
             "jurisdiction.autonet.charter": "{}",
         }) == {dai: 10 ** 18, usdc: 10 ** 30}
+
+    def test_parity_is_read_as_substrate_reads_it(self):
+        """parityOf reads the key with the token in lowercase hex and a
+        value of 1 to 77 ASCII digits; anything else is out of the index,
+        on both sides."""
+        from nodes.common.voice_state import parity_from_writes
+        t = "0x" + "a6" * 20
+        upper = "0x" + "A6" * 20
+        assert parity_from_writes({"jurisdiction.parity." + upper: "5"}) == {}
+        assert parity_from_writes({"jurisdiction.parity." + t + " ": "5"}) == {}
+        for bad in (" 5", "5 ", "9" * 78, "٥", "-5"):
+            assert parity_from_writes({"jurisdiction.parity." + t: bad}) == {}, bad
+        assert parity_from_writes({"jurisdiction.parity." + t: "9" * 77}) == {t: 10 ** 77 - 1}

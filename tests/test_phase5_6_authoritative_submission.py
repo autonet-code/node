@@ -344,15 +344,20 @@ async def test_the_rep_floor_seed_is_claimed_into_earned_value(chain):
     """The REP floor: a close whose pools are empty but whose tools conclude
     seeds the floor to its earners by weight; each household's submitter
     claims a leaf with no tokens and its seed, and Substrate adds the seed
-    to earnedValue and seededValue, never more than the floor it stored
-    with the anchor."""
-    from tests.substrate_chain_helpers import index_registry
+    to earnedValue and seededValue, capped at the floor it stored at the
+    anchor before (the one the close read)."""
+    from web3 import Web3 as _W3
+    from tests.substrate_chain_helpers import anchor_direct, index_registry
     from nodes.common.mint_params import REP_FLOOR_KEY
     fx = chain
     floor = 3_000_000                       # value units: 3 REP
     reg = index_registry(fx["contract"])
     fx["w3"].eth.wait_for_transaction_receipt(reg.functions.setValue(
         REP_FLOOR_KEY, str(floor * 10 ** 12)).transact({"from": fx["deployer"]}))
+    # The anchor the close is pinned to stores the floor for the next epoch.
+    assert anchor_direct(fx["w3"], fx["contract"], "e_before_floor",
+                         _W3.keccak(text="root-before-floor"), "cid-before-floor",
+                         _W3.keccak(text="payload-before-floor"), bytes(32)).status == 1
     canonical = canonical_order([_registration("rpb_floor", a) for a in fx["agent_addrs"]])
     regs = federated_epoch_close(canonical)["tool_registrations"]
     result = federated_epoch_close(
@@ -368,7 +373,8 @@ async def test_the_rep_floor_seed_is_claimed_into_earned_value(chain):
     assert a.success, a.error
     c = fx["contract"]
     index = c.functions.anchorCount().call() - 1
-    assert c.functions.anchorFloor(index).call() == floor
+    assert c.functions.anchorFloor(index - 1).call() == floor
+    assert c.functions.seedCap(index).call() == floor
     resolver = InMemoryBlobResolver()
     resolver.put(a.agent_mint_blob)
     svc = _service(fx)

@@ -37,16 +37,21 @@ REP_PER_VALUE = 10 ** 12
 """REP base units per 6-decimal value unit (REP is value x 1e12)."""
 
 
-def rep_floor_from_writes(writes: Dict[str, str]) -> int:
-    """The REP floor in value units: the Registry's REP base units divided
-    by 1e12, rounded down. Parsed as Substrate parses it (``repFloorValue``,
-    OpenZeppelin ``Strings.tryParseUint``): 1 to 77 ASCII digits, nothing
-    around them; anything else, or unset, is 0 (no floor)."""
-    raw = writes.get(REP_FLOOR_KEY)
+def registry_uint(raw: object) -> int:
+    """A Registry value as Substrate reads a number (``_registryUint``,
+    OpenZeppelin ``Strings.tryParseUint``): 1 to 77 ASCII digits and
+    nothing around them; anything else, or unset, is 0."""
     if (not isinstance(raw, str) or not raw or len(raw) > 77
             or not all("0" <= c <= "9" for c in raw)):
         return 0
-    return int(raw) // REP_PER_VALUE
+    return int(raw)
+
+
+def rep_floor_from_writes(writes: Dict[str, str]) -> int:
+    """The REP floor in value units: the Registry's REP base units divided
+    by 1e12, rounded down (``repFloorValue``); unset or malformed is 0 (no
+    floor)."""
+    return registry_uint(writes.get(REP_FLOOR_KEY)) // REP_PER_VALUE
 
 
 def review_params_from_writes(writes: Dict[str, str], jurisdiction_id: str) -> tuple:

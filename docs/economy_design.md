@@ -266,12 +266,13 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   whole value units, the dust lapsing. When the claims are
   worth the floor or more, nothing is seeded. A close where no tool
   concludes has no earners: its floor lapses and never carries over. Each
-  anchor stores the floor it was anchored under; each claim leaf carries
-  its seed, which Substrate adds to `earnedValue` (so the REP claim mints
-  it with the rest) and records apart in `seededValue`. No epoch's seeds
-  can total more than its stored floor, so an anchor can mint at most one
-  floor of REP beyond what its fees are worth. The seed is REP only: it
-  pays no money.
+  anchor stores the floor for the epoch after it, whose close reads the
+  floor pinned to that anchor; each claim leaf carries its seed, which
+  Substrate adds to `earnedValue` (so the REP claim mints it with the
+  rest) and records apart in `seededValue`. No epoch's seeds can total
+  more than the floor stored at the anchor before it, so an anchor can
+  mint at most one floor of REP beyond what its fees are worth. The seed
+  is REP only: it pays no money.
 - Weighs reviews (by the reviewer's household REP), votes, elections.
 - **Moves on reviews** (ToolBond): each review risks `degradeBps` (10%) of the
   household REP it weighed, losing that x (1 - accuracy), reassigned to the

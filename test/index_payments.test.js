@@ -327,12 +327,32 @@ describe("Value-index payments, pools and claims", function () {
       await anchorEpoch(substrate, "e2");
       expect(await substrate.anchorParity(1, U)).to.equal(0n);
     });
+
+    it("a parity too long for a uint256 reads as 0: an anchor still lands, a payment is refused", async function () {
+      await fillPools();
+      const reg = await ethers.getContractAt("MockRegistry", await substrate.registry());
+      const key = `jurisdiction.parity.${U.toLowerCase()}`;
+      // 78 digits: the parse would overflow and revert.
+      await reg.setValue(key, "9".repeat(78));
+      expect(await substrate.parityOf(U)).to.equal(0n);
+      expect(await substrate.acceptsToken(U)).to.equal(false);
+      await anchorEpoch(substrate, "e2");
+      expect(await substrate.anchorParity(1, U)).to.equal(0n);
+      expect(await substrate.anchorCount()).to.equal(2n);
+      await fund(usd, payer, substrate, 1_000n);
+      await expect(substrate.connect(payer).payForService(U, recipient.address, 1_000n, digest("r")))
+        .to.be.revertedWithCustomError(substrate, "NotInIndex");
+      // 77 digits still parse.
+      await reg.setValue(key, "1" + "0".repeat(76));
+      expect(await substrate.parityOf(U)).to.equal(10n ** 76n);
+    });
   });
 
   // The REP floor: Registry jurisdiction.autonet.rep_floor (REP base units),
-  // stored with each anchor in value units (/1e12). A leaf's seed is its
-  // part of the floor; the seeds an epoch's claims credit never total more
-  // than its stored floor.
+  // stored at each anchor in value units (/1e12) for the epoch after it. A
+  // leaf's seed is its part of the floor; the seeds an epoch's claims
+  // credit never total more than the floor stored at the anchor before it
+  // (the floor its close read).
   describe("the REP floor", function () {
     const FLOOR_KEY = "jurisdiction.autonet.rep_floor";
     const REP = 10n ** 12n;    // REP base units per value unit
@@ -344,16 +364,22 @@ describe("Value-index payments, pools and claims", function () {
 
     const setFloor = async (v) => (await reg.setValue(FLOOR_KEY, String(v))).wait();
 
-    it("an anchor stores the floor in value units; unset or malformed reads as 0", async function () {
+    it("an anchor stores the floor in value units for the next epoch; unset or malformed reads as 0", async function () {
       expect(await substrate.REP_FLOOR_KEY()).to.equal(FLOOR_KEY);
       expect(await substrate.repFloorValue()).to.equal(0n);
+      // Even with a floor in the Registry, the first epoch has no cap: its
+      // close read no anchor.
+      await setFloor(7n * 10n ** 18n);
       await anchorEpoch(substrate, "f0");
-      expect(await substrate.anchorFloor(0)).to.equal(0n);
+      expect(await substrate.anchorFloor(0)).to.equal(7_000_000n);
+      expect(await substrate.seedCap(0)).to.equal(0n);
 
       await setFloor(5n * 10n ** 18n + 999n);     // 5 REP and a remainder below a value unit
       expect(await substrate.repFloorValue()).to.equal(5_000_000n);
       await anchorEpoch(substrate, "f1");
       expect(await substrate.anchorFloor(1)).to.equal(5_000_000n);
+      // Epoch f1 is capped at the floor stored at f0, the one its close read.
+      expect(await substrate.seedCap(1)).to.equal(7_000_000n);
 
       // An overflowing number (78 digits) would revert the parse: malformed too.
       for (const bad of ["not a number", "-5", "1e18", " 5", "9".repeat(78)]) {
@@ -362,6 +388,8 @@ describe("Value-index payments, pools and claims", function () {
       }
       await anchorEpoch(substrate, "f2");
       expect(await substrate.anchorFloor(2)).to.equal(0n);
+      expect(await substrate.seedCap(2)).to.equal(5_000_000n);
+      expect(await substrate.seedCap(3)).to.equal(0n);
       // 77 digits still parse.
       await setFloor("9".repeat(77));
       expect(await substrate.repFloorValue()).to.equal(10n ** 65n - 1n);
@@ -370,16 +398,17 @@ describe("Value-index payments, pools and claims", function () {
       expect(await substrate.repFloorValue()).to.equal(0n);
     });
 
-    it("a claim adds its seed to earnedValue and seededValue, the epoch's seeds capped at its floor", async function () {
-      const { usdPool } = await fillPools();       // anchor 0
+    it("a claim adds its seed to earnedValue and seededValue, a bad anchor's seeds capped", async function () {
       await setFloor(100n * REP);
+      const { usdPool } = await fillPools();       // anchor 0 stores the floor
+      // A bad anchor: its seeds total 125, more than the floor of 100.
       const tree = claimTree([
         { earner: alice.address, basket: [[U, 50n]], seed: 70n },
         { earner: bob.address, tokens: [], amounts: [], seed: 50n },
         { earner: stranger.address, basket: [[U, 1n]], seed: 5n },
       ]);
       await anchorEpoch(substrate, "e2", tree.root);      // anchor 1
-      expect(await substrate.anchorFloor(1)).to.equal(100n);
+      expect(await substrate.seedCap(1)).to.equal(100n);
       expect(usdPool).to.be.greaterThan(51n);
 
       // Tokens worth 50, seed 70: both in earnedValue.
@@ -406,9 +435,9 @@ describe("Value-index payments, pools and claims", function () {
       expect(await substrate.totalEarnedValue()).to.equal(151n);
     });
 
-    it("each epoch has its own floor; nothing carries from an epoch's unclaimed seed", async function () {
-      await fillPools();
+    it("each epoch has its own cap; nothing carries from an epoch's unclaimed seed", async function () {
       await setFloor(10n * REP);
+      await fillPools();
       const t2 = claimTree([{ earner: alice.address, tokens: [], amounts: [], seed: 4n }]);
       await anchorEpoch(substrate, "e2", t2.root);
       const t3 = claimTree([{ earner: alice.address, tokens: [], amounts: [], seed: 16n }]);
@@ -420,23 +449,31 @@ describe("Value-index payments, pools and claims", function () {
       expect(await substrate.earnedValue(alice.address)).to.equal(14n);
     });
 
-    it("a floor edit after the anchor changes nothing for its claims", async function () {
-      await fillPools();
+    it("the cap is the floor the close read: an edit after the anchor before changes nothing", async function () {
       await setFloor(40n * REP);
+      await fillPools();                          // anchor 0 stores 40: epoch e2's floor
       const tree = claimTree([
-        { earner: alice.address, tokens: [], amounts: [], seed: 30n },
-        { earner: bob.address, tokens: [], amounts: [], seed: 30n },
+        { earner: alice.address, tokens: [], amounts: [], seed: 20n },
+        { earner: bob.address, tokens: [], amounts: [], seed: 20n },
       ]);
-      await anchorEpoch(substrate, "e2", tree.root);
-      // Lowered to nothing: the stored floor still pays.
+      // Lowered before e2 is anchored: e2's close read 40, and so does its
+      // cap, so no seed is cut.
       await setFloor(0);
+      await anchorEpoch(substrate, "e2", tree.root);
+      expect(await substrate.anchorFloor(1)).to.equal(0n);
+      expect(await substrate.seedCap(1)).to.equal(40n);
       await claimTx(substrate, alice, tree, 0, "e2");
-      expect(await substrate.seededValue(alice.address)).to.equal(30n);
-      // Raised: the stored floor still caps.
+      // Raised after: still 40.
       await setFloor(1000n * REP);
       await claimTx(substrate, bob, tree, 1, "e2");
-      expect(await substrate.seededValue(bob.address)).to.equal(10n);
-      expect(await substrate.anchorFloor(1)).to.equal(40n);
+      expect(await substrate.seededValue(alice.address)).to.equal(20n);
+      expect(await substrate.seededValue(bob.address)).to.equal(20n);
+      expect(await substrate.seedClaimed(1)).to.equal(40n);
+      // The next epoch's cap is what anchor e2 stored: no floor.
+      const t3 = claimTree([{ earner: alice.address, tokens: [], amounts: [], seed: 5n }]);
+      await anchorEpoch(substrate, "e3", t3.root);
+      expect(await substrate.seedCap(2)).to.equal(0n);
+      await expect(claimTx(substrate, alice, t3, 0, "e3")).not.to.emit(substrate, "Seeded");
     });
 
     it("without a floor, a leaf's seed credits nothing", async function () {
