@@ -866,12 +866,13 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     address public registry;
 
     uint256 private constant PARITY_SCALE = 1e30;
-    uint8 public constant MIN_TOKEN_DECIMALS = 6;
-    uint8 public constant MAX_TOKEN_DECIMALS = 18;
-
     /// @notice Decimals of every token Substrate has accepted, stored when
-    ///         it was first listed and never read again; 0 = never listed.
+    ///         it was first listed and never read again (any number of
+    ///         decimals; tokenListed says whether it was listed).
     mapping(address => uint8) public tokenDecimals;
+
+    /// @notice Has `token` been listed (its fees can be collected)?
+    mapping(address => bool) public tokenListed;
 
     /// @dev Every token ever listed, in listing order (the pools' tokens).
     address[] private _poolTokens;
@@ -894,13 +895,12 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     }
 
     /// @notice True iff a payment can be made in `token` now: it is in the
-    ///         index and has 6 to 18 decimals.
+    ///         index and reports its decimals.
     function acceptsToken(address token) public view returns (bool) {
         if (parityOf(token) == 0) return false;
-        uint8 d = tokenDecimals[token];
-        if (d != 0) return true;
-        (bool ok, uint8 dec) = _readDecimals(token);
-        return ok && dec >= MIN_TOKEN_DECIMALS && dec <= MAX_TOKEN_DECIMALS;
+        if (tokenListed[token]) return true;
+        (bool ok, ) = _readDecimals(token);
+        return ok;
     }
 
     /// @notice The value of `amount` of `token` at today's index, in 6-decimal
@@ -915,12 +915,11 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     ///         collected even after it leaves the index: a payment channel
     ///         lists its token when it opens. Anyone; only an accepted token.
     function listToken(address token) public {
-        if (tokenDecimals[token] != 0) return;
+        if (tokenListed[token]) return;
         if (parityOf(token) == 0) revert NotInIndex(token);
         (bool ok, uint8 dec) = _readDecimals(token);
-        if (!ok || dec < MIN_TOKEN_DECIMALS || dec > MAX_TOKEN_DECIMALS) {
-            revert BadTokenDecimals(token);
-        }
+        if (!ok) revert BadTokenDecimals(token);
+        tokenListed[token] = true;
         tokenDecimals[token] = dec;
         _poolTokens.push(token);
         emit TokenListed(token, dec);
@@ -1067,7 +1066,7 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
         uint256 gross,
         bytes32 requestId
     ) external nonReentrant {
-        if (tokenDecimals[token] == 0) revert TokenNotListed(token);
+        if (!tokenListed[token]) revert TokenNotListed(token);
         if (gross == 0) revert ZeroAmount();
         _pullFee(token, msg.sender, recipient, gross, feeOf(gross));
         requestId;

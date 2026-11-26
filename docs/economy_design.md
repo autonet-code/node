@@ -35,7 +35,7 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 
 - **No token of its own.** A jurisdiction is paid in the tokens of its
   value index: every token with a non-zero Registry
-  `jurisdiction.parity.<token>` (6 to 18 decimals). The index is the
+  `jurisdiction.parity.<token>` (any number of decimals). The index is the
   jurisdiction's own price: a parity says what one token is worth in the
   jurisdiction's value unit (6 decimals; value = amount x parity / 1e30,
   so 1 USDC at parity 1e30 and 1 DAI at 1e18 are both worth 1). Contracts

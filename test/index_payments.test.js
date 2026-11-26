@@ -132,15 +132,15 @@ describe("Value-index payments, pools and claims", function () {
         .to.be.revertedWithCustomError(substrate, "NotInIndex");
     });
 
-    it("refuses a token outside 6 to 18 decimals", async function () {
-      for (const d of [2, 24]) {
+    it("accepts a token with any number of decimals, 0 included", async function () {
+      for (const d of [0, 2, 24]) {
         const t = await deployIndexToken(substrate, { decimals: d });
         const T = await t.getAddress();
-        expect(await substrate.parityOf(T)).to.be.gt(0n);
-        expect(await substrate.acceptsToken(T)).to.equal(false);
+        expect(await substrate.acceptsToken(T)).to.equal(true);
         await fund(t, payer, substrate, 1000n);
-        await expect(substrate.connect(payer).payForService(T, recipient.address, 1000n, digest("x")))
-          .to.be.revertedWithCustomError(substrate, "BadTokenDecimals");
+        await substrate.connect(payer).payForService(T, recipient.address, 1000n, digest(`x${d}`));
+        expect(await substrate.tokenListed(T)).to.equal(true);
+        expect(await substrate.tokenDecimals(T)).to.equal(BigInt(d));
       }
       // An address with no code is refused too.
       await setParity(substrate, { getAddress: async () => stranger.address }, 1n);

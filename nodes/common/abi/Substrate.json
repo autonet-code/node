@@ -1128,38 +1128,12 @@
   },
   {
    "inputs": [],
-   "name": "MAX_TOKEN_DECIMALS",
-   "outputs": [
-    {
-     "internalType": "uint8",
-     "name": "",
-     "type": "uint8"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [],
    "name": "MIN_SERVICE_FEE_BPS",
    "outputs": [
     {
      "internalType": "uint16",
      "name": "",
      "type": "uint16"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "MIN_TOKEN_DECIMALS",
-   "outputs": [
-    {
-     "internalType": "uint8",
-     "name": "",
-     "type": "uint8"
     }
    ],
    "stateMutability": "view",
@@ -2703,6 +2677,25 @@
      "internalType": "uint8",
      "name": "",
      "type": "uint8"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "tokenListed",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
     }
    ],
    "stateMutability": "view",
