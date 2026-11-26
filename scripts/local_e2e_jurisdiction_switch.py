@@ -137,14 +137,14 @@ async function main() {
     const autonet = await prepare(autonetSetup, deployer, core, "autonet", {
       substrate: { challengeWindow: 3600n, charter: charterUi("charter").default,
                    epochRules: epochRules ?? charterUi("epochRules").fixed,
-                   genesisRoot: ethers.ZeroHash, serviceFeeBps: 250n, feeTreasuryBps: 5000n },
+                   serviceFeeBps: 250n, feeTreasuryBps: 5000n },
       toolBond: bondParams });
     const d = await autonetSetup.deploymentOf(autonet.id);
     await (await factory.finalize(core, [{ setup: await autonetSetup.getAddress(), id: autonet.id }],
       ["jurisdiction.name"], [name])).wait();
     return { name, governor: core.governor, rep_token: core.token, registry: core.registry,
              timelock: core.timelock, substrate: d.substrate, tool_bond: d.toolBond,
-             vault: d.vault, charter: d.charter, epoch_rules: d.epochRules };
+             charter: d.charter, epoch_rules: d.epochRules };
   }
   const out = { A: await launch("Autonet A"), B: await launch("Autonet B"),
                 C: await launch("Autonet C", "1") };
@@ -842,9 +842,9 @@ async def amain() -> int:
     s9 = board.stage(9, "A's anchored mints still claimable after returning")
     s9.status = "SKIP"
     s9.note("reason", "anchoring is governor-only (a DAO proposal through the "
-            "timelock) and each epoch's mint is capped by fees burned in the "
-            "previous anchor window, which needs ATN bought through the vault; "
-            "not practical in this harness")
+            "timelock) and each epoch's claims are capped by the tool share "
+            "collected in the previous anchor window, which needs service "
+            "payments in an index token; not practical in this harness")
 
     return finish()
 

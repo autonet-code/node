@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The economy proof-of-life: one turn of the household economy loop, end to
 end on a local chain (Decisions 2026-11-07, 2026-11-08, 2026-11-09 and
-2026-11-10; docs/economy_design.md).
+2026-11-10; the README's "What a tool earns").
 
 Stands up a LOCAL hardhat node with this repo's Substrate and ServiceMarket
 (ServiceRegistry + PaymentChannel) and the jurisdiction contracts the loop

@@ -1,6 +1,5 @@
 """Daemon-spawned runs never reach the owner listener, and authored tools get
-no daemon secrets (docs_from_code/runtime_and_agents.md section 7, items 10
-and 11).
+no daemon secrets.
 
 Pinned here:
 - an AUTHORED tool runs with the scrubbed environment (no daemon secret, only

@@ -779,9 +779,8 @@ class TestAdoption:
     @pytest.mark.asyncio
     async def test_authored_tools_get_scrubbed_env(self, tmp_path,
                                                    monkeypatch):
-        """An agent's OWN tool no longer inherits the daemon environment
-        (docs_from_code/runtime_and_agents.md section 7, item 10): the author
-        is a model, so the daemon's secrets stay out of its code."""
+        """An agent's OWN tool no longer inherits the daemon environment: the
+        author is a model, so the daemon's secrets stay out of its code."""
         monkeypatch.setenv("ATN_TEST_SECRET", "mine")
         rt = _make_runtime(tmp_path)
         await _family(rt)

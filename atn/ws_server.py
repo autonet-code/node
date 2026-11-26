@@ -2595,7 +2595,7 @@ class WebSocketBridge:
             # jurisdiction stays parked under its key; agents keep their
             # identity, registration is per jurisdiction.
             #
-            # Two ways to name it (docs/architecture.md): {network, dao},
+            # Two ways to name it: {network, dao},
             # looked up in the data source, which supplies the Registry, the
             # RPC and the network's facts; or {dao_registry, rpc_url} named
             # directly, for a jurisdiction no data source lists, with the

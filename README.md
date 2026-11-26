@@ -2,8 +2,8 @@
 
 **Autonet** is the automation module of the On-Chain Jurisdiction: the daemon
 that a household runs, the tool library and the services market it takes part
-in, and Autonet's contracts. Nothing has launched yet: every release so far
-runs on test networks.
+in, and Autonet's contracts. It is in public testing: releases so far run on
+test networks.
 
 ## Run it
 
@@ -38,23 +38,23 @@ The *daemon* is the node runtime that a household runs; *App* is the human-facin
 
 Autonet is a jurisdiction module. Installing it at genesis is fully permissionless. Adding it to an existing jurisdiction requires a constitutional proposal. In both cases the parameters are chosen at installation, while the functions are fixed in the setup contract. Once installed, the following smart contracts are added to the jurisdiction:
 
-- **Substrate.sol.** It is the ATN token contract; it holds the epoch anchors and the Agent registry; it accepts the service fee.
+- **Substrate.sol.** Holds the epoch anchors and the Agent registry; takes the service fee on every service payment and holds the tool pool until its earners claim it.
 - **AnchorElection.sol.** Determines, by REP vote, which version of the substrate is anchored at the end of each epoch.
-- **AutonetVault.sol. Sells newly minted ATN against** the tokens specified in the jurisdiction’s value index.
-- **AutonetRepClaim.sol.** Mints REP 1:1 on ATN earned from the tool pool.
+- **AutonetRepClaim.sol.** Mints REP one to one on the value a household earned from the tool pool, and on its part of the REP floor.
 - **ToolBond.sol.** Holds the stakes behind tools and runs their reviews, for which it is granted the right to slash REP.
 - **ServiceMarket.sol.** Registers services and settles payments for them through payment channels.
+
+Autonet has no token of its own. Services are priced and paid in the tokens of the jurisdiction's value index, and every amount Autonet weighs, such as a stake or what a household earned, is valued at their parities.
 
 The address of each is recorded in the Registry, where daemons and apps look them up. The installation takes the following parameters, shown with the values suggested in Werule. For Substrate.sol:
 
 - **Charter.** The axes tools are reviewed on, each stated as a short thesis. Correctness, simplicity and novelty are not part of it: every review scores them in every jurisdiction (see [Using and reviewing a tool](#using-and-reviewing-a-tool)). The suggested charter holds four axes: life is precious, self-preservation, promotion of intelligence, and evolution. These axes are relevant only once the substrate matures to a level of complexity capable of encoding such abstract notions, and are intended to catalyze alignment as a byproduct of the network’s activity. The values a Jurisdiction holds in its charter are what the activity of its Agents is rated against by their peers, and ground the consensus’ ongoing calibration of its economic incentives.
 - **Service fee.** The share of every service payment Substrate.sol takes, between 0.5% and 10%. The suggested value is 2.5%.
-- **Treasury share.** The part of the service fee paid to the treasury. The rest is burned in order to fund the tool pool. It can be at most 90%, so at least a tenth always burns. The suggested value is 50%.
-- **Genesis root.** Used only when forking or splitting an existing jurisdiction: the ATN balances carried over, each claimable once by its holder. Empty for a new jurisdiction. Can’t be modified after deployment.
+- **Treasury share.** The part of the service fee paid to the treasury. The rest, the tool share, goes to the tool pool. It can be at most 90%, so at least a tenth of every fee goes to the tool pool. The suggested value is 50%.
 
 For ToolBond.sol:
 
-- **Stake per tool.** The ATN an author stakes behind each published tool. A tool without one earns nothing. The suggested value is 100 ATN.
+- **Stake per tool.** The least value an author stakes behind each published tool, in a token of the value index. A tool without one earns nothing. The suggested value is 100 units of value.
 - **Reviewer share.** The share of a tool's payment from the tool pool that goes to its reviewers, whatever their verdict. The author receives the rest, scaled by the tool's score (see [What a tool earns](#what-a-tool-earns)). The suggested value is 40%.
 - **Reveal window.** Reviews stay obfuscated until their epoch is anchored, after which reviewers have this long to reveal them. The suggested value is one day.
 - **Wrong-review penalty.** The share of the reviewer's REP a review puts at risk. A fully wrong review loses all of it, a partly wrong one loses less, and a batch that is never revealed forfeits the full amount for each review in it. The suggested value is 10%.
@@ -65,7 +65,7 @@ For ServiceMarket.sol:
 
 - Challenge window. How long a service provider has, after a buyer closes its credits, to collect what the service provider has served. The buyer then takes back the rest of the deposit. The suggested value is one hour.
 
-Apart from the genesis root, every parameter can be changed later by proposal: the charter by constitutional proposal, effective from the next epoch, and the others by ordinary proposal. The settings that govern the length of an epoch are not part of the installation. They are Registry entries the DAO sets by proposal, and until it does, every epoch lasts one proposal life cycle (see [Epochs](#epochs)).
+Every parameter can be changed later by proposal: the charter by constitutional proposal, effective from the next epoch, and the others by ordinary proposal. The settings that govern the length of an epoch are not part of the installation. They are Registry entries the DAO sets by proposal, and until it does, every epoch lasts one proposal life cycle (see [Epochs](#epochs)). Neither is the REP floor, a Registry entry set by constitutional proposal and unset until then (see [What a tool earns](#what-a-tool-earns)).
 
 ## Joining as a household
 
@@ -79,7 +79,7 @@ The expected use is that the owner lets an external Agent (from a framework they
 
 Joining is enough to use the network. The daemon connects to its peers, exchanges the jurisdiction's events with them and gives its Agents access to the tool library. It finds its first peers at the seed addresses listed in the Registry. It finds further peers through a lookup table that all daemons share (a distributed hash table, DHT) and connects to them directly, so the events keep flowing when the seeds are offline.
 
-To earn, the daemon must register as a household within the jurisdiction, with its operator address going on-chain, bound to the owner's wallet: the owner signs the binding and the operator submits it, to attest that the two keys are in agreement. From then on the daemon deterministically computes each epoch-close and, with the operator key, votes in the election that anchors it and submits the household's claims. Everything the household earns, ATN and REP, is claimed to the owner's wallet.
+To earn, the daemon must register as a household within the jurisdiction, with its operator address going on-chain, bound to the owner's wallet: the owner signs the binding and the operator submits it, to attest that the two keys are in agreement. From then on the daemon deterministically computes each epoch-close and, with the operator key, votes in the election that anchors it and submits the household's claims. Everything the household earns, money and REP, is claimed to the owner's wallet.
 
 Native Agents form a lineage rooted at the owner's wallet. A native Agent can be registered under another Agent, up to 16 levels deep, with a binding signed either by the owner or by the parent Agent itself, so Agents can register their own sub-Agents without involving the owner.
 
@@ -93,7 +93,7 @@ When an Agent works out how to do something, it publishes the solution to the li
 
 The main claim to value of the tool library is that it cuts the jurisdiction’s reliance on centralized inference providers for a growing number of routine tasks, by allowing cheap local models to perform close or on par with frontier ones.
 
-A tool (its author) is paid from the tool pool, only if and when households with enough REP have reviewed it. Its reviewers receive a fixed part of the payment, whatever the rating. The author receives the rest, scaled by the tool's score, and a tool built on others passes the part of the author's share that is not new to the tools it imports. The tool pool is funded by the burned share of the service fee (see [The Services Market](#the-services-market)).
+A tool (its author) is paid from the tool pool, only if and when households with enough REP have reviewed it. Its reviewers receive a fixed part of the payment, whatever the rating. The author receives the rest, scaled by the tool's score, and a tool built on others passes the part of the author's share that is not new to the tools it imports. The tool pool is funded by the tool share of the service fee (see [The Services Market](#the-services-market)).
 
 Households review each tool, weighted by their REP, on its correctness, simplicity and novelty, on the values in the jurisdiction's charter, and on whether it is malware. The resulting ratings are shown with every search result, and a malware verdict denies a tool earnings, takes REP from its author and removes the tool from the library of every daemon. The framework rates tools; it does not protect a household from them.
 
@@ -105,7 +105,7 @@ A tool is a directory of code with a manifest (autonet-tool.json) at its root. T
 
 Publishing requires a novelty claim: a statement of what is new and the digests of the closest existing tools. The claim points reviewers to what the author compared the tool with, and is not what they score: reviewers judge the tool's novelty themselves, against everything that already exists, in the library or outside it. A copy or a thin wrapper of an existing tool rates low whatever its claim says.
 
-Publishing also stakes ATN behind the tool in ToolBond.sol, no less than the minimum stake the jurisdiction sets. An Agent spends only its own balance, and an external Agent is using the wallet of the daemon (a.k.a. the operator). Therefore the owner first has to fund the operator wallet with ATN, bought from the jurisdiction directly or from the open market, and also with the chain's native token, to cover the on-chain transaction fee (gas). If reviews settle the tool as malware, the stake is slashed by the share of the reviewing REP that called it malware.
+Publishing also stakes a token of the value index behind the tool in ToolBond.sol, worth no less than the minimum stake the jurisdiction sets. The stake is valued at the parity of the moment it is posted, so a later change to the index never unbonds the tool. An Agent spends only its own balance, and an external Agent is using the wallet of the daemon (a.k.a. the operator). Therefore the owner first has to fund the operator wallet with a token of the index, and also with the chain's native token, to cover the on-chain transaction fee (gas). If reviews settle the tool as malware, the stake is slashed by the share of the reviewing REP that called it malware.
 
 A tool whose stake is withdrawn, or falls below the minimum, earns nothing. An author who asks to withdraw the stake receives it after the unbond delay, during which the tool can still be reviewed and its stake slashed. The withdrawal also waits for the tool's open review rounds to finalize. The author cannot withdraw the stake while more than half of the REP that reviewed the tool flags it as malware before its reviews conclude, unless the DAO has cleared the tool.
 
@@ -138,13 +138,13 @@ Each review risks a share *p* of its household's REP *w* (the wrong-review penal
 
 *p* × *w* × (1 − *a*)
 
-The REP lost in the round is divided among the round's reviews in proportion to their REP multiplied by their accuracy. A review alone in its round has no accuracy, and neither loses nor wins REP. The tool it judges could earn or get slashed though, if that lone review for it carries enough REP. Within the Autonet module, new REP is minted only when a household claims it against ATN earned from the tool pool, one REP per ATN. A review round creates no new REP. It only burns existing REP or moves it between households.
+The REP lost in the round is divided among the round's reviews in proportion to their REP multiplied by their accuracy. A review alone in its round has no accuracy, and neither loses nor wins REP. The tool it judges could earn or get slashed though, if that lone review for it carries enough REP. Within the Autonet module, new REP is minted only when a household claims it against what it earned from the tool pool, one REP per unit of value, and against its part of the REP floor. A review round creates no new REP. It only burns existing REP or moves it between households.
 
 A tool receives a malware verdict when more than half of the REP that reviewed it flags it as malware, counted when its reviews conclude (see [What a tool earns](#what-a-tool-earns)), or when the DAO designates it as malware. The tool's author then receives nothing from the tool pool, and a verdict of the reviewers also slashes their REP. The authors of tools built on it receive nothing either, but are not penalized. Ratings and verdicts are public, to provide context to households when deciding how to handle the tools in the library.
 
 Every daemon prunes a tool with a malware verdict and every tool built on it: the daemon deletes them from its library, stops serving them to other daemons, and refuses to fetch or adopt them. The epoch-close also refuses to register a new tool that imports a tool with a malware verdict. A household keeps the copy of a pruned tool that it had already installed, since what to run remains each household's decision.
 
-A verdict of the reviewers is settled when the tool's reviews conclude, with no appeal period. The epoch-close records the payment that the tool, and each tool built on it, would have received without the verdict, and leaves that payment unminted. In the formulas below, *f* is the share of the reviewing REP that flagged the tool, *S* is the author's stake, *R* is the REP of the author's household when the verdict is settled, and *m* is the malware penalty. Once the verdict is settled, the author loses Δ*S* of the stake, and the author's household loses Δ*R* of its REP:
+A verdict of the reviewers is settled when the tool's reviews conclude, with no appeal period. The epoch-close records the payment that the tool, and each tool built on it, would have received without the verdict, and leaves that payment in the tool pool. In the formulas below, *f* is the share of the reviewing REP that flagged the tool, *S* is the author's stake, *R* is the REP of the author's household when the verdict is settled, and *m* is the malware penalty. Once the verdict is settled, the author loses Δ*S* of the stake, and the author's household loses Δ*R* of its REP:
 
 Δ*S* = *f* × *S*
 
@@ -156,25 +156,27 @@ Only a malware verdict can be appealed. Ratings are final. There is no appeal pe
 
 ### What a tool earns
 
-At each epoch-close, the tools whose reviews conclude in it are rewarded, in proportion to the results and the REP of the reviewers. A tool's reviews conclude once the households that reviewed it hold 1% of all REP and make up 0.5% of the households that hold REP. Neither threshold counts the author's household or sanctioned households, and the DAO sets both in the Registry. Until a tool's reviews conclude, its rounds carry over to later epoch-closes. The concluding tools divide the tool pool in proportion to the REP behind their reviews. Each household's REP is divided among the tools it reviewed in the epoch, so that reviewing many tools does not multiply that REP.
+At each epoch-close, the tools whose reviews conclude in it are rewarded, in proportion to the results and the REP of the reviewers. A tool's reviews conclude once the households that reviewed it hold 1% of all REP and make up 0.5% of the households that hold REP. Neither threshold counts the author's household or sanctioned households, and the DAO sets both in the Registry. Until a tool's reviews conclude, its rounds carry over to later epoch-closes. The concluding tools divide the tool pool in proportion to the REP behind their reviews. The pool holds one balance for each token of the value index, and every earner receives the same fraction of each balance, in one claim. Each household's REP is divided among the tools it reviewed in the epoch, so that reviewing many tools does not multiply that REP.
 
 A tool is paid once, in the epoch-close where its reviews conclude. Later reviews still change its ratings but pay nothing. After the first payment the ratings are public, and a second payment would reward later reviewers for copying them. Paying once also directs reviewers and authors toward new tools. A revision is a new tool, and its novelty is judged against the previous version.
 
 Of a tool's payment, the reviewers receive the reviewer share, divided among them in proportion to their accuracy, whatever ratings they gave. The rest is the author's side, multiplied by the tool's score. The score is the product of three factors. The first is the reviews' mean correctness, and the second is their mean over all of the charter's values together. A negative mean counts as zero in both, and a broken tool, or one that works against the jurisdiction's values, pays its author nothing. The third factor is simplicity, which ranges from one half for the least simple tool to one for the simplest, and can lower the payment but never cancel it.
 
-Novelty divides the author's side between the author and the imported tools. The author keeps the share the reviewers rated as new. The imported tools divide the rest equally. Each imported tool keeps its own novelty share of what it receives and passes the rest to its own imports in the same way, up to four levels deep. An imported tool receives its part whatever its own score, since a well-rated tool can make good use of a poorly rated one. For a tool without imports, the part not rated as new is not minted.
+Novelty divides the author's side between the author and the imported tools. The author keeps the share the reviewers rated as new. The imported tools divide the rest equally. Each imported tool keeps its own novelty share of what it receives and passes the rest to its own imports in the same way, up to four levels deep. An imported tool receives its part whatever its own score, since a well-rated tool can make good use of a poorly rated one. For a tool without imports, the part not rated as new is not paid.
 
-Whatever goes unpaid stays unminted and is added to the pool of the next epoch-close. A low score defers ATN to the tools that conclude later, and no ATN is lost. Each ATN earned from the tool pool gives a claim to one REP.
+Whatever goes unpaid stays in the tool pool for the next epoch-close. A low score defers the payment to the tools that conclude later, and nothing is lost. What a household earns from the tool pool, valued at the parities in force when the epoch-close was anchored, gives a claim to as much REP.
 
-Anyone can add ATN to a tool's bounty in ToolBond.sol. When a round's reveal window closes, each review in the round receives the bounty multiplied by the review's accuracy and by the review's REP as a share of the REP the tool needs to conclude. The payments are scaled down together if they would exceed the bounty. The bounty is not minted and earns no REP. The author takes back the unspent bounty only together with the stake. A contributor whose work the reviews rated unfairly can still be paid from the treasury by proposal, which can also mint REP for the contributor.
+The jurisdiction can set a REP floor: the least REP that an epoch-close mints. When the tool pool an epoch-close divides is worth less than the floor, the difference is minted as REP only, to the same earners in the same proportions as the pool, so that work on the library earns voting weight while the services market is still small. The part that would go to a share left unpaid, such as a low score, a malware verdict or a sanctioned household, is not minted and goes to no one else. When the pool is worth the floor or more, nothing is added. An epoch-close in which no tool concludes divides nothing, and its floor lapses rather than carrying over. The claims of an epoch can never add more REP than the floor in force at the anchor before it.
+
+Anyone can add to a tool's bounty in ToolBond.sol, in the token of its stake. When a round's reveal window closes, each review in the round receives the bounty multiplied by the review's accuracy and by the review's REP as a share of the REP the tool needs to conclude. The payments are scaled down together if they would exceed the bounty. The bounty is not part of the tool pool and earns no REP. What the rounds leave unspent goes to the treasury when the author withdraws the stake, since it was given to the reviewers and not to the author. A contributor whose work the reviews rated unfairly can still be paid from the treasury by proposal, which can also mint REP for the contributor.
 
 ## The Services Market
 
-The execution of some tasks cannot be encoded into tools because the work involved depends on an advantage that no one can copy: hardware, AI model inference, a credential held by a person, private data, or physical action. These tasks are sold as services, while work that requires only know-how is published as a tool. The household that sells a service (the provider) registers the service with an asking price in ATN. Customer households pay for each request in ATN and receive the result from the provider's daemon. The provider receives each payment minus a jurisdiction-set fee. Part of the fee goes to the treasury, and the rest is burned to back the tool pool with real-world value. Services earn ATN only from the buyers, and ATN earned from services gives no claim to REP.
+The execution of some tasks cannot be encoded into tools because the work involved depends on an advantage that no one can copy: hardware, AI model inference, a credential held by a person, private data, or physical action. These tasks are sold as services, while work that requires only know-how is published as a tool. The household that sells a service (the provider) prices it in a token of the jurisdiction's value index. Customer households pay for each request in that token and receive the result from the provider's daemon. The provider receives each payment minus a jurisdiction-set fee. Part of the fee goes to the treasury, and the rest, the tool share, goes to the tool pool in the same token, so that the library is paid from the real-world value the services market produces. Services earn only what their buyers pay, and service income gives no claim to REP.
 
 Every service is backed by a tool registered on the daemon of the service provider. The tool does the work, and need not be published to the tool library: the service provider sells the work, not the code. Once the service is registered, the daemon serves every buyer and collects every payment without further action from the service provider.
 
-Buyers pay in ATN, from credits they hold with the service provider or with a direct payment for a single request. The service provider receives each payment minus the service fee. Part of the fee goes to the treasury, and the rest is burned to back the tool pool with real-world value. Services earn ATN only from the buyers, and ATN earned from services gives no claim to REP. Buyers rate the services they have paid for, and the ratings are shown to other buyers.
+Buyers pay from credits they hold with the service provider, or with a direct payment for a single request. Buyers rate the services they have paid for, and the ratings are shown to other buyers.
 
 The subsections below follow a service from its registration to a buyer who finds and pays for it, then to the daemon that serves it, and on to the ratings it receives.
 
@@ -186,7 +188,7 @@ From those terms, the daemon builds and signs the service's specification (the s
 
 The spec also holds the service's settings: values that the daemon passes to the tool and shows to buyers, such as the model behind an LLM service. A different model is a different quality of work, and is registered as a separate service with its own settings. The digest of the spec identifies the service.
 
-Prices are kept apart from the spec, in a price list that the daemon signs for the service provider. A request service is priced in ATN per request. A session service is priced per quantity of each measure the service charges for: the seconds a session stays open, the gigabytes carried in either direction, and the input and output tokens that the tool reports. Each price reads as an amount of ATN for a quantity of a measure, such as an amount of ATN for every million output tokens. The price list also sets the voucher size, the amount by which a buyer's credits pay ahead (see [Buying a service](#buying-a-service)). A new price list changes the prices without a transaction, and an open session keeps the prices it opened with.
+Prices are kept apart from the spec, in a price list that the daemon signs for the service provider. The price list names one token of the value index, and every price in it is an amount of that token. A request service is priced per request. A session service is priced per quantity of each measure the service charges for: the seconds a session stays open, the gigabytes carried in either direction, and the input and output tokens that the tool reports. Each price reads as an amount of the token for a quantity of a measure, such as an amount for every million output tokens. The price list also sets the voucher size, the amount by which a buyer's credits pay ahead (see [Buying a service](#buying-a-service)). A new price list changes the prices without a transaction, and an open session keeps the prices it opened with.
 
 Registering a service puts the digest of its spec on-chain, in the service registry of ServiceMarket.sol. The registry assigns each service a number and accepts services only from registered Agents whose registration has not been revoked. Payments for a service go to the address that registered it. The registry also has an optional field for a price, and the daemons charge by the signed price list. Registering a service requires no stake: buyers judge a service provider by its ratings (see [Rating a service](#rating-a-service)).
 
@@ -200,11 +202,11 @@ The service provider can retire a service, but only from the address that regist
 
 An Agent finds services as it finds tools: the daemon searches every spec it holds, by meaning and by the words of the query, and orders the results by how well they match. Each result shows the service's mode, settings, prices and voucher size, its rating as of the latest epoch-close, the household of its service provider with any sanction on that household, and the credits that the Agent's household already holds with that service provider. The daemon refuses to buy from a service provider whose household is sanctioned.
 
-A household pays a service provider from credits: ATN deposited in a payment channel of ServiceMarket.sol, one channel per buyer and service provider, used for all of that service provider's services. Opening the credits with a deposit and topping them up are decisions of the buyer's Agent. When the credits are spent, requests and sessions stop until the Agent tops the credits up.
+A household pays a service provider from credits: a deposit in a payment channel of ServiceMarket.sol, in one token of the value index fixed when the channel opens, used for all of that service provider's services priced in that token. Opening the credits with a deposit and topping them up are decisions of the buyer's Agent. Credits in a token that the DAO removes from the index still pay, close and refund, but take no top-up. When the credits are spent, requests and sessions stop until the Agent tops the credits up.
 
 Paying from credits takes no transaction per request. Instead, the buyer's daemon signs vouchers. A voucher states the total that the service provider may collect from the channel, and each new voucher raises that total by the voucher size. The service provider's daemon charges each request, and each measure of a session, against that total. Vouchers pay ahead, so a buyer has at most one voucher at risk with a service provider at any time. A request that the service provider refuses or fails to serve costs the buyer nothing.
 
-A household that holds no credits with a service provider can pay for a single request directly, with one transaction to Substrate.sol (payForService) that names the request. The service provider's daemon checks on-chain that the payment covers the price, went to the service provider and came from the buyer that signed the request, and serves each paid request once. If the tool fails the request, the payment stays valid for that request, and the buyer can send the request again. Each direct payment costs gas, so credits cost less for a buyer who uses a service provider more than once.
+A household that holds no credits with a service provider can pay for a single request directly, with one transaction to Substrate.sol (payForService) that names the token and the request. The service provider's daemon checks on-chain that the payment covers the price, went to the service provider and came from the buyer that signed the request, and serves each paid request once. If the tool fails the request, the payment stays valid for that request, and the buyer can send the request again. Each direct payment costs gas, so credits cost less for a buyer who uses a service provider more than once.
 
 A session is paid from credits. The buyer's daemon gives its Agent a local port, and a program connected to that port talks to the service provider's tool through the two daemons. The session ends when the program disconnects or when the credits run out.
 
@@ -218,7 +220,7 @@ Once a service is registered, the service provider's daemon serves it with no fu
 
 During a session, the daemon meters what it serves. The daemon counts the seconds the session stays open and the gigabytes carried in either direction, and the tool reports the input and output tokens it processes. The daemon charges these against the buyer's credits at the prices quoted when the session opened. Before the credits run short, the service provider's daemon asks the buyer's daemon for the next voucher, and ends the session when no voucher arrives in time.
 
-The daemon collects from the credits on-chain without closing them. Each collection takes up to the amount the service provider has served, which can be less than what the vouchers cover, and the part paid ahead stays with the buyer. By default, the daemon collects from a channel once the channel owes at least 1 ATN, or once a day for a smaller amount. Each collection pays the service provider through Substrate.sol, which takes the service fee, so the fee burns as the service provider earns.
+The daemon collects from the credits on-chain without closing them. Each collection takes up to the amount the service provider has served, which can be less than what the vouchers cover, and the part paid ahead stays with the buyer. By default, the daemon collects from a channel once the channel owes at least one unit of value, or once a day for a smaller amount. Each collection pays the service provider from the deposit and the service fee to Substrate.sol, so the tool pool fills as the service provider earns.
 
 ### Rating a service
 
@@ -228,7 +230,7 @@ Authority over a rating comes from payment, not REP. A review counts only once i
 
 A service review travels to the other daemons with the household's events of the epoch. The epoch-close keeps each payer's latest review of each service and records the service's rating in the anchored state: the mean of each field and of each value of the charter, the share of payers that flagged the service as malware, the number of payers, and what the payers have paid the service provider. Reviews from the service provider's own household and from sanctioned households are not counted.
 
-The rating is shown with every search result, for buyers to weigh. Unlike the reviews of a tool, the reviews of a service mint no ATN, move no REP and slash nothing.
+The rating is shown with every search result, for buyers to weigh. Unlike the reviews of a tool, the reviews of a service pay nothing, move no REP and slash nothing.
 
 ## Epochs
 
@@ -238,9 +240,9 @@ Settlement is the only activity that waits on the chain. While an election is un
 
 ### The length of an epoch
 
-An epoch ends when the service fees burned since the previous cutoff reach a set share of the ATN supply, as the supply stood at the last anchor. Every daemon reads the burned fees from checkpoints kept by Substrate.sol, and therefore every daemon finds the same cutoff. More activity makes for shorter epochs.
+An epoch ends when the service fees collected since the previous cutoff, valued at the parities of the value index, reach a set value (the epoch target). Every daemon reads the fees from checkpoints kept by Substrate.sol, and therefore every daemon finds the same cutoff. More activity makes for shorter epochs.
 
-An epoch is never shorter than one proposal life cycle (the voting delay, the voting period and the execution delay), since its election is a proposal. An epoch is never longer than a set number of voting periods, ten by default, and a quiet jurisdiction still settles. The share and the ceiling are Registry entries of the epoch rules, changed by constitutional proposal. Until the DAO sets the share, every epoch lasts one proposal life cycle.
+An epoch is never shorter than one proposal life cycle (the voting delay, the voting period and the execution delay), since its election is a proposal. An epoch is never longer than a set number of voting periods, ten by default, and a quiet jurisdiction still settles. The target and the ceiling are Registry entries of the epoch rules, changed by constitutional proposal. Until the DAO sets the target, every epoch lasts one proposal life cycle.
 
 A daemon closes the epoch two minutes after the cutoff by default, so that events signed just before the cutoff can still arrive. Each batch of events carries the time its daemon signed it. A batch that arrives more than a minute away from that time (by default) is refused, and no daemon can date events back into a closing epoch.
 
@@ -250,7 +252,7 @@ Every daemon of a registered household computes the epoch-close on its own. The 
 
 Daemons that saw the same events compute the same epoch-close, to the bit. The epoch-close holds:
 
-- the ATN each household earned from the tool pool, as a Merkle tree of amounts, with the earnings of sanctioned households withheld;
+- what each household earned from the tool pool, an amount for each token, and its part of the REP floor, as a Merkle tree, with the earnings of sanctioned households withheld;
 - the ratings of every tool and service, and the tools whose reviews concluded;
 - the tools that every daemon prunes;
 - the state the next epoch starts from.
@@ -272,12 +274,12 @@ When an epoch-close wins, the timelock anchors it on Substrate.sol. Each anchor 
 Once an epoch-close is anchored:
 
 - reviewers reveal the reviews they committed during the epoch, within the reveal window;
-- each household's operator claims the household's ATN with a proof against the earnings tree, and the ATN is paid to the owner's wallet;
-- the operator also claims one REP for each ATN earned from the tool pool, through AutonetRepClaim.sol, paid to the owner's wallet and already delegated, unless the owner has chosen a delegate;
+- each household's operator claims the household's earnings with a proof against the earnings tree, and every token is paid to the owner's wallet in the same transaction; a token whose transfer fails, because its issuer paused it or froze an account, stays owed and is withdrawn later without holding up the others;
+- the operator also claims, through AutonetRepClaim.sol, one REP for each unit of value earned from the tool pool and for each unit of the household's part of the REP floor, paid to the owner's wallet and already delegated, unless the owner has chosen a delegate;
 - ToolBond.sol settles the tools whose reviews concluded, including their malware verdicts;
 - every daemon prunes the tools the epoch-close lists.
 
-Each anchor adds to the tool pool the service fees burned in the epoch before it. The claims of all households together can never exceed the tool pool, and whatever an epoch-close leaves unminted remains in the pool for the epochs that follow.
+Each anchor adds to the tool pool the tool share of the fees collected in the epoch before it. The claims of all households together can never exceed the tool pool in any token, and whatever an epoch-close leaves unpaid remains in the pool for the epochs that follow.
 
 ## Public Services
 
@@ -285,7 +287,7 @@ A service sold in the market answers to its buyer, while a public service answer
 
 A public service is a DAO in its own right, under the jurisdiction, and its charter states its mandate. The public service runs its own daemons, Agents and robots, and buys from the services market like any household. Its members decide how it works, by whatever means they choose. The jurisdiction judges a public service by its work alone, through the vote that funds it.
 
-A public service takes part in Autonet as a household whose owner is the timelock of its DAO rather than a person's wallet. A timelock cannot sign, so the DAO approves the binding of its operator on-chain, by proposal, and replaces or revokes the operator the same way. The ATN and REP that the household earns are claimed to the timelock, and the DAO delegates that REP to its operator for the epoch elections. Income from the services the household sells goes to the DAO's treasury.
+A public service takes part in Autonet as a household whose owner is the timelock of its DAO rather than a person's wallet. A timelock cannot sign, so the DAO approves the binding of its operator on-chain, by proposal, and replaces or revokes the operator the same way. The money and REP that the household earns are claimed to the timelock, and the DAO delegates that REP to its operator for the epoch elections. Income from the services the household sells goes to the DAO's treasury.
 
 A private service provider can also be a DAO. The charter, treasury and members of the service provider are then public, and the service provider answers for its work as one body, which suits the more substantial services.
 
@@ -353,7 +355,7 @@ npx hardhat run scripts/deploy_substrate.js --network localhost
 **Proof of life.** An end-to-end script exercises the live path without needing a live network:
 
 ```bash
-python scripts/local_e2e_tool_security.py         # tool economy: bond -> review -> close -> conclude -> on-chain mint -> malware verdict, DAO clear and designate
+python scripts/local_e2e_tool_security.py         # tool economy: bond -> review -> close -> conclude -> on-chain claim -> malware verdict, DAO clear and designate
 ```
 
 The other `scripts/local_e2e_*.py` scripts cover services, the epoch-close and the robots the same way.
@@ -369,8 +371,6 @@ The other `scripts/local_e2e_*.py` scripts cover services, the epoch-close and t
 | `experiments/` | Experiment records, including the simulated robot runs (`experiments/robots/`). |
 | `scripts/` | Deploy, operations and the end-to-end scripts. |
 | `tests/` | The test suite (large and slow: run targeted files, never the whole suite). |
-| `docs/` | The system's current architecture and economy, on one page each. |
-| `docs_from_code/` | Reference documentation generated from the code. |
 | `legacy/pre-substrate/` | Earlier-paradigm files kept with their history. Not the live path. |
 
 ## Testing
@@ -389,9 +389,8 @@ python scripts/local_e2e_robot.py                                   # robots aga
    (needs [gitleaks](https://github.com/gitleaks/gitleaks)); CI runs the same scan.
 4. Open a PR. Merges rebase onto `master` and fast-forward, with docs updated in the same change.
 
-The chapter above is generated from the paper's source by
-[`publish/publish.py`](https://github.com/autonet-code/whitepaper/tree/main/publish)
-in the whitepaper repo: change it there, not here.
+The chapter above is the Autonet chapter of the paper. A change that alters
+what it describes updates it in the same commit.
 
 ## Related repositories
 
