@@ -10,11 +10,6 @@
     },
     {
      "internalType": "address",
-     "name": "vaultMinter_",
-     "type": "address"
-    },
-    {
-     "internalType": "address",
      "name": "governor_",
      "type": "address"
     },
@@ -24,19 +19,9 @@
      "type": "address"
     },
     {
-     "internalType": "bytes32",
-     "name": "genesisRoot_",
-     "type": "bytes32"
-    },
-    {
-     "internalType": "string",
-     "name": "name_",
-     "type": "string"
-    },
-    {
-     "internalType": "string",
-     "name": "symbol_",
-     "type": "string"
+     "internalType": "address",
+     "name": "registry_",
+     "type": "address"
     },
     {
      "internalType": "uint16",
@@ -69,11 +54,6 @@
    "type": "error"
   },
   {
-   "inputs": [],
-   "name": "AlreadyRegistered",
-   "type": "error"
-  },
-  {
    "inputs": [
     {
      "internalType": "bytes32",
@@ -81,7 +61,12 @@
      "type": "bytes32"
     }
    ],
-   "name": "AlreadySubmittedForEpoch",
+   "name": "AlreadyClaimed",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "AlreadyRegistered",
    "type": "error"
   },
   {
@@ -95,8 +80,41 @@
    "type": "error"
   },
   {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "BadTokenDecimals",
+   "type": "error"
+  },
+  {
    "inputs": [],
    "name": "CheckpointUnorderedInsertion",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "ClaimProofInvalid",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "ClaimRootMissing",
    "type": "error"
   },
   {
@@ -186,27 +204,6 @@
    "type": "error"
   },
   {
-   "inputs": [
-    {
-     "internalType": "bytes32",
-     "name": "epochIdHash",
-     "type": "bytes32"
-    },
-    {
-     "internalType": "uint256",
-     "name": "pool",
-     "type": "uint256"
-    },
-    {
-     "internalType": "uint256",
-     "name": "mintedAfter",
-     "type": "uint256"
-    }
-   ],
-   "name": "EpochPoolExceeded",
-   "type": "error"
-  },
-  {
    "inputs": [],
    "name": "FailedCall",
    "type": "error"
@@ -233,60 +230,6 @@
    "type": "error"
   },
   {
-   "inputs": [
-    {
-     "internalType": "address",
-     "name": "account",
-     "type": "address"
-    }
-   ],
-   "name": "GenesisAlreadyClaimed",
-   "type": "error"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "address",
-     "name": "account",
-     "type": "address"
-    }
-   ],
-   "name": "GenesisProofInvalid",
-   "type": "error"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "uint256",
-     "name": "requested",
-     "type": "uint256"
-    },
-    {
-     "internalType": "uint256",
-     "name": "available",
-     "type": "uint256"
-    }
-   ],
-   "name": "InsufficientATN",
-   "type": "error"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "uint256",
-     "name": "requested",
-     "type": "uint256"
-    },
-    {
-     "internalType": "uint256",
-     "name": "available",
-     "type": "uint256"
-    }
-   ],
-   "name": "InsufficientAllowance",
-   "type": "error"
-  },
-  {
    "inputs": [],
    "name": "InvalidInitialization",
    "type": "error"
@@ -298,29 +241,12 @@
   },
   {
    "inputs": [],
+   "name": "LengthMismatch",
+   "type": "error"
+  },
+  {
+   "inputs": [],
    "name": "ManifestDigestRequired",
-   "type": "error"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "bytes32",
-     "name": "epochIdHash",
-     "type": "bytes32"
-    }
-   ],
-   "name": "MintProofInvalid",
-   "type": "error"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "bytes32",
-     "name": "epochIdHash",
-     "type": "bytes32"
-    }
-   ],
-   "name": "MintRootMissing",
    "type": "error"
   },
   {
@@ -330,12 +256,23 @@
   },
   {
    "inputs": [],
-   "name": "NoGenesis",
+   "name": "NotDuringUpgrade",
    "type": "error"
   },
   {
    "inputs": [],
    "name": "NotGovernor",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "NotInIndex",
    "type": "error"
   },
   {
@@ -345,7 +282,7 @@
   },
   {
    "inputs": [],
-   "name": "NotVaultMinter",
+   "name": "NothingOwed",
    "type": "error"
   },
   {
@@ -366,6 +303,27 @@
   {
    "inputs": [],
    "name": "PeerIdRequired",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "cap",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "claimedAfter",
+     "type": "uint256"
+    }
+   ],
+   "name": "PoolExceeded",
    "type": "error"
   },
   {
@@ -401,6 +359,64 @@
    "type": "error"
   },
   {
+   "inputs": [],
+   "name": "ReentrancyGuardReentrantCall",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "RegistryRequired",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint8",
+     "name": "bits",
+     "type": "uint8"
+    },
+    {
+     "internalType": "uint256",
+     "name": "value",
+     "type": "uint256"
+    }
+   ],
+   "name": "SafeCastOverflowedUintDowncast",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "SafeERC20FailedOperation",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "expected",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "received",
+     "type": "uint256"
+    }
+   ],
+   "name": "ShortReceipt",
+   "type": "error"
+  },
+  {
    "inputs": [
     {
      "internalType": "string",
@@ -409,6 +425,38 @@
     }
    ],
    "name": "StringTooLong",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "value",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "length",
+     "type": "uint256"
+    }
+   ],
+   "name": "StringsInsufficientHexLength",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "TokenNotListed",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "TokensNotSorted",
    "type": "error"
   },
   {
@@ -429,11 +477,6 @@
   },
   {
    "inputs": [],
-   "name": "TransferToZero",
-   "type": "error"
-  },
-  {
-   "inputs": [],
    "name": "UUPSUnauthorizedCallContext",
    "type": "error"
   },
@@ -450,7 +493,17 @@
   },
   {
    "inputs": [],
-   "name": "VaultDisabled",
+   "name": "UpgradesAreRenounced",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "ZeroAddress",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "ZeroAmount",
    "type": "error"
   },
   {
@@ -522,23 +575,60 @@
     {
      "indexed": true,
      "internalType": "address",
-     "name": "owner",
+     "name": "earner",
      "type": "address"
     },
     {
      "indexed": true,
-     "internalType": "address",
-     "name": "spender",
-     "type": "address"
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
     },
     {
      "indexed": false,
      "internalType": "uint256",
      "name": "value",
      "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "earnedValueAfter",
+     "type": "uint256"
     }
    ],
-   "name": "Approval",
+   "name": "Claimed",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "earner",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "ClaimedToken",
    "type": "event"
   },
   {
@@ -608,7 +698,7 @@
     {
      "indexed": false,
      "internalType": "string",
-     "name": "agentMintCid",
+     "name": "claimCid",
      "type": "string"
     },
     {
@@ -644,25 +734,6 @@
     }
    ],
    "name": "FeeTreasuryBpsSet",
-   "type": "event"
-  },
-  {
-   "anonymous": false,
-   "inputs": [
-    {
-     "indexed": true,
-     "internalType": "address",
-     "name": "account",
-     "type": "address"
-    },
-    {
-     "indexed": false,
-     "internalType": "uint256",
-     "name": "amount",
-     "type": "uint256"
-    }
-   ],
-   "name": "GenesisClaimed",
    "type": "event"
   },
   {
@@ -750,6 +821,12 @@
      "type": "address"
     },
     {
+     "indexed": true,
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
      "indexed": false,
      "internalType": "uint256",
      "name": "amount",
@@ -758,7 +835,7 @@
     {
      "indexed": false,
      "internalType": "uint256",
-     "name": "burned",
+     "name": "toolShare",
      "type": "uint256"
     },
     {
@@ -806,19 +883,63 @@
      "type": "address"
     },
     {
+     "indexed": true,
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
      "indexed": false,
      "internalType": "uint256",
      "name": "amount",
      "type": "uint256"
     },
     {
-     "indexed": true,
+     "indexed": false,
      "internalType": "bytes32",
      "name": "requestId",
      "type": "bytes32"
     }
    ],
    "name": "ServicePayment",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "Swept",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint8",
+     "name": "decimals",
+     "type": "uint8"
+    }
+   ],
+   "name": "TokenListed",
    "type": "event"
   },
   {
@@ -852,54 +973,17 @@
     {
      "indexed": true,
      "internalType": "address",
-     "name": "agent",
+     "name": "token",
      "type": "address"
-    },
-    {
-     "indexed": true,
-     "internalType": "bytes32",
-     "name": "epochIdHash",
-     "type": "bytes32"
     },
     {
      "indexed": false,
      "internalType": "uint256",
      "name": "amount",
      "type": "uint256"
-    },
-    {
-     "indexed": false,
-     "internalType": "uint256",
-     "name": "cumulativeForAgent",
-     "type": "uint256"
     }
    ],
-   "name": "TrainingRecorded",
-   "type": "event"
-  },
-  {
-   "anonymous": false,
-   "inputs": [
-    {
-     "indexed": true,
-     "internalType": "address",
-     "name": "from",
-     "type": "address"
-    },
-    {
-     "indexed": true,
-     "internalType": "address",
-     "name": "to",
-     "type": "address"
-    },
-    {
-     "indexed": false,
-     "internalType": "uint256",
-     "name": "value",
-     "type": "uint256"
-    }
-   ],
-   "name": "Transfer",
+   "name": "TreasuryWithdrawn",
    "type": "event"
   },
   {
@@ -917,9 +1001,27 @@
   },
   {
    "anonymous": false,
+   "inputs": [],
+   "name": "UpgradesRenounced",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
    "inputs": [
     {
      "indexed": true,
+     "internalType": "address",
+     "name": "earner",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "indexed": false,
      "internalType": "address",
      "name": "to",
      "type": "address"
@@ -931,7 +1033,7 @@
      "type": "uint256"
     }
    ],
-   "name": "VaultMint",
+   "name": "Withdrawn",
    "type": "event"
   },
   {
@@ -942,6 +1044,19 @@
      "internalType": "uint16",
      "name": "",
      "type": "uint16"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "CLAIM_TAG",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
     }
    ],
    "stateMutability": "view",
@@ -988,12 +1103,38 @@
   },
   {
    "inputs": [],
+   "name": "MAX_TOKEN_DECIMALS",
+   "outputs": [
+    {
+     "internalType": "uint8",
+     "name": "",
+     "type": "uint8"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
    "name": "MIN_SERVICE_FEE_BPS",
    "outputs": [
     {
      "internalType": "uint16",
      "name": "",
      "type": "uint16"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "MIN_TOKEN_DECIMALS",
+   "outputs": [
+    {
+     "internalType": "uint8",
+     "name": "",
+     "type": "uint8"
     }
    ],
    "stateMutability": "view",
@@ -1016,16 +1157,16 @@
    "inputs": [
     {
      "internalType": "address",
-     "name": "",
+     "name": "token",
      "type": "address"
     }
    ],
-   "name": "agentDepth",
+   "name": "acceptsToken",
    "outputs": [
     {
-     "internalType": "uint256",
+     "internalType": "bool",
      "name": "",
-     "type": "uint256"
+     "type": "bool"
     }
    ],
    "stateMutability": "view",
@@ -1039,7 +1180,7 @@
      "type": "address"
     }
    ],
-   "name": "agentMintTotal",
+   "name": "agentDepth",
    "outputs": [
     {
      "internalType": "uint256",
@@ -1107,40 +1248,6 @@
      "internalType": "bool",
      "name": "active",
      "type": "bool"
-    },
-    {
-     "internalType": "uint256",
-     "name": "totalTrainingMint",
-     "type": "uint256"
-    },
-    {
-     "internalType": "uint256",
-     "name": "trainingSubmissionCount",
-     "type": "uint256"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "address",
-     "name": "owner",
-     "type": "address"
-    },
-    {
-     "internalType": "address",
-     "name": "spender",
-     "type": "address"
-    }
-   ],
-   "name": "allowance",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
     }
    ],
    "stateMutability": "view",
@@ -1170,7 +1277,7 @@
     },
     {
      "internalType": "string",
-     "name": "agentMintCid",
+     "name": "claimCid",
      "type": "string"
     },
     {
@@ -1180,7 +1287,7 @@
     },
     {
      "internalType": "bytes32",
-     "name": "agentMintRoot",
+     "name": "claimRoot",
      "type": "bytes32"
     },
     {
@@ -1231,7 +1338,7 @@
     },
     {
      "internalType": "string",
-     "name": "agentMintCid",
+     "name": "claimCid",
      "type": "string"
     },
     {
@@ -1241,7 +1348,7 @@
     },
     {
      "internalType": "bytes32",
-     "name": "agentMintRoot",
+     "name": "claimRoot",
      "type": "bytes32"
     },
     {
@@ -1262,8 +1369,70 @@
    "type": "function"
   },
   {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    },
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "anchorParity",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    }
+   ],
+   "name": "anchorRoot",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
    "inputs": [],
    "name": "anchorSnapshotTime",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    }
+   ],
+   "name": "anchorTimestamp",
    "outputs": [
     {
      "internalType": "uint256",
@@ -1290,30 +1459,6 @@
   {
    "inputs": [
     {
-     "internalType": "address",
-     "name": "spender",
-     "type": "address"
-    },
-    {
-     "internalType": "uint256",
-     "name": "amount",
-     "type": "uint256"
-    }
-   ],
-   "name": "approve",
-   "outputs": [
-    {
-     "internalType": "bool",
-     "name": "",
-     "type": "bool"
-    }
-   ],
-   "stateMutability": "nonpayable",
-   "type": "function"
-  },
-  {
-   "inputs": [
-    {
      "internalType": "address[]",
      "name": "addrs",
      "type": "address[]"
@@ -1325,81 +1470,6 @@
      "internalType": "bool[]",
      "name": "",
      "type": "bool[]"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "atnTotalSupply",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "uint256",
-     "name": "blockNumber",
-     "type": "uint256"
-    }
-   ],
-   "name": "atnTotalSupplyAt",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "address",
-     "name": "agent",
-     "type": "address"
-    }
-   ],
-   "name": "balanceOf",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "address",
-     "name": "agent",
-     "type": "address"
-    },
-    {
-     "internalType": "uint256",
-     "name": "blockNumber",
-     "type": "uint256"
-    }
-   ],
-   "name": "balanceOfAt",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
     }
    ],
    "stateMutability": "view",
@@ -1454,50 +1524,86 @@
    "type": "function"
   },
   {
-   "inputs": [],
-   "name": "burnedAtLatestCutoff",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
    "inputs": [
     {
-     "internalType": "uint256",
-     "name": "fromTs",
-     "type": "uint256"
+     "internalType": "address",
+     "name": "earner",
+     "type": "address"
     },
     {
-     "internalType": "uint256",
-     "name": "toTs",
-     "type": "uint256"
-    }
-   ],
-   "name": "burnedBetween",
-   "outputs": [
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    },
     {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
+     "internalType": "address[]",
+     "name": "tokens",
+     "type": "address[]"
+    },
+    {
+     "internalType": "uint256[]",
+     "name": "amounts",
+     "type": "uint256[]"
+    },
+    {
+     "internalType": "bytes32[]",
+     "name": "proof",
+     "type": "bytes32[]"
     }
    ],
-   "stateMutability": "view",
+   "name": "claim",
+   "outputs": [],
+   "stateMutability": "nonpayable",
    "type": "function"
   },
   {
-   "inputs": [],
-   "name": "burnedSinceAnchor",
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "earner",
+     "type": "address"
+    },
+    {
+     "internalType": "address[]",
+     "name": "tokens",
+     "type": "address[]"
+    },
+    {
+     "internalType": "uint256[]",
+     "name": "amounts",
+     "type": "uint256[]"
+    }
+   ],
+   "name": "claimLeaf",
    "outputs": [
     {
-     "internalType": "uint256",
+     "internalType": "bytes32",
      "name": "",
-     "type": "uint256"
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "pure",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "name": "claimedEpoch",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
     }
    ],
    "stateMutability": "view",
@@ -1506,12 +1612,12 @@
   {
    "inputs": [
     {
-     "internalType": "uint256",
-     "name": "timestamp",
-     "type": "uint256"
+     "internalType": "address",
+     "name": "",
+     "type": "address"
     }
    ],
-   "name": "burnedUpTo",
+   "name": "claimedTotal",
    "outputs": [
     {
      "internalType": "uint256",
@@ -1526,64 +1632,52 @@
    "inputs": [
     {
      "internalType": "address",
-     "name": "claimant",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "recipient",
      "type": "address"
     },
     {
      "internalType": "uint256",
-     "name": "amount",
+     "name": "gross",
      "type": "uint256"
     },
     {
      "internalType": "bytes32",
-     "name": "epochIdHash",
+     "name": "requestId",
      "type": "bytes32"
-    },
-    {
-     "internalType": "bytes32[]",
-     "name": "proof",
-     "type": "bytes32[]"
     }
    ],
-   "name": "claimFor",
+   "name": "collectFee",
    "outputs": [],
    "stateMutability": "nonpayable",
-   "type": "function"
-  },
-  {
-   "inputs": [
-    {
-     "internalType": "uint256",
-     "name": "amount",
-     "type": "uint256"
-    },
-    {
-     "internalType": "bytes32[]",
-     "name": "proof",
-     "type": "bytes32[]"
-    }
-   ],
-   "name": "claimGenesis",
-   "outputs": [],
-   "stateMutability": "nonpayable",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "decimals",
-   "outputs": [
-    {
-     "internalType": "uint8",
-     "name": "",
-     "type": "uint8"
-    }
-   ],
-   "stateMutability": "pure",
    "type": "function"
   },
   {
    "inputs": [],
    "name": "deployedAt",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "earnedValue",
    "outputs": [
     {
      "internalType": "uint256",
@@ -1638,6 +1732,44 @@
    "type": "function"
   },
   {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "gross",
+     "type": "uint256"
+    }
+   ],
+   "name": "feeOf",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "feeTotal",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
    "inputs": [],
    "name": "feeTreasuryBps",
    "outputs": [
@@ -1654,24 +1786,21 @@
    "inputs": [
     {
      "internalType": "address",
-     "name": "",
+     "name": "token",
      "type": "address"
-    }
-   ],
-   "name": "genesisClaimed",
-   "outputs": [
+    },
     {
-     "internalType": "bool",
-     "name": "",
-     "type": "bool"
+     "internalType": "uint256",
+     "name": "fromTs",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "toTs",
+     "type": "uint256"
     }
    ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "genesisMinted",
+   "name": "feesBetween",
    "outputs": [
     {
      "internalType": "uint256",
@@ -1683,13 +1812,24 @@
    "type": "function"
   },
   {
-   "inputs": [],
-   "name": "genesisRoot",
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "timestamp",
+     "type": "uint256"
+    }
+   ],
+   "name": "feesUpTo",
    "outputs": [
     {
-     "internalType": "bytes32",
+     "internalType": "uint256",
      "name": "",
-     "type": "bytes32"
+     "type": "uint256"
     }
    ],
    "stateMutability": "view",
@@ -1805,7 +1945,7 @@
       },
       {
        "internalType": "string",
-       "name": "agentMintCid",
+       "name": "claimCid",
        "type": "string"
       },
       {
@@ -1830,23 +1970,8 @@
       },
       {
        "internalType": "bytes32",
-       "name": "agentMintRoot",
+       "name": "claimRoot",
        "type": "bytes32"
-      },
-      {
-       "internalType": "uint256",
-       "name": "windowBurned",
-       "type": "uint256"
-      },
-      {
-       "internalType": "uint256",
-       "name": "mintPool",
-       "type": "uint256"
-      },
-      {
-       "internalType": "uint256",
-       "name": "minted",
-       "type": "uint256"
       },
       {
        "internalType": "uint256",
@@ -1896,7 +2021,7 @@
       },
       {
        "internalType": "string",
-       "name": "agentMintCid",
+       "name": "claimCid",
        "type": "string"
       },
       {
@@ -1921,23 +2046,8 @@
       },
       {
        "internalType": "bytes32",
-       "name": "agentMintRoot",
+       "name": "claimRoot",
        "type": "bytes32"
-      },
-      {
-       "internalType": "uint256",
-       "name": "windowBurned",
-       "type": "uint256"
-      },
-      {
-       "internalType": "uint256",
-       "name": "mintPool",
-       "type": "uint256"
-      },
-      {
-       "internalType": "uint256",
-       "name": "minted",
-       "type": "uint256"
       },
       {
        "internalType": "uint256",
@@ -1989,21 +2099,16 @@
    "inputs": [
     {
      "internalType": "address",
-     "name": "agent",
+     "name": "",
      "type": "address"
-    },
-    {
-     "internalType": "bytes32",
-     "name": "epochIdHash",
-     "type": "bytes32"
     }
    ],
-   "name": "hasSubmittedForEpoch",
+   "name": "held",
    "outputs": [
     {
-     "internalType": "bool",
+     "internalType": "uint256",
      "name": "",
-     "type": "bool"
+     "type": "uint256"
     }
    ],
    "stateMutability": "view",
@@ -2018,11 +2123,6 @@
     },
     {
      "internalType": "address",
-     "name": "vaultMinter_",
-     "type": "address"
-    },
-    {
-     "internalType": "address",
      "name": "governor_",
      "type": "address"
     },
@@ -2032,19 +2132,9 @@
      "type": "address"
     },
     {
-     "internalType": "bytes32",
-     "name": "genesisRoot_",
-     "type": "bytes32"
-    },
-    {
-     "internalType": "string",
-     "name": "name_",
-     "type": "string"
-    },
-    {
-     "internalType": "string",
-     "name": "symbol_",
-     "type": "string"
+     "internalType": "address",
+     "name": "registry_",
+     "type": "address"
     },
     {
      "internalType": "uint16",
@@ -2200,16 +2290,29 @@
    "inputs": [
     {
      "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "listToken",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
      "name": "",
      "type": "address"
     },
     {
-     "internalType": "bytes32",
+     "internalType": "address",
      "name": "",
-     "type": "bytes32"
+     "type": "address"
     }
    ],
-   "name": "mintForEpoch",
+   "name": "owed",
    "outputs": [
     {
      "internalType": "uint256",
@@ -2224,62 +2327,11 @@
    "inputs": [
     {
      "internalType": "address",
-     "name": "to",
+     "name": "token",
      "type": "address"
-    },
-    {
-     "internalType": "uint256",
-     "name": "amount",
-     "type": "uint256"
     }
    ],
-   "name": "mintFromVault",
-   "outputs": [],
-   "stateMutability": "nonpayable",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "mintPoolTotal",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "name",
-   "outputs": [
-    {
-     "internalType": "string",
-     "name": "",
-     "type": "string"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "networkMintTotal",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "nextMintPool",
+   "name": "parityOf",
    "outputs": [
     {
      "internalType": "uint256",
@@ -2292,6 +2344,11 @@
   },
   {
    "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
     {
      "internalType": "address",
      "name": "recipient",
@@ -2299,7 +2356,7 @@
     },
     {
      "internalType": "uint256",
-     "name": "amount",
+     "name": "gross",
      "type": "uint256"
     },
     {
@@ -2309,14 +2366,66 @@
     }
    ],
    "name": "payForService",
-   "outputs": [
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
     {
-     "internalType": "bool",
-     "name": "",
-     "type": "bool"
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
     }
    ],
-   "stateMutability": "nonpayable",
+   "name": "poolCap",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "poolCutoff",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "poolTokenCount",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "poolTokens",
+   "outputs": [
+    {
+     "internalType": "address[]",
+     "name": "",
+     "type": "address[]"
+    }
+   ],
+   "stateMutability": "view",
    "type": "function"
   },
   {
@@ -2384,6 +2493,26 @@
     }
    ],
    "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "registry",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "renounceUpgrades",
+   "outputs": [],
+   "stateMutability": "nonpayable",
    "type": "function"
   },
   {
@@ -2471,25 +2600,6 @@
    "type": "function"
   },
   {
-   "inputs": [
-    {
-     "internalType": "address",
-     "name": "",
-     "type": "address"
-    }
-   ],
-   "name": "serviceEarnings",
-   "outputs": [
-    {
-     "internalType": "uint256",
-     "name": "",
-     "type": "uint256"
-    }
-   ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
    "inputs": [],
    "name": "serviceFeeBps",
    "outputs": [
@@ -2542,13 +2652,32 @@
    "type": "function"
   },
   {
-   "inputs": [],
-   "name": "symbol",
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "sweep",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "tokenDecimals",
    "outputs": [
     {
-     "internalType": "string",
+     "internalType": "uint8",
      "name": "",
-     "type": "string"
+     "type": "uint8"
     }
    ],
    "stateMutability": "view",
@@ -2612,21 +2741,24 @@
    "type": "function"
   },
   {
-   "inputs": [],
-   "name": "totalBurned",
-   "outputs": [
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
     {
      "internalType": "uint256",
-     "name": "",
+     "name": "fromTs",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "toTs",
      "type": "uint256"
     }
    ],
-   "stateMutability": "view",
-   "type": "function"
-  },
-  {
-   "inputs": [],
-   "name": "totalSupply",
+   "name": "toolShareBetween",
    "outputs": [
     {
      "internalType": "uint256",
@@ -2641,53 +2773,56 @@
    "inputs": [
     {
      "internalType": "address",
-     "name": "to",
+     "name": "",
      "type": "address"
-    },
+    }
+   ],
+   "name": "toolShareTotal",
+   "outputs": [
     {
      "internalType": "uint256",
-     "name": "amount",
+     "name": "",
      "type": "uint256"
     }
    ],
-   "name": "transfer",
-   "outputs": [
-    {
-     "internalType": "bool",
-     "name": "",
-     "type": "bool"
-    }
-   ],
-   "stateMutability": "nonpayable",
+   "stateMutability": "view",
    "type": "function"
   },
   {
    "inputs": [
     {
      "internalType": "address",
-     "name": "from",
-     "type": "address"
-    },
-    {
-     "internalType": "address",
-     "name": "to",
+     "name": "token",
      "type": "address"
     },
     {
      "internalType": "uint256",
-     "name": "amount",
+     "name": "timestamp",
      "type": "uint256"
     }
    ],
-   "name": "transferFrom",
+   "name": "toolShareUpTo",
    "outputs": [
     {
-     "internalType": "bool",
+     "internalType": "uint256",
      "name": "",
-     "type": "bool"
+     "type": "uint256"
     }
    ],
-   "stateMutability": "nonpayable",
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "totalEarnedValue",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
    "type": "function"
   },
   {
@@ -2698,6 +2833,25 @@
      "internalType": "address",
      "name": "",
      "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "treasuryOwed",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
     }
    ],
    "stateMutability": "view",
@@ -2749,15 +2903,88 @@
   },
   {
    "inputs": [],
-   "name": "vaultMinter",
+   "name": "upgradesRenounced",
    "outputs": [
     {
-     "internalType": "address",
+     "internalType": "bool",
      "name": "",
-     "type": "address"
+     "type": "bool"
     }
    ],
    "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "valueOf",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "earner",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "withdraw",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "to",
+     "type": "address"
+    }
+   ],
+   "name": "withdrawTo",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "token",
+     "type": "address"
+    }
+   ],
+   "name": "withdrawTreasury",
+   "outputs": [],
+   "stateMutability": "nonpayable",
    "type": "function"
   }
  ]

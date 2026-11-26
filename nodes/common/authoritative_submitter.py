@@ -1,93 +1,64 @@
-"""Authoritative chain submission for one household claimant.
+"""Authoritative chain claims for one household earner.
 
-Phase 5.6 of native world-model integration. Replaces Phase 5.1's
-``ChainSubmitter`` semantics: we no longer submit the local
-projection mint. Instead:
+For an anchored epoch:
 
-  1. Read the on-chain anchor for the epoch we want to claim from.
-  2. Fetch the agent_mint blob from a ``BlobResolver`` (using the
-     CID stored in the anchor).
-  3. Verify the blob's content hash matches the anchor's CID —
-     otherwise the resolver lied or the blob was tampered with.
-  4. Decode the claimant's mint share from the blob.
-  5. Scale the float mint to ``int`` via ``mint_scale`` (default
-     1e6 — see "Two precision boundaries" below).
-  6. Call ``Substrate.claimFor(claimant, amount, epochIdHash, proof)``.
-     The claimant is the household's owner wallet (Decision 2026-10-27);
-     the transaction is signed by whoever submits (the daemon operator
-     key), since the leaf already fixes where the ATN goes. The contract
-     is per-(claimant, epochId) idempotent, so retries / restarts are
-     safe.
+  1. Read the anchor on chain (``getAnchorByEpochId``).
+  2. Fetch the claims blob the anchor's ``claimCid`` names from a
+     ``BlobResolver`` and check its sha256 against the cid: otherwise the
+     resolver lied or the blob was tampered with.
+  3. Read the earner's leaf (its amount of each token's pool) and build its
+     proof from the whole blob (claims and concluded tools share the tree),
+     then check the proof against the anchor's ``claimRoot`` before
+     spending gas.
+  4. Call ``Substrate.claim(earner, epochIdHash, tokens, amounts, proof)``.
+     The earner is the household's owner wallet (Decision 2026-10-27); the
+     transaction is signed by whoever submits (the daemon operator key),
+     since the leaf already fixes the earner. The contract is idempotent
+     per (earner, epoch): ``claimedEpoch`` is checked first, so retries and
+     restarts never double-claim.
+  5. ``withdraw(earner, token)`` for each token the earner is owed
+     (``owed(earner, token) > 0``). A token whose withdrawal fails (paused,
+     blocked) is logged and retried at the next pass; it never blocks the
+     others.
 
-Two precision boundaries
-------------------------
-
-The system has two intentional float-to-int truncation steps:
-
-  - **Authoritative encoding boundary** (Phase 5.5): the ``agent_mint``
-    blob serializes floats as ``f"{x:.10f}"`` — 10 decimal places —
-    to guarantee byte-identical CIDs across daemons. This is the
-    *consensus precision*.
-
-  - **Chain submission boundary** (Phase 5.6, this module): the float
-    is multiplied by ``mint_scale`` (default 1_000_000) and truncated
-    to an integer for the ``claimFor(..., uint256 amount, ...)`` call.
-    This is the *storage cost precision* — finer scales cost more
-    storage; coarser scales drop sub-token mint amounts to zero.
-
-The 4-orders-of-magnitude difference is intentional. Don't try to
-collapse them into one boundary.
-
-Phase 5.6 vs 5.1 idempotency
-----------------------------
-
-5.1 had agent-side idempotency: the submitter remembered which
-epoch_ids it had already submitted, and skipped duplicates. That
-was state-fragile (a process restart re-submitted).
-
-5.6 moves idempotency to the contract: ``Substrate.sol`` reverts
-``AlreadySubmittedForEpoch`` on a duplicate (claimant, epochIdHash) call.
-The submitter still tracks its own seen-set as a fast-path optimization
-and to avoid wasting gas on a revert, but the contract is the source
-of truth. Restarts won't double-submit because the contract refuses
-duplicates regardless of what the submitter remembers.
+Amounts are integers in each token's base units from end to end: the blob
+carries them as decimal strings and the leaf commits them as they are.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .authoritative_encoding import (
     cid_for_blob,
-    decode_agent_mint_blob,
+    decode_claims_blob,
     decode_concluded,
 )
 from .blob_resolver import BlobIntegrityError, BlobResolver
-from .mint_merkle import mint_merkle_proof, scale_mint, verify_mint_proof
+from .mint_merkle import claim_entry, claim_merkle_proof, verify_claim_proof
 from .tx_nonce import next_nonce
 
 
 logger = logging.getLogger(__name__)
 
-
-_DEFAULT_MINT_SCALE = 1_000_000
+# Substrate.Anchor tuple indices used here.
+_ANCHOR_CLAIM_CID = 4
+_ANCHOR_CLAIM_ROOT = 9
 
 
 @dataclass
 class AuthoritativeSubmitterConfig:
-    """Submitter config. ``private_key`` signs the claim transaction (the
-    daemon operator key); it need not belong to the claimant."""
+    """Submitter config. ``private_key`` signs the claim and withdrawal
+    transactions (the daemon operator key); it need not belong to the
+    earner."""
     substrate_address: str
     rpc_url: str = "http://localhost:8545"
     chain_id: int = 31337
     private_key: str = ""
-    mint_scale: int = _DEFAULT_MINT_SCALE
-    # Whether to silently skip a no-op submission when the claimant's
-    # mint share is zero. Saves gas on the common case.
+    # Skip an epoch in which the earner has no leaf (the common case).
     skip_zero: bool = True
 
 
@@ -97,35 +68,39 @@ class AuthoritativeSubmissionResult:
     tx_hash: str = ""
     epoch_id: str = ""
     epoch_id_hash_hex: str = ""
-    contribution_scaled: int = 0
-    raw_mint: float = 0.0
+    # The leaf claimed: lowercase token -> amount (base units), and its
+    # informational value (6-decimal value units, from the blob).
+    tokens: Dict[str, int] = field(default_factory=dict)
+    value: int = 0
     cid_verified: bool = False
     cid: str = ""
+    # Withdrawals made in this pass: token -> tx hash; and the tokens whose
+    # withdrawal failed (retried at the next pass): token -> error.
+    withdrawn: Dict[str, str] = field(default_factory=dict)
+    withdraw_errors: Dict[str, str] = field(default_factory=dict)
     error: str = ""
 
 
 def epoch_id_hash(epoch_id: str) -> bytes:
     """keccak256 of the epoch_id string. Matches Substrate.sol's
     ``keccak256(bytes(epochId))`` so on-chain hash lookups line up."""
-    # web3.py / pycryptodome both expose keccak; we use eth_utils
-    # because it's already a transitive dep.
     from eth_utils import keccak
     return keccak(text=epoch_id)
 
 
 class AuthoritativeChainSubmitter:
-    """Per-claimant helper: read anchor → fetch blob → claim on chain.
+    """Per-earner helper: read anchor -> fetch blob -> claim -> withdraw.
 
-    ``claimant_id`` is the key in the anchored mint map (lowercase owner
+    ``claimant_id`` is the key in the anchored claims (lowercase owner
     wallet) and ``claimant_address`` the address the leaf names.
-    ``sender_address`` signs and pays gas; it defaults to the claimant.
+    ``sender_address`` signs and pays gas; it defaults to the earner.
 
-    Two construction modes (mirrors Phase 5.1):
+    Two construction modes:
 
       - **Production**: pass ``config`` with rpc_url + private_key. The
-        submitter dials HTTP and loads ABI from artifacts.
-      - **Tests**: pass ``web3`` + ``substrate_abi`` directly so tests
-        run against an in-process EVM without HTTP.
+        submitter dials HTTP and loads the ABI from artifacts.
+      - **Tests**: pass ``web3`` + ``substrate_abi`` directly so tests run
+        against an in-process EVM without HTTP.
     """
 
     def __init__(
@@ -146,6 +121,9 @@ class AuthoritativeChainSubmitter:
         self.config = config
         self._lock = threading.RLock()
         self._submitted_epochs: set[str] = set()
+        # Tokens the earner was owed whose withdrawal has not gone through
+        # yet: retried at every pass.
+        self._pending_withdrawals: set[str] = set()
         self._w3 = web3
         self._abi = substrate_abi
         self._contract = None
@@ -160,7 +138,6 @@ class AuthoritativeChainSubmitter:
             )
             return self._contract
 
-        # Production path
         from .blockchain import BlockchainInterface
 
         bc = BlockchainInterface(
@@ -182,212 +159,139 @@ class AuthoritativeChainSubmitter:
     # ------------------------------------------------------------------
 
     def submit_for_epoch(self, epoch_id: str) -> AuthoritativeSubmissionResult:
-        """Claim this household's authoritative mint for an anchored epoch.
-
-        Looks up the anchor on chain, fetches the blob, decodes the
-        claimant's share, calls ``claimFor``.
-        """
+        """Claim this household's leaf of an anchored epoch, then withdraw
+        every token it is owed (this epoch's and any earlier failures)."""
         with self._lock:
-            if epoch_id in self._submitted_epochs:
-                # Fast-path: already submitted in this process. Return
-                # success no-op. Source of truth is still the contract.
-                return AuthoritativeSubmissionResult(
-                    success=True,
-                    epoch_id=epoch_id,
-                    contribution_scaled=0,
-                )
+            r = self._claim(epoch_id)
+            if r.success:
+                self._withdraw_owed(set(r.tokens), r)
+            return r
 
-            contract = self._get_contract()
+    def _claim(self, epoch_id: str) -> AuthoritativeSubmissionResult:
+        if epoch_id in self._submitted_epochs:
+            # Fast path: already claimed in this process (the contract is
+            # still the source of truth).
+            return AuthoritativeSubmissionResult(success=True, epoch_id=epoch_id)
 
-            # 1. Read the anchor on chain.
-            try:
-                anchor = contract.functions.getAnchorByEpochId(epoch_id).call()
-            except Exception as e:
-                return AuthoritativeSubmissionResult(
-                    success=False,
-                    epoch_id=epoch_id,
-                    error=f"anchor lookup failed: {e}",
-                )
-            # Anchor tuple layout matches the Solidity struct order:
-            # (epochId, epochRoot, prevEpochRoot, prevAnchorHash,
-            #  agentMintCid, payloadHash, submitter, blockNumber,
-            #  timestamp, agentMintRoot)
-            cid = anchor[4]
-            if not cid:
-                return AuthoritativeSubmissionResult(
-                    success=False,
-                    epoch_id=epoch_id,
-                    error="anchor has empty agent_mint_cid",
-                )
-
-            # 2. Fetch blob.
-            blob = self.resolver.get(cid)
-            if blob is None:
-                return AuthoritativeSubmissionResult(
-                    success=False,
-                    epoch_id=epoch_id,
-                    cid=cid,
-                    error=f"blob not found for cid {cid}",
-                )
-
-            # 3. Verify CID.
-            actual_cid = cid_for_blob(blob)
-            if actual_cid != cid:
-                raise BlobIntegrityError(
-                    f"blob CID mismatch: expected {cid}, got {actual_cid}"
-                )
-
-            # 4. Decode the claimant's share (keys are lowercase from
-            # schema 6). Scaling MUST route through mint_merkle.scale_mint:
-            # the anchor's agentMintRoot was built from the same
-            # conversion, and a mismatched integer is an unprovable leaf.
-            mint_map = decode_agent_mint_blob(blob)
-            concluded = decode_concluded(blob)
-            raw_mint = float(mint_map.get(
-                self.claimant_id, mint_map.get(str(self.claimant_id).lower(), 0.0)))
-            scaled = scale_mint(raw_mint, self.config.mint_scale)
-
-            # 5. Skip zero submissions if configured.
-            if scaled == 0 and self.config.skip_zero:
-                self._submitted_epochs.add(epoch_id)
-                return AuthoritativeSubmissionResult(
-                    success=True,
-                    epoch_id=epoch_id,
-                    cid=cid,
-                    cid_verified=True,
-                    contribution_scaled=0,
-                    raw_mint=raw_mint,
-                )
-
-            # 6. Build the merkle proof from the full mint map and submit
-            # on chain. The leaf commits (claimant, amount), money only.
-            proof = mint_merkle_proof(
-                mint_map, self.claimant_address, self.config.mint_scale,
-                concluded=concluded,
-            )
-            if proof is None:
-                return AuthoritativeSubmissionResult(
-                    success=False,
-                    epoch_id=epoch_id,
-                    cid=cid,
-                    cid_verified=True,
-                    raw_mint=raw_mint,
-                    contribution_scaled=scaled,
-                    error=(
-                        f"no provable mint leaf for {self.claimant_address} "
-                        "(claimant id/address mismatch in the mint map?)"
-                    ),
-                )
-            eid_hash = epoch_id_hash(epoch_id)
-
-            # 6b. GUARD: pre-flight-verify the amount we are about to send
-            # against the anchor's ON-CHAIN root. Root, proof, and tx all
-            # derive from the same blob's mint map, so this only fails if
-            # the anchorer committed a root built from a different map than
-            # the blob it published (or the blob decode drifted) — fail
-            # loud here instead of burning gas on MintProofInvalid.
-            onchain_root = bytes(anchor[9])
-            if not verify_mint_proof(
-                onchain_root, self.claimant_address, scaled, proof,
-            ):
-                return AuthoritativeSubmissionResult(
-                    success=False,
-                    epoch_id=epoch_id,
-                    cid=cid,
-                    cid_verified=True,
-                    raw_mint=raw_mint,
-                    contribution_scaled=scaled,
-                    epoch_id_hash_hex=eid_hash.hex(),
-                    error=(
-                        "pre-flight mint proof failed against the on-chain "
-                        f"agentMintRoot for amount={scaled} — the anchored "
-                        "root and the published blob disagree"
-                    ),
-                )
-
-            # Contract-side dedupe: after a restart our seen-set is empty
-            # but the household may already be claimed (by us or by any
-            # other submitter). Ask the contract rather than reading a
-            # revert, so a real failure (pool exceeded, bad proof) is never
-            # mistaken for "already claimed".
-            if self._already_claimed(eid_hash):
-                self._submitted_epochs.add(epoch_id)
-                return AuthoritativeSubmissionResult(
-                    success=True,
-                    epoch_id=epoch_id,
-                    cid=cid,
-                    cid_verified=True,
-                    contribution_scaled=0,
-                    raw_mint=raw_mint,
-                    error="already claimed on chain (no-op)",
-                )
-            try:
-                tx_hash = self._send_record(scaled, eid_hash, proof)
-            except Exception as e:
-                # Lost a race with another submitter for the same household.
-                err_str = str(e).lower()
-                if "alreadysubmittedforepoch" in err_str or self._already_claimed(eid_hash):
-                    self._submitted_epochs.add(epoch_id)
-                    return AuthoritativeSubmissionResult(
-                        success=True,
-                        epoch_id=epoch_id,
-                        cid=cid,
-                        cid_verified=True,
-                        contribution_scaled=0,
-                        raw_mint=raw_mint,
-                        error=f"already claimed on chain (no-op): {e}",
-                    )
-                return AuthoritativeSubmissionResult(
-                    success=False,
-                    epoch_id=epoch_id,
-                    cid=cid,
-                    cid_verified=True,
-                    contribution_scaled=scaled,
-                    raw_mint=raw_mint,
-                    epoch_id_hash_hex=eid_hash.hex(),
-                    error=f"claimFor failed: {e}",
-                )
-
-            self._submitted_epochs.add(epoch_id)
-            logger.info(
-                "Authoritative claim: claimant=%s, epoch=%s, "
-                "raw=%.10f, scaled=%d, tx=%s",
-                self.claimant_id, epoch_id, raw_mint, scaled, tx_hash,
-            )
+        contract = self._get_contract()
+        try:
+            anchor = contract.functions.getAnchorByEpochId(epoch_id).call()
+        except Exception as e:
             return AuthoritativeSubmissionResult(
-                success=True,
-                tx_hash=tx_hash,
-                epoch_id=epoch_id,
-                epoch_id_hash_hex=eid_hash.hex(),
-                contribution_scaled=scaled,
-                raw_mint=raw_mint,
-                cid=cid,
-                cid_verified=True,
-            )
+                success=False, epoch_id=epoch_id, error=f"anchor lookup failed: {e}")
+        cid = anchor[_ANCHOR_CLAIM_CID]
+        if not cid:
+            return AuthoritativeSubmissionResult(
+                success=False, epoch_id=epoch_id, error="anchor has an empty claimCid")
+
+        blob = self.resolver.get(cid)
+        if blob is None:
+            return AuthoritativeSubmissionResult(
+                success=False, epoch_id=epoch_id, cid=cid,
+                error=f"blob not found for cid {cid}")
+        actual_cid = cid_for_blob(blob)
+        if actual_cid != cid:
+            raise BlobIntegrityError(
+                f"blob CID mismatch: expected {cid}, got {actual_cid}")
+
+        claims = decode_claims_blob(blob)
+        concluded = decode_concluded(blob)
+        entry = claims.get(str(self.claimant_id).lower()) or claims.get(self.claimant_id) or {}
+        value = int(entry.get("value") or 0)
+        leaf = claim_entry(claims, self.claimant_address)
+        if leaf is None:
+            if self.config.skip_zero:
+                self._submitted_epochs.add(epoch_id)
+                return AuthoritativeSubmissionResult(
+                    success=True, epoch_id=epoch_id, cid=cid, cid_verified=True)
+            return AuthoritativeSubmissionResult(
+                success=False, epoch_id=epoch_id, cid=cid, cid_verified=True,
+                error=f"no claim leaf for {self.claimant_address}")
+        _earner, tokens, amounts = leaf
+        tokens_map = {t.lower(): a for t, a in zip(tokens, amounts)}
+        base = dict(epoch_id=epoch_id, cid=cid, cid_verified=True,
+                    tokens=tokens_map, value=value)
+
+        proof = claim_merkle_proof(claims, self.claimant_address, concluded=concluded) or []
+        eid_hash = epoch_id_hash(epoch_id)
+        # Pre-flight the leaf against the anchor's ON-CHAIN root. Root,
+        # proof and tx all derive from the same blob, so this fails only
+        # if the anchor committed a root over different claims than the
+        # blob it published: fail loud instead of burning gas.
+        if not verify_claim_proof(bytes(anchor[_ANCHOR_CLAIM_ROOT]),
+                                  self.claimant_address, tokens, amounts, proof):
+            return AuthoritativeSubmissionResult(
+                success=False, epoch_id_hash_hex=eid_hash.hex(),
+                error=("pre-flight claim proof failed against the on-chain "
+                       "claimRoot: the anchored root and the published blob "
+                       "disagree"), **base)
+
+        if self._already_claimed(eid_hash):
+            self._submitted_epochs.add(epoch_id)
+            return AuthoritativeSubmissionResult(
+                success=True, epoch_id_hash_hex=eid_hash.hex(),
+                error="already claimed on chain (no-op)", **base)
+        try:
+            tx_hash = self._send(contract.functions.claim(
+                self._w3.to_checksum_address(self.claimant_address), eid_hash,
+                list(tokens), [int(a) for a in amounts], proof))
+        except Exception as e:
+            if self._already_claimed(eid_hash):
+                # Lost a race with another submitter for the same household.
+                self._submitted_epochs.add(epoch_id)
+                return AuthoritativeSubmissionResult(
+                    success=True, epoch_id_hash_hex=eid_hash.hex(),
+                    error=f"already claimed on chain (no-op): {e}", **base)
+            return AuthoritativeSubmissionResult(
+                success=False, epoch_id_hash_hex=eid_hash.hex(),
+                error=f"claim failed: {e}", **base)
+
+        self._submitted_epochs.add(epoch_id)
+        logger.info("claim: earner=%s, epoch=%s, tokens=%s, value=%d, tx=%s",
+                    self.claimant_id, epoch_id, tokens_map, value, tx_hash)
+        return AuthoritativeSubmissionResult(
+            success=True, tx_hash=tx_hash, epoch_id_hash_hex=eid_hash.hex(), **base)
+
+    def withdraw_owed(self, tokens: Optional[List[str]] = None) -> AuthoritativeSubmissionResult:
+        """Withdraw what the earner is owed in ``tokens`` and in every token
+        whose earlier withdrawal failed."""
+        with self._lock:
+            r = AuthoritativeSubmissionResult(success=True)
+            self._withdraw_owed({str(t).lower() for t in (tokens or [])}, r)
+            return r
+
+    def _withdraw_owed(self, tokens: set, r: AuthoritativeSubmissionResult) -> None:
+        contract = self._get_contract()
+        earner = self._w3.to_checksum_address(self.claimant_address)
+        for token in sorted(set(tokens) | self._pending_withdrawals):
+            t = self._w3.to_checksum_address(token)
+            try:
+                owed = int(contract.functions.owed(earner, t).call())
+                if owed <= 0:
+                    self._pending_withdrawals.discard(token)
+                    continue
+                r.withdrawn[token] = self._send(contract.functions.withdraw(earner, t))
+                self._pending_withdrawals.discard(token)
+                logger.info("withdrawn: earner=%s, token=%s, amount=%d",
+                            self.claimant_id, token, owed)
+            except Exception as e:  # noqa: BLE001 (one token never blocks the rest)
+                self._pending_withdrawals.add(token)
+                r.withdraw_errors[token] = str(e)
+                logger.warning("withdrawal of %s for %s failed (retried next pass): %s",
+                               token, self.claimant_id, e)
 
     def _already_claimed(self, eid_hash: bytes) -> bool:
         try:
-            return bool(self._get_contract().functions.hasSubmittedForEpoch(
+            return bool(self._get_contract().functions.claimedEpoch(
                 self._w3.to_checksum_address(self.claimant_address), eid_hash,
             ).call())
         except Exception:
             return False
 
-    def _send_record(
-        self, contribution: int, eid_hash: bytes, proof: list,
-    ) -> str:
-        contract = self._get_contract()
+    def _send(self, call) -> str:
         w3 = self._w3
         if w3 is None:
             raise RuntimeError("submitter has no Web3 instance")
-
-        # claimFor(claimant, amount, epochIdHash, proof). ``contribution``
-        # is the ATN mint; the leaf commits (claimant, amount). REP is
-        # claimed DAO-side.
-        call = contract.functions.claimFor(
-            w3.to_checksum_address(self.claimant_address),
-            contribution, eid_hash, proof,
-        )
         sender = w3.to_checksum_address(self.sender_address)
 
         # Test path: account is unlocked in eth_tester.
@@ -398,13 +302,11 @@ class AuthoritativeChainSubmitter:
                 raise RuntimeError(f"tx reverted: {receipt}")
             return tx_hash.hex()
 
-        # Production path: estimate gas with a margin so we work on
-        # networks with higher actual gas costs (e.g. Etherlink shadownet
-        # reports ~700K for the claim). A flat hardcode bites in
-        # real-world deployments.
+        # Production path: estimate gas with a margin (public networks
+        # report more than a local node).
         try:
             estimated = call.estimate_gas({"from": sender})
-            gas_limit = max(int(estimated * 12 // 10), 1_500_000)
+            gas_limit = max(int(estimated * 12 // 10), 300_000)
         except Exception:
             gas_limit = 2_000_000
         tx = call.build_transaction({

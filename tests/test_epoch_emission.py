@@ -1,60 +1,64 @@
-"""Fixed-emission epoch normalization (apply_emission_pool).
+"""The basket split (federated_reconcile.split_pools).
 
-The economics flip: with a pool, an epoch mints exactly
-``emission_rate x duration`` tokens TOTAL, split pro-rata by post-gate
-contribution — junk takes share from co-contributors instead of
-printing new supply.
+Each key takes ``pool * w // W`` of every token's pool: the same fraction
+of each, in pure integers, so the amounts never add up to more than a pool
+and adding a spammer takes share from the others instead of creating
+money.
 """
 from __future__ import annotations
 
-import pytest
+from nodes.common.federated_reconcile import (
+    basket_value,
+    integer_weights,
+    split_pools,
+    value_of,
+)
 
-from nodes.common.federated_reconcile import apply_emission_pool
-
-
-def _result(agent_mint):
-    return {
-        "agent_mint": dict(agent_mint),
-        "total_mint": sum(agent_mint.values()),
-    }
+T6, T18 = "0x" + "a6" * 20, "0x" + "1b" * 20
 
 
-class TestApplyEmissionPool:
-    def test_total_equals_pool(self):
-        out = apply_emission_pool(_result({"a": 3.0, "b": 1.0}), 100.0)
-        assert out["total_mint"] == pytest.approx(100.0)
-        assert sum(out["agent_mint"].values()) == pytest.approx(100.0)
+class TestSplitPools:
+    def test_never_more_than_the_pool_and_dust_is_small(self):
+        pools = {T6: 1_000_003, T18: 10 ** 18 + 1}
+        out = split_pools(pools, {"a": 3, "b": 1, "c": 3})
+        for t, p in pools.items():
+            paid = sum(b.get(t, 0) for b in out.values())
+            assert p - len(out) < paid <= p
 
-    def test_proportions_preserved(self):
-        out = apply_emission_pool(_result({"a": 3.0, "b": 1.0}), 100.0)
-        assert out["agent_mint"]["a"] == pytest.approx(75.0)
-        assert out["agent_mint"]["b"] == pytest.approx(25.0)
+    def test_proportions_are_the_same_in_every_token(self):
+        out = split_pools({T6: 4_000_000, T18: 4 * 10 ** 18}, {"a": 3, "b": 1})
+        assert out["a"] == {T6: 3_000_000, T18: 3 * 10 ** 18}
+        assert out["b"] == {T6: 1_000_000, T18: 10 ** 18}
 
-    def test_zero_activity_no_division(self):
-        out = apply_emission_pool(_result({}), 100.0)
-        assert out["agent_mint"] == {}
-        assert out["raw_mint_total"] == 0.0
-        assert out["emission_pool"] == 100.0
-
-    def test_raw_total_recorded(self):
-        out = apply_emission_pool(_result({"a": 3.0, "b": 1.0}), 100.0)
-        assert out["raw_mint_total"] == pytest.approx(4.0)
+    def test_no_weight_pays_nothing(self):
+        assert split_pools({T6: 100}, {}) == {}
+        assert split_pools({}, {"a": 1}) == {}
 
     def test_spam_takes_share_not_supply(self):
-        """The economics flip in one assertion: adding a spammer leaves
-        total emission unchanged and reduces honest agents' mint."""
-        honest = apply_emission_pool(_result({"a": 3.0, "b": 1.0}), 100.0)
-        spammed = apply_emission_pool(
-            _result({"a": 3.0, "b": 1.0, "spam": 4.0}), 100.0,
-        )
-        assert spammed["total_mint"] == pytest.approx(honest["total_mint"])
-        assert spammed["agent_mint"]["a"] < honest["agent_mint"]["a"]
+        honest = split_pools({T6: 100_000}, {"a": 3, "b": 1})
+        spammed = split_pools({T6: 100_000}, {"a": 3, "b": 1, "spam": 4})
+        assert sum(b[T6] for b in spammed.values()) <= 100_000
+        assert spammed["a"][T6] < honest["a"][T6]
 
     def test_deterministic_across_key_order(self):
-        r1 = apply_emission_pool(_result({"a": 3.0, "b": 1.0, "c": 2.0}), 7.0)
-        r2 = apply_emission_pool(_result({"c": 2.0, "b": 1.0, "a": 3.0}), 7.0)
-        assert r1["agent_mint"] == r2["agent_mint"]
-        assert list(r1["agent_mint"]) == sorted(r1["agent_mint"])
+        w1 = integer_weights({"a": 3.0, "b": 1.0, "c": 2.0}, 10)
+        w2 = integer_weights({"c": 2.0, "b": 1.0, "a": 3.0}, 10)
+        assert w1 == w2 and list(w1) == sorted(w1)
+        assert split_pools({T6: 7}, w1) == split_pools({T6: 7}, w2)
+
+    def test_integer_weights_drop_zero_and_negative(self):
+        assert integer_weights({"a": 1e-12, "b": -1.0, "c": 0.5}, 10) == {"c": 5_000_000_000}
+
+
+class TestValue:
+    def test_one_whole_token_of_either_decimals(self):
+        assert value_of(10 ** 6, 10 ** 30) == 10 ** 6
+        assert value_of(10 ** 18, 10 ** 18) == 10 ** 6
+
+    def test_basket_values_each_token_then_adds(self):
+        assert basket_value({T6: 1_500_000, T18: 5 * 10 ** 17},
+                            {T6: 10 ** 30, T18: 10 ** 18}) == 2_000_000
+        assert basket_value({T6: 7}, {}) == 0
 
 
 class TestFederatedPoolDeterminism:
@@ -62,10 +66,11 @@ class TestFederatedPoolDeterminism:
         from nodes.common.canonical_ordering import canonical_order
         from nodes.common.federated_reconcile import federated_epoch_close
 
-        out = federated_epoch_close(canonical_order([]), emission_pool=25.0)
-        assert out["total_mint"] == 0.0
-        assert out["agent_mint"] == {}
-        assert out["tool_rounds"]["pool_carry"] == 25_000_000
+        out = federated_epoch_close(canonical_order([]),
+                                    tool_share_window={T6: 25_000_000, T18: 3})
+        assert out["total_value"] == 0
+        assert out["claims"] == {}
+        assert out["tool_rounds"]["pool_carry"] == {T18: 3, T6: 25_000_000}
 
 
 # ---------------------------------------------------------------------------

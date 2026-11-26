@@ -64,7 +64,7 @@ class TestVoiceRefresh:
         class Flaky(dict):
             # owner_map reads fine, then the pool read blows up.
             def get(self, key, default=None):
-                if key == "emission_pool":
+                if key == "tool_share_window":
                     raise ConnectionError("rpc down")
                 return super().get(key, default)
 

@@ -1,21 +1,24 @@
-"""The federated epoch close: bit-identical mint maps across daemons.
+"""The federated epoch close: bit-identical claims across daemons.
 
 Every daemon that closes an epoch runs ``federated_epoch_close`` over the
 same canonical batch sequence (``canonical_ordering``), the carry-over the
 previous anchor committed (registrations, review rounds, ratings) and the
 chain inputs pinned to that anchor (REP shares, the ToolBond review
-snapshot, the fee pool, sanctions). The only mint rail is the review mint
-(``compute_tool_mint``, Decisions 2026-11-07 and 2026-11-09). Two
-guarantees make the output bit-identical:
+snapshot, the tool share collected per token, the value index,
+sanctions). The only earning rail is the review pay (``compute_tool_mint``,
+Decisions 2026-11-07 and 2026-11-09). Two guarantees make the output
+bit-identical:
 
   1. **Deterministic iteration order**. Float addition is
      non-associative, so every sum runs over sorted keys (digest, then
      agent) and every honest daemon performs the same sequence of float
      operations.
 
-  2. **Output normalization**. Mints are rounded to ``OUTPUT_DECIMALS``
-     places and then floored to whole ATN base units within the pool,
-     which swamps any ulp-level jitter.
+  2. **Integers for money**. The float weights become integers at
+     ``OUTPUT_DECIMALS`` places (far coarser than ulp-level jitter), and
+     every amount after that is integer arithmetic per token
+     (``split_pools``): each earner takes the same fraction of every
+     token's pool, floored, and the dust carries over.
 """
 
 from __future__ import annotations
@@ -30,8 +33,8 @@ from .library.charter import active_charter
 logger = logging.getLogger(__name__)
 
 
-# Number of decimal places mint outputs are rounded to: far below any
-# meaningful precision (chain scaling truncates at 6 decimals), well above
+# Number of decimal places the float weights are turned into integers
+# at before the split: far finer than any share that matters, well above
 # IEEE 754 jitter (~15 significant figures).
 OUTPUT_DECIMALS = 10
 
@@ -50,7 +53,6 @@ COMPOSITE_MAX_DEPTH = 4
 # value is ToolBond ``reviewerShareBps``, read pinned into the review
 # snapshot.
 REVIEWER_SHARE_BPS_DEFAULT = 4000
-ATN_BASE_UNITS = 1_000_000   # 6 decimals: 1 ATN = 1e6 base units
 BPS = 10_000
 
 # Household voice (docs/tool_substrate.md, Decision 2026-07-08 addendum,
@@ -102,16 +104,13 @@ VOICE_EPSILON = 0.0
 # reputation and there is no separate credibility number.
 
 
-# Fees-only emission (docs/tool_substrate.md, Decision 2026-07-10 §1):
-#   pool(N) = recycled(N)
-# where recycled(N) = Σ ServiceFee.burned between the previous two anchors
-# (read on-chain by voice_state.read_voice_state, same pinned rail as voice
-# weights). No base emission: ATN mints each epoch EXACTLY what fees burned
-# that epoch — money is always demand-backed. Zero service volume => zero
-# pool => zero mint, and that is correct behavior (the economy does not
-# pretend to exist before demand does). Conservation by construction
-# (Σ minted == Σ burned); wash-pumping the pool is a strict ATN loss. The
-# fee/treasury split lives on-chain (Substrate.sol serviceFeeBps).
+# The pools: one per token of the value index. Each service payment's fee
+# leaves its tool share in Substrate, in the token paid; an epoch's pool of
+# a token is the tool share collected between the two cutoffs before the
+# snapshot (lag one, read by voice_state.read_voice_state on the same
+# pinned rail as the voice weights) plus what earlier closes carried. Zero
+# service volume => empty pools => nothing paid. The fee and the treasury
+# share live on chain (Substrate serviceFeeBps, feeTreasuryBps).
 
 
 def _composition_shares(
@@ -343,17 +342,18 @@ UNMINTED = "~unminted"
 nobody (the author side's unpaid rest, forfeited dependency parts, a
 reviewer share with no eligible reviewer). It is normalized with the rest
 so every tool's share of the pool is fixed by its REP alone, then dropped
-before the claim tree: that ATN stays unminted and carries over."""
+before the claim tree: its amounts stay in the pools and carry over."""
 
 UNPAID_PREFIX = "~unpaid:"
 """Bucket keys ``~unpaid:<digest>:<recipient>`` carry the author side a
 tool would have paid had it not concluded on a malware verdict, its own or
 a dependency's (Decision 2026-11-10). They are split with the rest of the
-pool, so each part is fixed in ATN at the conclusion, then taken out of the
-mint: the ATN stays unminted and carries over, and the parts are recorded
-in the carried state (``tools[digest].unpaid``) so a DAO proposal that
-clears the verdict knows what to pay from the treasury. Nothing is
-reserved: a cleared tool is never paid by a close (it is paid once)."""
+pool, so each part is fixed per token at the conclusion, then left unpaid:
+the amounts stay in the pools and carry over, and the parts are recorded
+in the carried state (``tools[digest].unpaid``, per token and with their
+value) so a DAO proposal that clears the verdict knows what to pay from the
+treasury. Nothing is reserved: a cleared tool is never paid by a close (it
+is paid once)."""
 
 
 def unpaid_key(digest: str, recipient: str) -> str:
@@ -380,30 +380,29 @@ REVIEWER_MIN_REP_BPS_DEFAULT = 0
 def _normalize_tool_rounds(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Canonicalize the carried review-round state (sorted, typed, copied).
 
-    Shape: {"pool_carry": int (ATN base units left unminted so far),
+    Shape: {"pool_carry": {token: int} (each token's amount left unpaid
+    so far, base units),
     "counts": {epoch: {household: n reviews}},
     "tools": {digest: {"concluded": bool, "rounds": [{"epoch", "decay",
     "reviews": [{"reviewer", "house", "rep", "n", "accuracy"}]}],
-    "unpaid"?: {"amounts": {recipient: float}, "on": [digest]}}},
+    "unpaid"?: {"amounts": {recipient: {"tokens": {token: int},
+    "value": int}}, "on": [digest]}}},
     "refused": {digest: [digest]}, "pruned": [digest]}. ``unpaid`` is the
     author side a tool concluded without, because of the malware verdicts
     of the tools in ``on`` (itself or a dependency): its author's and
-    dependencies' parts as the conclusion fixed them (ATN once the close
-    split a pool), left unminted, kept for a proposal that clears a
-    verdict. ``refused`` maps each registration the close refused to the
+    dependencies' parts as the close's split fixed them, per token with
+    their value at the pinned parity, left unpaid, kept for a proposal that
+    clears a verdict. ``refused`` maps each registration the close refused to the
     malware tools it imports. ``pruned`` lists every tool daemons drop:
     those with an uncleared malware verdict, the tools built on them, and
     the refused registrations (Decision 2026-11-10).
     Derived purely from prior closes' pinned snapshots, so it is identical
     on every honest daemon (the carry-over commitment covers it)."""
-    out: Dict[str, Any] = {"pool_carry": 0, "counts": {}, "tools": {},
+    out: Dict[str, Any] = {"pool_carry": {}, "counts": {}, "tools": {},
                            "refused": {}, "pruned": []}
     if not state:
         return out
-    try:
-        out["pool_carry"] = max(0, int(state.get("pool_carry") or 0))
-    except (TypeError, ValueError):
-        out["pool_carry"] = 0
+    out["pool_carry"] = normalize_token_amounts(state.get("pool_carry"))
     for epoch, houses in sorted((state.get("counts") or {}).items(), key=lambda kv: str(kv[0])):
         if isinstance(houses, dict):
             out["counts"][str(epoch)] = {str(h).lower(): int(n) for h, n in sorted(houses.items())
@@ -432,10 +431,16 @@ def _normalize_tool_rounds(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         }
         unpaid = t.get("unpaid")
         if isinstance(unpaid, dict):
+            amounts: Dict[str, Any] = {}
+            for who, part in sorted((unpaid.get("amounts") or {}).items()):
+                if not isinstance(part, dict):
+                    continue
+                tokens = normalize_token_amounts(part.get("tokens"))
+                value = max(0, _int(part.get("value")))
+                if tokens or value:
+                    amounts[str(who).lower()] = {"tokens": tokens, "value": value}
             entry["unpaid"] = {
-                "amounts": {str(a).lower(): round(float(v), 12)
-                            for a, v in sorted((unpaid.get("amounts") or {}).items())
-                            if float(v) > 0},
+                "amounts": amounts,
                 "on": sorted(str(d).lower().removeprefix("0x")
                              for d in (unpaid.get("on") or [])),
             }
@@ -515,8 +520,8 @@ def compute_tool_mint(
         (transitively) has such a verdict, the author side is not paid and
         nothing waits: the verdict settles at the conclusion. The parts it
         would have paid (the author's and the dependencies') go to
-        ``unpaid_key`` buckets, so the close fixes them in ATN, then they
-        stay unminted; the carried state keeps them (``unpaid``) for a DAO
+        ``unpaid_key`` buckets, so the close fixes them per token, then they
+        stay unpaid; the carried state keeps them (``unpaid``) for a DAO
         proposal that clears the verdict and pays from the treasury. A
         DAO clearing replaces any verdict, for the tools built on it too;
       - everything unpaid goes to UNMINTED and stays unminted.
@@ -820,7 +825,7 @@ def compute_tool_mint(
 
         # Author side: the rest x the tool's score, the author keeping N and
         # the dependencies splitting 1 - N. On a malware verdict it is not
-        # paid; its parts are fixed in ATN and recorded (UNPAID_PREFIX).
+        # paid; its parts are fixed per token and recorded (UNPAID_PREFIX).
         rating = ratings.get(digest) or tool_rating(None, axis_ids, supply)
         score = tool_score(rating)
         side = (weight - reviewer_pool) * score
@@ -914,21 +919,28 @@ def federated_epoch_close(
     canonical: CanonicalOrder,
     *,
     output_decimals: int = OUTPUT_DECIMALS,
-    emission_pool: Optional[float] = None,
+    # The tool share collected per token in the snapshot's window
+    # (voice_state ``tool_share_window``, lag one); None = no chain, no
+    # split (claims stay empty, the carry is left as it was).
+    tool_share_window: Optional[Dict[str, int]] = None,
+    # The value index pinned to the snapshot (voice_state ``parity``):
+    # token -> parity, 0 or missing = out of the index (its amounts are
+    # still paid, at value 0).
+    parity: Optional[Dict[str, int]] = None,
     tool_registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
     tool_rounds: Optional[Dict[str, Any]] = None,
     # Raw REP share per household (weighs reviews).
     rep_shares: Optional[Dict[str, float]] = None,
-    # Reviews (Decision 2026-11-09): the ToolBond review snapshot, read by the caller pinned to the previous anchor
-    # (same snapshot as rep_shares / emission_pool). None = no ratings
-    # and no review rounds.
+    # Reviews (Decision 2026-11-09): the ToolBond review snapshot, read by
+    # the caller pinned to the previous anchor (same snapshot as rep_shares
+    # and the pool). None = no ratings and no review rounds.
     review_snapshot: Optional[Dict[str, Any]] = None,
     # Registrations only from proven manifest bytes (compute_tool_mint).
     proven_registrations: bool = False,
     # Households under a DAO sanction at the same snapshot
-    # (docs/accountability.md): their mint is withheld (left unminted, not
-    # passed to others) and their reviews weigh nothing.
+    # (docs/accountability.md): their share is withheld (it stays in the
+    # carry, not passed to others) and their reviews weigh nothing.
     sanctioned_households: Optional[List[str]] = None,
     # Breakthrough gate (compute_tool_mint).
     mint_gate: Optional[Tuple[int, int]] = None,
@@ -949,9 +961,18 @@ def federated_epoch_close(
     results, and the ``authoritative_payload`` is what the anchor commits.
     The canonical events matter for their tool registrations
     (``tool_registered``) and service reviews (``service_review``, which
-    mint nothing: they update ``service_reviews`` and ``service_ratings``,
-    carried in the anchored bundle); everything a mint needs beyond them is
-    carried or read from the chain.
+    pay nothing: they update ``service_reviews`` and ``service_ratings``,
+    carried in the anchored bundle); everything else is carried or read
+    from the chain.
+
+    The pool of each token is its window plus its carry. Every weight
+    ``compute_tool_mint`` yields becomes an integer at ``output_decimals``
+    and each key takes ``pool * w // W`` of every token (``split_pools``),
+    the same fraction of each pool. ``claims`` maps each household to its
+    amounts and their REP value at ``parity``; whatever is not paid (the
+    unminted rest, the parts a malware verdict leaves unpaid, sanctioned
+    households' shares, the floor's dust) is the next carry, token by
+    token, so pool = paid + carry exactly.
     """
     all_events: List[Dict[str, Any]] = []
     for batch in canonical.ordered_batches:
@@ -978,122 +999,147 @@ def federated_epoch_close(
         reviewer_min_rep_bps=reviewer_min_rep_bps,
     )
     rounds_next = tool_result["tool_rounds_next"]
-    # The pool carries over (Decision 2026-11-07): what earlier closes left
-    # unminted joins this epoch's burned fees. Substrate caps claims on the
-    # cumulative pool, so the carry can be spent in any later epoch.
-    if emission_pool is not None:
-        emission_pool = float(emission_pool) + rounds_next["pool_carry"] / ATN_BASE_UNITS
+    parity_map = normalize_token_amounts(parity)
 
-    # Per-agent mint: every concluding tool's bucket, digest then agent
-    # order. The unpaid part of each tool's share rides as UNMINTED so the
-    # pool split below leaves it unminted.
-    agent_mint: Dict[str, float] = {}
+    # Every concluding tool's bucket, digest then key order. The unpaid
+    # part of each tool's share rides as UNMINTED, and a malware verdict's
+    # parts as unpaid keys, so the split fixes them and they stay unpaid.
+    raw: Dict[str, float] = {}
     node_agent = tool_result["node_agent"]
     for digest in sorted(node_agent):
         for agent in sorted(node_agent[digest]):
             amount = float(node_agent[digest][agent])
             if amount > 0.0:
-                agent_mint[agent] = agent_mint.get(agent, 0.0) + amount
-    result: Dict[str, Any] = {
-        "agent_mint": dict(sorted(_round_dict(agent_mint, output_decimals).items())),
-        "output_decimals": output_decimals,
-    }
-    if emission_pool is not None:
-        result = apply_emission_pool(result, emission_pool)
-        # On-chain conservation (2026-10-12): Substrate caps each epoch's
-        # cumulative claimFor at the integer fee pool, so the ratified
-        # mints are FLOORED to integer base units whose sum never exceeds
-        # it (float rounding could otherwise over-allocate by an ulp and
-        # the last claimer would revert).
-        result["agent_mint"] = floor_mint_to_pool(
-            result.get("agent_mint", {}) or {}, emission_pool)
-        result["agent_mint"] = dict(sorted(
-            _round_dict(result.get("agent_mint", {}), output_decimals).items()
-        ))
-    # Author sides left unpaid on a malware verdict: their parts, fixed in
-    # ATN by the split above, leave the mint (unminted, carried over) and
-    # are recorded for a proposal that clears the verdict.
-    unpaid_now: Dict[str, Dict[str, float]] = {}
-    for key in sorted(result["agent_mint"]):
+                raw[agent] = raw.get(agent, 0.0) + amount
+    weights = integer_weights(raw, output_decimals)
+    total_weight = sum(weights[k] for k in sorted(weights))
+
+    # The pool carries over (Decision 2026-11-07): what earlier closes left
+    # unpaid joins this epoch's window, token by token. Substrate caps
+    # claims of a token on its cumulative tool share, so the carry can be
+    # paid in any later epoch.
+    pools: Optional[Dict[str, int]] = None
+    if tool_share_window is not None:
+        window = normalize_token_amounts(tool_share_window)
+        carry = rounds_next["pool_carry"]
+        pools = {t: window.get(t, 0) + carry.get(t, 0)
+                 for t in sorted(set(window) | set(carry))}
+        pools = {t: v for t, v in pools.items() if v > 0}
+    shares = split_pools(pools or {}, weights)
+
+    owners = {str(k).lower(): str(v).lower()
+              for k, v in (agent_owner_map or {}).items()}
+    house_set = set(sanctioned)
+    by_agent: Dict[str, Dict[str, int]] = {}
+    withheld: Dict[str, Dict[str, int]] = {}
+    unpaid_now: Dict[str, Dict[str, Dict[str, int]]] = {}
+    house_weights: Dict[str, int] = {}
+    for key in sorted(weights):
+        basket = shares.get(key, {})
         parsed = parse_unpaid_key(key)
         if parsed is not None:
+            # A malware verdict's parts: fixed per token by the split, left
+            # unpaid (carried) and recorded for a clearing proposal.
             digest, who = parsed
-            unpaid_now.setdefault(digest, {})[who] = result["agent_mint"][key]
+            unpaid_now.setdefault(digest, {})[who] = basket
+            continue
+        if key == UNMINTED:
+            continue
+        a = str(key).lower()
+        if owners.get(a, a) in house_set or a in house_set:
+            # Sanctions withhold after the split, so a withheld share stays
+            # in the carry instead of raising everyone else's: a sanction
+            # never pays the households that voted for it.
+            if basket:
+                withheld[key] = basket
+            continue
+        by_agent[key] = basket
+        house = owners.get(a, a)
+        house_weights[house] = house_weights.get(house, 0) + weights[key]
+
+    # The owner wallet claims (Decision 2026-10-27): each agent's amounts go
+    # to its pinned owner, added per household as integers. An agent with
+    # no owner entry (bound after the snapshot, or genesis) is its own
+    # earner.
+    house_tokens: Dict[str, Dict[str, int]] = {}
+    for agent in sorted(by_agent):
+        a = str(agent).lower()
+        house = owners.get(a, a)
+        acc = house_tokens.setdefault(house, {})
+        for t in sorted(by_agent[agent]):
+            acc[t] = acc.get(t, 0) + by_agent[agent][t]
+    claims: Dict[str, Dict[str, Any]] = {}
+    for house in sorted(house_tokens):
+        tokens = {t: v for t, v in sorted(house_tokens[house].items()) if v > 0}
+        value = basket_value(tokens, parity_map)
+        if tokens or value:
+            claims[house] = {"tokens": tokens, "value": value}
+
+    result: Dict[str, Any] = {
+        "claims": claims,
+        "total_value": sum(claims[h]["value"] for h in sorted(claims)),
+        "output_decimals": output_decimals,
+        "household_weights": dict(sorted(house_weights.items())),
+        "claims_by_agent": {k: by_agent[k] for k in sorted(by_agent) if by_agent[k]},
+        "sanctioned_households": sanctioned,
+        "withheld": dict(sorted(withheld.items())),
+    }
+
+    # Author sides left unpaid on a malware verdict: their amounts per token
+    # and their value, recorded for a proposal that clears the verdict.
     for digest in sorted(rounds_next["tools"]):
         unpaid = rounds_next["tools"][digest].get("unpaid")
         if unpaid is not None and digest in tool_result["concluded"]:
-            unpaid["amounts"] = dict(sorted((unpaid_now.get(digest) or {}).items()))
-    result["agent_mint"] = dict(sorted(
-        (k, v) for k, v in result["agent_mint"].items()
-        if k != UNMINTED and parse_unpaid_key(k) is None))
-    # Keep tool_mint in the SAME UNITS as agent_mint: when the pool
-    # normalized agent mints, scale the per-digest display values by the
-    # identical factor. Sorted iteration + rounding.
+            parts = unpaid_now.get(digest) or {}
+            unpaid["amounts"] = {
+                who: {"tokens": parts[who], "value": basket_value(parts[who], parity_map)}
+                for who in sorted(parts) if parts[who]}
+
+    # tool_mint: with a pool, each tool's parts as value units of the pool
+    # (its weight's fraction of the pool's whole value); without one, the
+    # raw weights.
     per_digest = tool_result["per_digest"]
-    _pool = result.get("emission_pool")
-    _raw_total = float(result.get("raw_mint_total") or 0.0)
-    if _pool is not None and _raw_total > 0.0:
-        _scale = float(_pool) / _raw_total
+    if pools is not None and total_weight > 0:
+        pool_value = basket_value(pools, parity_map)
+        scale = 10 ** int(output_decimals)
+
+        def _value(x: float) -> int:
+            return int(round(float(x) * scale)) * pool_value // total_weight
         per_digest = {
-            d: {**e, "mint": round(e["mint"] * _scale, output_decimals),
-                "reviewer_mint": round(e.get("reviewer_mint", 0.0) * _scale,
-                                       output_decimals),
-                "author_mint": round(e.get("author_mint", 0.0) * _scale,
-                                     output_decimals),
-                "unpaid": round(e.get("unpaid", 0.0) * _scale, output_decimals)}
+            d: {**e, "mint": _value(e["mint"]),
+                "reviewer_mint": _value(e.get("reviewer_mint", 0.0)),
+                "author_mint": _value(e.get("author_mint", 0.0)),
+                "unpaid": _value(e.get("unpaid", 0.0))}
             for d, e in sorted(per_digest.items())
         }
-    for d in sorted(unpaid_now):
-        if d in per_digest:
-            per_digest[d] = {**per_digest[d], "unpaid": round(
-                sum(unpaid_now[d].values()), output_decimals)}
-    # Sanctions: withhold the mint of every agent whose household is
-    # sanctioned. Applied AFTER the pool split, so the withheld amount stays
-    # unminted instead of raising everyone else's share: a sanction never
-    # pays the households that voted for it.
-    withheld: Dict[str, float] = {}
-    if sanctioned:
-        house_set = set(sanctioned)
-        owners = {str(k).lower(): str(v).lower()
-                  for k, v in (agent_owner_map or {}).items()}
-        kept: Dict[str, float] = {}
-        for agent in sorted(result["agent_mint"]):
-            amount = result["agent_mint"][agent]
-            a = str(agent).lower()
-            if owners.get(a, a) in house_set or a in house_set:
-                if amount:
-                    withheld[agent] = amount
-            else:
-                kept[agent] = amount
-        result["agent_mint"] = kept
-    result["sanctioned_households"] = sanctioned
-    result["withheld_mint"] = dict(sorted(withheld.items()))
-    # The owner wallet claims (Decision 2026-10-27): key each mint by the
-    # earning agent's pinned owner, summed per household. An agent with no
-    # owner entry (bound after the snapshot, or genesis) stays its own
-    # claimant. The per-agent split is kept for diagnostics only.
-    result["agent_mint_by_agent"] = result["agent_mint"]
-    result["agent_mint"] = household_mint(
-        result["agent_mint_by_agent"], agent_owner_map, output_decimals)
-    # Pool-floored mints are whole base units, so the household sums are
-    # exact and never exceed the pool.
-    result["total_mint"] = round(sum(result["agent_mint"].values()), output_decimals)
-
+        for d in sorted(unpaid_now):
+            if d in per_digest:
+                per_digest[d] = {**per_digest[d], "unpaid": sum(
+                    basket_value(b, parity_map) for _, b in sorted(unpaid_now[d].items()))}
     result["tool_mint"] = per_digest
     result["tool_registrations"] = tool_result["registrations_next"]
-    if emission_pool is not None:
-        # Conservation: pool = minted + carry. Malware-unpaid parts and
-        # withheld mint fall into the carry.
-        pool_raw = int(round(float(emission_pool) * ATN_BASE_UNITS))
-        minted_raw = sum(int(round(float(v) * ATN_BASE_UNITS))
-                         for v in result["agent_mint"].values())
-        rounds_next["pool_carry"] = max(0, pool_raw - minted_raw)
+
+    if pools is not None:
+        # Conservation per token: pool = paid + carry. The unminted rest,
+        # malware-unpaid parts, withheld shares and the floor's dust all
+        # fall into the carry.
+        paid: Dict[str, int] = {}
+        for house in sorted(claims):
+            for t, v in sorted(claims[house]["tokens"].items()):
+                paid[t] = paid.get(t, 0) + v
+        rounds_next["pool_carry"] = {
+            t: pools[t] - paid.get(t, 0) for t in sorted(pools)
+            if pools[t] - paid.get(t, 0) > 0}
+        result["pools"] = dict(pools)
+        result["parity"] = {t: parity_map.get(t, 0) for t in sorted(pools)}
         logger.info(
-            "tool mint: %d tool(s) concluded, minted %.6f of a %.6f pool, "
-            "%.6f carried over",
-            len(tool_result["per_digest"]),
-            minted_raw / ATN_BASE_UNITS, pool_raw / ATN_BASE_UNITS,
-            rounds_next["pool_carry"] / ATN_BASE_UNITS)
+            "tool pools: %d tool(s) concluded, %d earner(s), value %d paid of "
+            "pools %s, carried %s",
+            len(tool_result["per_digest"]), len(claims), result["total_value"],
+            pools, rounds_next["pool_carry"])
+    else:
+        result["pools"] = {}
+        result["parity"] = {}
     # What each tool concluding on a malware verdict would have paid, for a
     # proposal that clears the verdict (kept in tool_rounds too).
     result["malware_unpaid"] = {
@@ -1106,7 +1152,7 @@ def federated_epoch_close(
     result["concluded"] = tool_result["concluded"]
     # Service reviews (Decision 2026-11-10): each payer's latest review per
     # service, and the per-service ratings, from the canonical events and
-    # the carried reviews. No mint, no REP.
+    # the carried reviews. They pay nothing and earn no REP.
     from .service_reviews import KIND as _SERVICE_REVIEW, close_service_reviews
 
     services = close_service_reviews(
@@ -1135,18 +1181,19 @@ def federated_epoch_close(
     from .library.charter_version import charter_hash as _charter_hash
 
     result["authoritative_payload"] = {
-        # schema 8 (Decision 2026-11-09): ``concluded`` commits each
-        # concluding tool's malware share (bps), one agentMintRoot leaf
-        # each. Schema 7 dropped the world's fields. agent_mint is keyed by
-        # household claimant (lowercase owner wallet, schema 6), the
-        # 2-field leaf claimFor verifies; carry_cid (set by
-        # FederatedCloseDriver) commits the next close's carry-over bundle;
-        # charter_hash and sanctioned_households decide the mint, so they
-        # are committed too.
-        "schema": 8,
+        # schema 9: ``claims`` (per household, an amount of each token's
+        # pool and the REP value), one claimRoot leaf each, with ``pools``,
+        # ``parity`` and ``total_value``; ``concluded`` commits each
+        # concluding tool's malware share (bps), one leaf each. carry_cid
+        # (set by FederatedCloseDriver) commits the next close's carry-over
+        # bundle; charter_hash and sanctioned_households decide the split,
+        # so they are committed too.
+        "schema": 9,
         "epoch_root": result["epoch_root"],
-        "agent_mint": result["agent_mint"],
-        "total_mint": result["total_mint"],
+        "claims": result["claims"],
+        "pools": result["pools"],
+        "parity": result["parity"],
+        "total_value": result["total_value"],
         "output_decimals": output_decimals,
         "charter_hash": _charter_hash(),
         "sanctioned_households": result["sanctioned_households"],
@@ -1157,26 +1204,68 @@ def federated_epoch_close(
     return result
 
 
-def household_mint(
-    agent_mint: Dict[str, float],
-    agent_owner_map: Optional[Dict[str, str]],
-    output_decimals: int,
-) -> Dict[str, float]:
-    """Re-key a per-agent mint map by household claimant.
+PARITY_SCALE = 10 ** 30
+"""The value of ``amount`` of a token at ``parity`` is ``amount * parity //
+PARITY_SCALE``, in 6-decimal value units (Substrate ``valueOf``): 1 USDC at
+parity 1e30 is 1e6, and so is 1 DAI at parity 1e18."""
 
-    Each agent's amount goes to its owner in the pinned ``agent_owner_map``
-    (lowercased), or to the agent itself when it has none. Keys are
-    lowercase so the merkle leaf and every submitter agree on spelling.
-    Sorted accumulation, then rounding, for the bit-identical guarantee.
-    """
-    owners = {str(k).lower(): str(v).lower()
-              for k, v in (agent_owner_map or {}).items()}
-    out: Dict[str, float] = {}
-    for agent in sorted(agent_mint):
-        a = str(agent).lower()
-        claimant = owners.get(a, a)
-        out[claimant] = out.get(claimant, 0.0) + float(agent_mint[agent])
-    return {k: round(v, output_decimals) for k, v in sorted(out.items())}
+
+def value_of(amount: int, parity: int) -> int:
+    """The value of ``amount`` at ``parity``, in 6-decimal value units."""
+    return int(amount) * int(parity) // PARITY_SCALE
+
+
+def basket_value(tokens: Dict[str, int], parity: Dict[str, int]) -> int:
+    """The value of a basket {token: amount}: each token valued on its own,
+    then added (missing parity = 0)."""
+    return sum(value_of(tokens[t], parity.get(t, 0)) for t in sorted(tokens))
+
+
+def normalize_token_amounts(raw: Any) -> Dict[str, int]:
+    """{token (lowercase): non-negative int}, sorted, zeros dropped.
+    Anything that is not such a map (an int, None) is empty."""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, int] = {}
+    for k, v in raw.items():
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(v, float) or n <= 0:
+            continue
+        out[str(k).lower()] = n
+    return dict(sorted(out.items()))
+
+
+def integer_weights(raw: Dict[str, float], output_decimals: int) -> Dict[str, int]:
+    """Each float weight as the integer ``round(v * 10**output_decimals)``,
+    sorted; zero and negative weights are dropped. The only float step of
+    the split."""
+    scale = 10 ** int(output_decimals)
+    out: Dict[str, int] = {}
+    for k in sorted(raw):
+        w = int(round(float(raw[k]) * scale))
+        if w > 0:
+            out[k] = w
+    return out
+
+
+def split_pools(pools: Dict[str, int], weights: Dict[str, int]) -> Dict[str, Dict[str, int]]:
+    """The basket: each key takes ``pool * w // W`` of every token, W the
+    sum of the weights. Pure integers, so the amounts never add up to more
+    than the pool; the floor's dust stays with the pool. Returns {key:
+    {token: amount}} with zero amounts dropped (W == 0 pays nothing)."""
+    total = sum(weights[k] for k in sorted(weights))
+    out: Dict[str, Dict[str, int]] = {}
+    if total <= 0:
+        return out
+    for key in sorted(weights):
+        basket = {t: pools[t] * weights[key] // total for t in sorted(pools)}
+        basket = {t: v for t, v in basket.items() if v > 0}
+        if basket:
+            out[key] = basket
+    return out
 
 
 def _annotate_sender(ev: Dict[str, Any], sender_hex: str) -> Dict[str, Any]:
@@ -1195,65 +1284,6 @@ def _annotate_sender(ev: Dict[str, Any], sender_hex: str) -> Dict[str, Any]:
     return ev
 
 
-def apply_emission_pool(result: Dict[str, Any], emission_pool: float) -> Dict[str, Any]:
-    """Normalize a close's mints to shares of the epoch's pool.
-
-    Deterministic given (result, pool): values are scaled in sorted-key
-    order, so every daemon computes the same map. ``emission_pool`` must
-    come from canonical data (the burned fees read pinned to the previous
-    anchor, plus the carried pool), never from a daemon-local clock.
-    """
-    out = dict(result)
-    agent_mint = result.get("agent_mint", {}) or {}
-    raw_total = sum(agent_mint[a] for a in sorted(agent_mint))
-    out["raw_mint_total"] = raw_total
-    out["emission_pool"] = float(emission_pool)
-    if raw_total <= 0:
-        return out
-    scale = float(emission_pool) / raw_total
-    out["agent_mint"] = {a: agent_mint[a] * scale for a in sorted(agent_mint)}
-    out["total_mint"] = sum(out["agent_mint"][a] for a in sorted(out["agent_mint"]))
-    return out
-
-
-def floor_mint_to_pool(
-    agent_mint: Dict[str, float],
-    emission_pool: float,
-    mint_scale: int = 1_000_000,
-) -> Dict[str, float]:
-    """Floor pool-normalized mints to integer base units (x mint_scale)
-    whose sum is <= the integer pool, then return them as floats k/scale.
-
-    ``emission_pool`` is the ATN-denominated pool (chain base units /
-    mint_scale, exact for pools below ~9e9 ATN), so the integer pool is
-    recovered by rounding. Any float excess left after flooring is taken
-    one unit at a time from the largest allocations (ties by key), which
-    is deterministic. The dust (pool - sum) stays unminted. ``scale_mint``
-    rounds, so each leaf scales back to exactly k.
-    """
-    import math
-
-    pool_raw = int(round(float(emission_pool) * mint_scale))
-    keys = sorted(agent_mint)
-    ks: Dict[str, int] = {}
-    for a in keys:
-        v = float(agent_mint[a])
-        ks[a] = max(0, int(math.floor(v * mint_scale))) if v > 0 else 0
-    excess = sum(ks[a] for a in keys) - max(pool_raw, 0)
-    if excess > 0:
-        order = sorted(keys, key=lambda a: (-ks[a], a))
-        i = 0
-        while excess > 0 and order:
-            a = order[i % len(order)]
-            if ks[a] > 0:
-                ks[a] -= 1
-                excess -= 1
-            i += 1
-            if i > 10 * len(order) + excess * len(order):  # pragma: no cover
-                break
-    return {a: ks[a] / mint_scale for a in keys}
-
-
 def _lower_map(d: Dict[str, Any], *, values: bool = False) -> Dict[str, Any]:
     """Lowercase a map's keys (and string values when ``values``), in
     sorted key order so a case collision resolves the same everywhere."""
@@ -1261,15 +1291,4 @@ def _lower_map(d: Dict[str, Any], *, values: bool = False) -> Dict[str, Any]:
     for k in sorted(d, key=str):
         v = d[k]
         out[str(k).lower()] = str(v).lower() if values else v
-    return out
-
-
-def _round_dict(d: Dict[str, float], decimals: int) -> Dict[str, float]:
-    """Round every value in a {str: float} dict to ``decimals`` places.
-    Drops zero values so empty contributions don't pollute the map."""
-    out: Dict[str, float] = {}
-    for k, v in d.items():
-        rv = round(float(v), decimals)
-        if rv != 0.0:
-            out[k] = rv
     return out

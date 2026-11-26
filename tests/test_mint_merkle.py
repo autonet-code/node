@@ -1,53 +1,55 @@
-"""Merkle mint proofs: python tree ↔ Substrate.sol verification.
+"""Claim proofs: the python tree and Substrate's verification.
 
-The anchor commits agentMintRoot; claimFor only accepts (claimant,
-amount) pairs that prove into it, whoever sends the transaction
-(Decision 2026-10-27: the owner wallet claims, the daemon operates). Money only (Decision
-2026-07-10): the leaf commits the ATN amount alone — REP is claimed
-DAO-side (RepToken) on ratified ATN earnings, not minted on this path.
-These tests pin:
+The anchor commits a claimRoot; ``Substrate.claim`` only accepts an
+(earner, tokens, amounts) leaf that proves into it, whoever sends the
+transaction (Decision 2026-10-27: the owner wallet earns, the daemon
+operates). These tests pin:
 
   - python tree mechanics (roots, proofs, exclusions, determinism),
-  - the contract accepting exactly the ratified amounts,
-  - the contract rejecting inflated ATN amounts, foreign proofs, and
-    claims against rootless (empty-root) anchors,
-  - the full submitter path building proofs transparently.
+  - the leaf against an independent eth_abi + keccak computation and
+    against ``Substrate.claimLeaf`` on the compiled contract,
+  - the contract accepting exactly the anchored amounts and rejecting
+    inflated amounts, foreign proofs and claims against an empty root,
+  - the full submitter path: claim, then a withdrawal per token.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict
 
 import pytest
+from eth_abi import encode as abi_encode
+from eth_utils import keccak, to_checksum_address
 
-eth_tester = pytest.importorskip("eth_tester")
-
-from web3 import Web3
-from web3.providers.eth_tester import EthereumTesterProvider
-
-from nodes.common.authoritative_submitter import (
-    AuthoritativeChainSubmitter,
-    AuthoritativeSubmitterConfig,
-    epoch_id_hash,
-)
-from nodes.common.blob_resolver import InMemoryBlobResolver
-from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
 from nodes.common.mint_merkle import (
+    CLAIM_TAG,
     EMPTY_ROOT,
-    mint_leaves,
-    mint_merkle_proof,
-    mint_merkle_root,
-    scale_mint,
-    verify_mint_proof,
+    claim_leaf,
+    claim_leaves,
+    claim_merkle_proof,
+    claim_merkle_root,
+    concluded_leaf,
+    concluded_proof,
+    verify_claim_proof,
+    verify_concluded_proof,
 )
 
-ARTIFACT = Path("C:/code/autonet/artifacts/contracts/core/Substrate.sol/Substrate.json")
+ARTIFACT = Path(__file__).resolve().parent.parent / "artifacts/contracts/core/Substrate.sol/Substrate.json"
 
-ADDRS = [
-    "0x" + f"{i:040x}" for i in range(1, 8)
-]
+ADDRS = ["0x" + f"{i:040x}" for i in range(1, 8)]
+T6 = "0x" + "a6" * 20      # stands for a 6-decimal token
+T18 = "0x" + "1b" * 20     # stands for an 18-decimal token
+
+
+def _claims(n: int):
+    return {ADDRS[i]: {"tokens": {T6: (i + 1) * 1_500_000, T18: (i + 1) * 10 ** 18},
+                       "value": (i + 1) * 2_500_000} for i in range(n)}
+
+
+def _fields(claims, earner):
+    tokens = sorted(t.lower() for t in claims[earner]["tokens"])
+    return tokens, [claims[earner]["tokens"][t] for t in tokens]
 
 
 # ---------------------------------------------------------------------------
@@ -57,267 +59,249 @@ ADDRS = [
 
 def test_round_trip_all_tree_sizes():
     for n in range(1, 8):
-        mint = {ADDRS[i]: float(i + 1) * 1.5 for i in range(n)}
-        root = mint_merkle_root(mint)
-        for addr, raw in mint.items():
-            proof = mint_merkle_proof(mint, addr)
+        claims = _claims(n)
+        root = claim_merkle_root(claims)
+        for addr in claims:
+            proof = claim_merkle_proof(claims, addr)
             assert proof is not None, (n, addr)
-            assert verify_mint_proof(root, addr, scale_mint(raw), proof), (n, addr)
+            assert verify_claim_proof(root, addr, *_fields(claims, addr), proof), (n, addr)
 
 
 def test_single_leaf_root_is_leaf_with_empty_proof():
-    mint = {ADDRS[0]: 2.5}
-    root = mint_merkle_root(mint)
-    proof = mint_merkle_proof(mint, ADDRS[0])
-    assert proof == []
-    assert verify_mint_proof(root, ADDRS[0], scale_mint(2.5), [])
+    claims = _claims(1)
+    root = claim_merkle_root(claims)
+    assert claim_merkle_proof(claims, ADDRS[0]) == []
+    assert root == claim_leaf(ADDRS[0], *_fields(claims, ADDRS[0]))
 
 
 def test_wrong_amount_fails_verification():
-    mint = {ADDRS[0]: 1.0, ADDRS[1]: 2.0}
-    root = mint_merkle_root(mint)
-    proof = mint_merkle_proof(mint, ADDRS[0])
-    assert not verify_mint_proof(root, ADDRS[0], scale_mint(1.0) + 1, proof)
+    claims = _claims(2)
+    root = claim_merkle_root(claims)
+    proof = claim_merkle_proof(claims, ADDRS[0])
+    tokens, amounts = _fields(claims, ADDRS[0])
+    assert not verify_claim_proof(root, ADDRS[0], tokens, [amounts[0] + 1, amounts[1]], proof)
+    assert not verify_claim_proof(root, ADDRS[0], tokens[:1], amounts[:1], proof)
 
 
-def test_non_address_and_zero_keys_excluded():
-    mint = {"alice": 5.0, ADDRS[0]: 0.0, ADDRS[1]: 3.0}
-    leaves = mint_leaves(mint)
+def test_non_address_and_zero_amounts_excluded():
+    claims = {"alice": {"tokens": {T6: 5}, "value": 5},
+              ADDRS[0]: {"tokens": {T6: 0}, "value": 0},
+              ADDRS[1]: {"tokens": {T6: 3, T18: 0}, "value": 3}}
+    leaves = claim_leaves(claims)
     assert len(leaves) == 1
-    assert leaves[0][0].lower() == ADDRS[1].lower()
-    assert mint_merkle_proof(mint, "alice") is None
-    assert mint_merkle_proof(mint, ADDRS[0]) is None   # zero share
+    earner, tokens, amounts = leaves[0]
+    assert earner.lower() == ADDRS[1] and tokens == [to_checksum_address(T6)] and amounts == [3]
+    assert claim_merkle_proof(claims, "alice") is None
+    assert claim_merkle_proof(claims, ADDRS[0]) is None
 
 
-def test_empty_map_yields_empty_root():
-    assert mint_merkle_root({}) == EMPTY_ROOT
-    assert mint_merkle_root({"not-an-address": 9.0}) == EMPTY_ROOT
+def test_empty_claims_yield_empty_root():
+    assert claim_merkle_root({}) == EMPTY_ROOT
+    assert claim_merkle_root({"not-an-address": {"tokens": {T6: 9}, "value": 9}}) == EMPTY_ROOT
 
 
-def test_root_independent_of_key_order():
-    mint_a = {ADDRS[0]: 1.0, ADDRS[1]: 2.0, ADDRS[2]: 3.0}
-    mint_b = dict(reversed(list(mint_a.items())))
-    assert mint_merkle_root(mint_a) == mint_merkle_root(mint_b)
+def test_root_independent_of_key_order_and_case():
+    a = _claims(3)
+    b = {k.upper().replace("0X", "0x"): {"tokens": dict(reversed(list(v["tokens"].items()))),
+                                         "value": v["value"]}
+         for k, v in reversed(list(a.items()))}
+    assert claim_merkle_root(a) == claim_merkle_root(b)
 
 
-def test_two_field_leaf_shape():
-    """Money-only (Decision 2026-07-10): a leaf entry is (address, amount)
-    — a 2-tuple, no repAmount third field."""
-    mint = {ADDRS[0]: 4.0}
-    leaves = mint_leaves(mint)
-    assert len(leaves[0]) == 2
-    assert leaves[0][1] == scale_mint(4.0)
+def test_value_is_not_in_the_leaf():
+    """Substrate computes REP on chain; the close's value is informational."""
+    a = _claims(2)
+    b = {k: {**v, "value": v["value"] + 7} for k, v in a.items()}
+    assert claim_merkle_root(a) == claim_merkle_root(b)
+
+
+def test_leaf_matches_an_independent_abi_encoding_two_tokens():
+    """keccak256(bytes.concat(keccak256(abi.encode(CLAIM_TAG, earner,
+    tokens, amounts)))), tokens ascending."""
+    earner = "0x" + "c0" * 20
+    claims = {earner: {"tokens": {T6: 1_234_567, T18: 5 * 10 ** 17}, "value": 1_734_567}}
+    tokens = sorted([T6, T18])                  # lowercase order = numeric order
+    amounts = [claims[earner]["tokens"][t] for t in tokens]
+    assert tokens == [T18, T6]                  # 0x1b.. < 0xa6..
+    expected = keccak(keccak(abi_encode(
+        ["bytes32", "address", "address[]", "uint256[]"],
+        [keccak(text="autonet.claim"), to_checksum_address(earner),
+         [to_checksum_address(t) for t in tokens], amounts])))
+    assert CLAIM_TAG == keccak(text="autonet.claim")
+    assert claim_merkle_root(claims) == expected
+    assert claim_leaf(earner, tokens, amounts) == expected
+
+
+def test_concluded_leaves_share_the_tree():
+    """Decision 2026-11-09: each concluding tool's leaf sits after the claim
+    leaves; both kinds prove against the same root."""
+    claims = _claims(2)
+    concluded = {"bb" * 32: 6000, "0x" + "aa" * 32: 0}
+    root = claim_merkle_root(claims, concluded=concluded)
+    assert root != claim_merkle_root(claims)
+    for a in ADDRS[:2]:
+        proof = claim_merkle_proof(claims, a, concluded=concluded)
+        assert verify_claim_proof(root, a, *_fields(claims, a), proof)
+    for d, bps in (("aa" * 32, 0), ("bb" * 32, 6000)):
+        proof = concluded_proof(claims, concluded, d)
+        assert verify_concluded_proof(root, d, bps, proof)
+        assert not verify_concluded_proof(root, d, bps + 1, proof)
+    assert concluded_proof(claims, concluded, "cc" * 32) is None
+    only = claim_merkle_root({}, concluded={"bb" * 32: 1})
+    assert only == concluded_leaf("bb" * 32, 1)
 
 
 # ---------------------------------------------------------------------------
-# Contract enforcement
+# The compiled contract
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def chain():
+    pytest.importorskip("eth_tester")
     if not ARTIFACT.exists():
         pytest.skip(f"missing artifact: {ARTIFACT}")
+    from web3 import Web3
+    from web3.providers.eth_tester import EthereumTesterProvider
+
+    from tests.substrate_chain_helpers import (
+        deploy_substrate, index_tokens, register_bound, seed_pool)
     data = json.loads(ARTIFACT.read_text(encoding="utf-8"))
     w3 = Web3(EthereumTesterProvider())
     deployer = w3.eth.accounts[0]
-    from tests.substrate_chain_helpers import deploy_substrate, register_bound, seed_pool
     addr = deploy_substrate(w3, data["abi"], data["bytecode"], deployer)
     contract = w3.eth.contract(address=addr, abi=data["abi"])
     agent_addrs = w3.eth.accounts[1:4]
     for i, a in enumerate(agent_addrs):
         assert register_bound(w3, contract, a, f"peer-{i}".encode()).status == 1
-    # Fees-only pool for the next anchor (on-chain conservation).
-    seed_pool(w3, contract)
-    return {
-        "w3": w3, "abi": data["abi"], "addr": contract.address,
-        "contract": contract, "deployer": deployer,
-        "agent_addrs": list(agent_addrs),
-    }
+    shares = seed_pool(w3, contract)
+    return {"w3": w3, "abi": data["abi"], "addr": contract.address,
+            "contract": contract, "deployer": deployer,
+            "agent_addrs": list(agent_addrs), "tokens": index_tokens(contract),
+            "shares": shares}
 
 
-def _anchor_with_mint(chain, mint: Dict[str, float], epoch_id: str):
-    """Anchor a hand-built close result carrying this mint map.
+def _new_claim_abi(chain):
+    from tests.substrate_chain_helpers import claim_takes_value
+    if claim_takes_value(chain["abi"]):
+        pytest.skip("the compiled Substrate still takes a value in claim; "
+                    "recompile after the leaf without it lands")
 
-    Money-only (schema 3): no agent_rep."""
-    payload = {
-        "epoch_root": "11" * 32,
-        "agent_mint": mint,
-        "total_mint": sum(mint.values()),
-        "output_decimals": 10,
-        "n_batches": 1,
-        "n_events": len(mint),
-    }
-    result = {
-        "authoritative_payload": payload,
-        "agent_mint": mint,
-        "epoch_id": epoch_id,
-    }
+
+def test_leaf_matches_substrate_claim_leaf(chain):
+    _new_claim_abi(chain)
+    earner = chain["agent_addrs"][0]
+    tokens = sorted(t.address.lower() for t in chain["tokens"])
+    amounts = [7, 10 ** 18 + 3]
+    onchain = chain["contract"].functions.claimLeaf(
+        earner, [to_checksum_address(t) for t in tokens], amounts).call()
+    assert bytes(onchain) == claim_leaf(earner, tokens, amounts)
+
+
+def _anchor_claims(chain, claims, epoch_id):
+    from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
+    payload = {"epoch_root": "11" * 32, "claims": claims, "pools": {}, "parity": {},
+               "total_value": sum(c["value"] for c in claims.values()),
+               "output_decimals": 10, "n_batches": 1, "n_events": 1}
     anchorer = EpochAnchorer(
         config=EpochAnchorerConfig(epoch_anchor_address=chain["addr"]),
-        web3=chain["w3"], contract_abi=chain["abi"],
-    )
+        web3=chain["w3"], contract_abi=chain["abi"])
     s = anchorer.anchor_close_result(
-        result, from_address=chain["deployer"])
+        {"authoritative_payload": payload, "claims": claims, "epoch_id": epoch_id},
+        from_address=chain["deployer"])
     assert s.success, s.error
     return s
 
 
-def _record(chain, claimant, amount, eid_hash, proof, sender=None):
-    # Decision 2026-10-27: claimFor(claimant, amount, epochIdHash, proof)
-    # is permissionless; the leaf commits (claimant, amount). Default
-    # sender is the deployer, NOT the claimant, so every claim here also
-    # exercises "anyone may submit".
-    fn = chain["contract"].functions.claimFor(
-        claimant, amount, eid_hash, proof,
-    )
-    sender = sender or chain["deployer"]
-    tx = fn.transact({"from": sender, "gas": 1_500_000})
-    receipt = chain["w3"].eth.wait_for_transaction_receipt(tx)
-    return receipt.status == 1
+def _two_token_claims(chain, *amounts_per_earner):
+    t6, t18 = (t.address.lower() for t in chain["tokens"])
+    return {a.lower(): {"tokens": {t6: x6, t18: x18}, "value": x6 + x18 // 10 ** 12}
+            for a, (x6, x18) in zip(chain["agent_addrs"], amounts_per_earner)}
 
 
-def test_contract_accepts_ratified_amounts(chain):
-    addrs = chain["agent_addrs"]
-    mint = {addrs[0]: 1.5, addrs[1]: 2.25, addrs[2]: 0.75}
-    s = _anchor_with_mint(chain, mint, "e_merkle_ok")
-    assert s.agent_mint_root_hex != "00" * 32
-    eid = epoch_id_hash("e_merkle_ok")
-
-    for a in addrs:
-        proof = mint_merkle_proof(mint, a)
-        scaled = scale_mint(mint[a])
-        assert _record(chain, a, scaled, eid, proof)
-        assert chain["contract"].functions.mintForEpoch(a, eid).call() == scaled
+def _claim(chain, claims, earner, epoch_id, sender=None, tokens=None, amounts=None):
+    from nodes.common.authoritative_submitter import epoch_id_hash
+    t, a = _fields(claims, earner.lower())
+    proof = claim_merkle_proof(claims, earner)
+    tx = chain["contract"].functions.claim(
+        earner, epoch_id_hash(epoch_id),
+        [to_checksum_address(x) for x in (tokens or t)], amounts or a, proof,
+    ).transact({"from": sender or chain["deployer"], "gas": 1_500_000})
+    return chain["w3"].eth.wait_for_transaction_receipt(tx).status == 1
 
 
-def test_contract_mints_atn_at_amount(chain):
-    """claimFor mints ATN at the proven amount to the CLAIMANT (not the
-    sender) and bumps agentMintTotal (cumulative tool-pool earnings). No
-    reputation surface exists on the money-only contract."""
-    contract = chain["contract"]
-    addrs = chain["agent_addrs"]
-    mint = {addrs[0]: 4.0, addrs[1]: 1.0}
-    supply0 = contract.functions.atnTotalSupply().call()
-    s = _anchor_with_mint(chain, mint, "e_atn")
-    eid = epoch_id_hash("e_atn")
-
-    a = addrs[0]
-    amount = scale_mint(mint[a])
-    proof = mint_merkle_proof(mint, a)
-    sender = addrs[2]                    # a third party, not in the mint
-    sender_before = contract.functions.balanceOf(sender).call()
-    assert _record(chain, a, amount, eid, proof, sender=sender)
-
-    assert contract.functions.balanceOf(a).call() == amount
-    assert contract.functions.balanceOf(sender).call() == sender_before
-    assert contract.functions.atnTotalSupply().call() == supply0 + amount
-    assert contract.functions.mintForEpoch(a, eid).call() == amount
-    # agentMintTotal = cumulative pool earnings (money).
-    assert contract.functions.agentMintTotal(a).call() == amount
-    assert contract.functions.networkMintTotal().call() == amount
+def test_contract_accepts_the_anchored_amounts(chain):
+    _new_claim_abi(chain)
+    claims = _two_token_claims(chain, (10, 10 ** 9), (20, 3 * 10 ** 9))
+    _anchor_claims(chain, claims, "e_ok")
+    c = chain["contract"]
+    for earner in chain["agent_addrs"][:2]:
+        assert _claim(chain, claims, earner, "e_ok")
+        for t in chain["tokens"]:
+            assert c.functions.owed(earner, t.address).call() == \
+                claims[earner.lower()]["tokens"][t.address.lower()]
 
 
-def test_contract_rejects_inflated_amount(chain):
-    addrs = chain["agent_addrs"]
-    mint = {addrs[0]: 1.0, addrs[1]: 2.0}
-    _anchor_with_mint(chain, mint, "e_merkle_inflate")
-    eid = epoch_id_hash("e_merkle_inflate")
-
-    proof = mint_merkle_proof(mint, addrs[0])
-    rejected = False
+def _reverts(fn):
     try:
-        ok = _record(chain, addrs[0], scale_mint(1.0) * 10, eid, proof)
-        rejected = not ok
+        return not fn()
     except Exception:
-        rejected = True
-    assert rejected, "MintProofInvalid was not enforced for an inflated amount"
-    assert chain["contract"].functions.mintForEpoch(addrs[0], eid).call() == 0
+        return True
 
 
-def test_contract_rejects_foreign_proof(chain):
-    addrs = chain["agent_addrs"]
-    mint = {addrs[0]: 1.0, addrs[1]: 2.0}
-    _anchor_with_mint(chain, mint, "e_merkle_foreign")
-    eid = epoch_id_hash("e_merkle_foreign")
+def test_contract_rejects_inflated_and_foreign_claims(chain):
+    _new_claim_abi(chain)
+    claims = _two_token_claims(chain, (10, 10 ** 9), (20, 3 * 10 ** 9))
+    _anchor_claims(chain, claims, "e_bad")
+    a0, a1 = chain["agent_addrs"][:2]
+    t, amounts = _fields(claims, a0.lower())
+    assert _reverts(lambda: _claim(chain, claims, a0, "e_bad",
+                                   amounts=[amounts[0] * 10, amounts[1]]))
 
-    # Claiming addrs[0]'s amount for addrs[1] with addrs[0]'s proof (even
-    # sent by addrs[1]) fails: the leaf binds the claimant.
-    proof = mint_merkle_proof(mint, addrs[0])
-    rejected = False
-    try:
-        ok = _record(chain, addrs[1], scale_mint(1.0), eid, proof,
-                     sender=addrs[1])
-        rejected = not ok
-    except Exception:
-        rejected = True
-    assert rejected, "proof bound to another agent was accepted"
+    from nodes.common.authoritative_submitter import epoch_id_hash
+    proof = claim_merkle_proof(claims, a0)
+    assert _reverts(lambda: chain["w3"].eth.wait_for_transaction_receipt(
+        chain["contract"].functions.claim(
+            a1, epoch_id_hash("e_bad"), [to_checksum_address(x) for x in t], amounts,
+            proof).transact({"from": a1, "gas": 1_500_000})).status == 1)
 
 
-def test_contract_rejects_rootless_anchor_claims(chain):
-    """An anchor whose mint map has no claimable entries carries the
-    empty root; the contract refuses ALL nonzero claims against it."""
-    addrs = chain["agent_addrs"]
-    s = _anchor_with_mint(chain, {"not-an-address": 5.0}, "e_merkle_rootless")
+def test_contract_rejects_claims_against_an_empty_root(chain):
+    _new_claim_abi(chain)
+    s = _anchor_claims(chain, {"not-an-address": {"tokens": {}, "value": 0}}, "e_rootless")
     assert s.agent_mint_root_hex == "00" * 32
-    eid = epoch_id_hash("e_merkle_rootless")
-
-    rejected = False
-    try:
-        ok = _record(chain, addrs[0], 123, eid, [])
-        rejected = not ok
-    except Exception:
-        rejected = True
-    assert rejected, "MintRootMissing was not enforced"
+    from nodes.common.authoritative_submitter import epoch_id_hash
+    a0 = chain["agent_addrs"][0]
+    tok = to_checksum_address(chain["tokens"][0].address)
+    assert _reverts(lambda: chain["w3"].eth.wait_for_transaction_receipt(
+        chain["contract"].functions.claim(a0, epoch_id_hash("e_rootless"), [tok], [1], [])
+        .transact({"from": a0, "gas": 1_500_000})).status == 1)
 
 
-def test_submitter_builds_proof_end_to_end(chain):
-    """Full path: anchor → blob → submitter decodes, proves, claims for
-    the household, signed by an operator key that is not the claimant."""
-    addrs = chain["agent_addrs"]
-    contract = chain["contract"]
-    # Schema-6 shape: household claimants keyed lowercase.
-    mint = {addrs[0].lower(): 3.5, addrs[1].lower(): 1.25}
-    s = _anchor_with_mint(chain, mint, "e_merkle_sub")
+def test_submitter_claims_and_withdraws_each_token(chain):
+    """Full path: anchor -> blob -> submitter proves, claims for the
+    household, signed by an operator that is not the earner, then withdraws
+    each token to the earner."""
+    _new_claim_abi(chain)
+    from nodes.common.authoritative_submitter import (
+        AuthoritativeChainSubmitter, AuthoritativeSubmitterConfig)
+    from nodes.common.blob_resolver import InMemoryBlobResolver
+    claims = _two_token_claims(chain, (35, 2 * 10 ** 9), (12, 10 ** 9))
+    s = _anchor_claims(chain, claims, "e_sub")
     resolver = InMemoryBlobResolver()
     resolver.put(s.agent_mint_blob)
-
-    operator = chain["deployer"]
-    op_before = contract.functions.balanceOf(operator).call()
-    submitter = AuthoritativeChainSubmitter(
-        claimant_id=addrs[0].lower(), claimant_address=addrs[0],
-        resolver=resolver,
+    earner = chain["agent_addrs"][0]
+    sub = AuthoritativeChainSubmitter(
+        claimant_id=earner.lower(), claimant_address=earner, resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=operator,
-        web3=chain["w3"], substrate_abi=chain["abi"],
-    )
-    sub = submitter.submit_for_epoch("e_merkle_sub")
-    assert sub.success, sub.error
-    assert sub.contribution_scaled == scale_mint(3.5)
-    eid = epoch_id_hash("e_merkle_sub")
-    assert contract.functions.mintForEpoch(
-        addrs[0], eid).call() == scale_mint(3.5)
-    assert contract.functions.balanceOf(addrs[0]).call() == scale_mint(3.5)
-    assert contract.functions.balanceOf(operator).call() == op_before
-
-
-def test_concluded_leaves_share_the_tree():
-    """Decision 2026-11-09: each concluding tool's leaf sits after the mint
-    leaves; both kinds prove against the same root."""
-    from nodes.common.mint_merkle import (
-        concluded_leaf, concluded_proof, verify_concluded_proof)
-    mint = {ADDRS[0]: 1.0, ADDRS[1]: 2.0}
-    concluded = {"bb" * 32: 6000, "0x" + "aa" * 32: 0}
-    root = mint_merkle_root(mint, concluded=concluded)
-    assert root != mint_merkle_root(mint)
-    for a in ADDRS[:2]:
-        proof = mint_merkle_proof(mint, a, concluded=concluded)
-        assert verify_mint_proof(root, a, scale_mint(mint[a]), proof)
-    for d, bps in (("aa" * 32, 0), ("bb" * 32, 6000)):
-        proof = concluded_proof(mint, concluded, d)
-        assert verify_concluded_proof(root, d, bps, proof)
-        assert not verify_concluded_proof(root, d, bps + 1, proof)
-    assert concluded_proof(mint, concluded, "cc" * 32) is None
-    # A tree of concluded leaves alone is still a tree.
-    only = mint_merkle_root({}, concluded={"bb" * 32: 1})
-    assert only == concluded_leaf("bb" * 32, 1)
+        sender_address=chain["deployer"], web3=chain["w3"], substrate_abi=chain["abi"])
+    r = sub.submit_for_epoch("e_sub")
+    assert r.success, r.error
+    assert r.tokens == claims[earner.lower()]["tokens"]
+    assert sorted(r.withdrawn) == sorted(r.tokens) and not r.withdraw_errors
+    for t in chain["tokens"]:
+        assert t.functions.balanceOf(earner).call() == r.tokens[t.address.lower()]
+        assert chain["contract"].functions.owed(earner, t.address).call() == 0
+    # Idempotent: a second pass claims nothing and withdraws nothing.
+    again = sub.submit_for_epoch("e_sub")
+    assert again.success and not again.withdrawn

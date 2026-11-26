@@ -57,13 +57,19 @@ def close(events, carried=None, **kw):
                                     carried=carried, **kw)
 
 
-def snap(*, registered=(KEY,), paid=None, unscored_bps=None):
+USDC = "0x" + "a6" * 20   # 6 decimals, parity 1e30: value == amount
+DAI = "0x" + "1b" * 20    # 18 decimals, parity 1e18
+PARITY = {USDC: 10 ** 30, DAI: 10 ** 18}
+
+
+def snap(*, registered=(KEY,), paid=None, unscored_bps=None, parity=None):
     return {"registered": list(registered), "paid": dict(paid or {}),
+            "parity": dict(PARITY if parity is None else parity),
             "unscored_bps": unscored_bps}
 
 
-def paid_by(payer_key, amount=1000, provider=PROVIDER):
-    return {f"{addr(payer_key)}:{provider}": amount}
+def paid_by(payer_key, amount=1000, provider=PROVIDER, token=USDC):
+    return {f"{addr(payer_key)}:{provider}": {token: amount}}
 
 
 class TestValidation:
@@ -287,36 +293,52 @@ class TestPaymentOnChain:
                     snapshot=snap(paid=paid_by(PAYER_KEYS[0]), unscored_bps=2000))
         assert out["ratings"][KEY]["axes"] == {"care": 1.0, "truth": 0.2}
 
+    def test_the_rating_values_each_token_at_the_pinned_parity(self):
+        out = close([event(PAYER_KEYS[0]), event(PAYER_KEYS[1])],
+                    snapshot=snap(paid={**paid_by(PAYER_KEYS[0], 300),
+                                        **paid_by(PAYER_KEYS[1], 2 * 10 ** 18, token=DAI)}))
+        assert out["ratings"][KEY]["paid"] == 300 + 2_000_000
+        # A token out of the index still proves the payment, at value 0.
+        out = close([event(PAYER_KEYS[0])],
+                    snapshot=snap(paid=paid_by(PAYER_KEYS[0], 5, token=DAI),
+                                  parity={USDC: 10 ** 30}))
+        r = out["ratings"][KEY]
+        assert r["payers"] == 1 and r["paid"] == 0
+
     def test_the_snapshot_from_logs(self):
-        channel = "0x" + "99" * 20
         stranger = "0x" + "77" * 20
         payer, other = addr(PAYER_KEYS[0]), addr(PAYER_KEYS[1])
         got = sr.snapshot_from_logs(
             registered=[{"provider": Account.from_key(PROVIDER_KEY).address,
                          "specDigest": bytes.fromhex(DIGEST)},
                         {"provider": PROVIDER, "specDigest": "0x" + OTHER_DIGEST}],
-            payments=[{"payer": payer, "recipient": PROVIDER, "amount": 600},
-                      {"payer": payer, "recipient": PROVIDER, "amount": 400},
-                      # The channel's own payout through Substrate.
-                      {"payer": channel, "recipient": PROVIDER, "amount": 50},
+            payments=[{"payer": payer, "recipient": PROVIDER, "token": USDC, "amount": 600},
+                      {"payer": payer, "recipient": PROVIDER, "token": USDC, "amount": 400},
+                      {"payer": payer, "recipient": PROVIDER, "token": DAI, "amount": 7},
                       # To an address that registered no service.
-                      {"payer": payer, "recipient": stranger, "amount": 9}],
-            payouts=[{"client": other, "provider": PROVIDER, "amount": 50},
-                     {"client": other, "provider": PROVIDER, "amount": 25},
-                     {"client": payer, "provider": stranger, "amount": 5}],
-            unscored_bps="3000", channel_address=channel)
+                      {"payer": payer, "recipient": stranger, "token": USDC, "amount": 9}],
+            channels=[{"channelId": 1, "token": DAI}, {"channelId": 2, "token": USDC}],
+            payouts=[{"channelId": 1, "client": other, "provider": PROVIDER, "amount": 50},
+                     {"channelId": 1, "client": other, "provider": PROVIDER, "amount": 25},
+                     {"channelId": 2, "client": payer, "provider": stranger, "amount": 5},
+                     # A channel whose opening is not in the logs.
+                     {"channelId": 9, "client": other, "provider": PROVIDER, "amount": 4}],
+            unscored_bps="3000", parity=PARITY)
         assert got == {"registered": sorted([KEY, OTHER_KEY]),
-                       "paid": {f"{payer}:{PROVIDER}": 1000, f"{other}:{PROVIDER}": 75},
+                       "paid": {f"{payer}:{PROVIDER}": {DAI: 7, USDC: 1000},
+                                f"{other}:{PROVIDER}": {DAI: 75}},
+                       "parity": {DAI: 10 ** 18, USDC: 10 ** 30},
                        "unscored_bps": 3000}
 
     def test_a_snapshot_is_normalized(self):
         assert sr.normalize_snapshot(None) is None
         empty = sr.normalize_snapshot({})
-        assert empty == {"registered": [], "paid": {},
+        assert empty == {"registered": [], "paid": {}, "parity": {},
                          "unscored_bps": sr.UNSCORED_BPS_DEFAULT}
         assert sr.normalize_snapshot({"unscored_bps": 99_999})["unscored_bps"] == sr.BPS
-        assert sr.normalize_snapshot({"paid": {"a:b": "12", "c:d": "x"}})["paid"] == \
-            {"a:b": 12}
+        assert sr.normalize_snapshot(
+            {"paid": {"a:b": {"0xT": "12", "0xU": 0}, "c:d": {"0xT": "x"}, "e:f": 5}})["paid"] == \
+            {"a:b": {"0xt": 12}}
 
 
 class TestTheChainRead:
@@ -349,8 +371,10 @@ class TestTheChainRead:
         logs = {
             "ServiceRegistered": [{"serviceId": 1, "provider": PROVIDER,
                                    "specDigest": bytes.fromhex(DIGEST), "askAmount": 0}],
-            "ServicePayment": [{"payer": payer, "recipient": PROVIDER, "amount": 5},
-                               {"payer": channel, "recipient": PROVIDER, "amount": 9}],
+            "ServicePayment": [{"payer": payer, "recipient": PROVIDER, "token": USDC,
+                                "amount": 5}],
+            "ChannelOpened": [{"channelId": 1, "client": other, "provider": PROVIDER,
+                               "token": DAI, "deposit": 100}],
             "ChannelPaid": [{"channelId": 1, "client": other, "provider": PROVIDER,
                              "amount": 9, "paidTotal": 9}],
         }
@@ -363,10 +387,15 @@ class TestTheChainRead:
         got = vs.read_service_snapshot(
             Web3(), block=10, substrate_address=sub, service_registry_address=reg,
             payment_channel_address=channel, jurisdiction_id="j1", start_block=3,
-            registry_writes={"jurisdiction.j1.unscored_axis_bps": "2500"})
+            registry_writes={"jurisdiction.j1.unscored_axis_bps": "2500",
+                             "jurisdiction.parity." + USDC: str(10 ** 30),
+                             "jurisdiction.parity." + DAI: "0"})
         assert got == {"registered": [KEY], "unscored_bps": 2500,
-                       "paid": {f"{payer}:{PROVIDER}": 5, f"{other}:{PROVIDER}": 9}}
-        assert sorted(read) == [("ChannelPaid", channel, 10, 3),
+                       "parity": {USDC: 10 ** 30},
+                       "paid": {f"{payer}:{PROVIDER}": {USDC: 5},
+                                f"{other}:{PROVIDER}": {DAI: 9}}}
+        assert sorted(read) == [("ChannelOpened", channel, 10, 3),
+                                ("ChannelPaid", channel, 10, 3),
                                 ("ServicePayment", sub, 10, 3),
                                 ("ServiceRegistered", reg, 10, 3)]
         # Without a ServiceRegistry nothing is registered and nothing is read
@@ -394,7 +423,7 @@ class TestTheClose:
         out = federated_epoch_close(canonical_order(batches))
         assert out["service_ratings"][KEY]["payers"] == 2
         assert out["service_ratings"][KEY]["correctness"] == 0.4
-        assert out["agent_mint"] == {} and out["total_mint"] == 0
+        assert out["claims"] == {} and out["total_value"] == 0
         again = federated_epoch_close(canonical_order(list(reversed(batches))))
         assert json.dumps(again["service_reviews"], sort_keys=True) == \
             json.dumps(out["service_reviews"], sort_keys=True)

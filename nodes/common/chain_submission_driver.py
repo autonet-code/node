@@ -1,4 +1,4 @@
-"""Chain submission driver — anchor + household mint claims.
+"""Chain submission driver: anchor + household claims.
 
 Triggered by ``FederatedCloseDriver`` results (Phase 10.3a). Two
 responsibilities:
@@ -11,13 +11,14 @@ responsibilities:
     network whose Substrate governor is this daemon's own key, the winner
     anchors directly.
 
-  - **Household claims** (Decision 2026-10-27): the anchored mint is
+  - **Household claims** (Decision 2026-10-27): the anchored claims are
     keyed by owner wallet. For each household this daemon serves (the
     configured owner wallet and the on-chain owners of its registered
     agents) an ``AuthoritativeChainSubmitter`` reads the anchor, fetches
-    the blob, decodes the household's share and calls ``claimFor``,
-    signed by the daemon operator key (``daemon_private_key``), which
-    pays the gas. The ATN goes to the owner whoever submits.
+    the blob, reads the household's leaf, calls ``claim`` and then
+    ``withdraw`` per token, signed by the daemon operator key
+    (``daemon_private_key``), which pays the gas. The tokens go to the
+    owner whoever submits.
 
 The daemon operator key also anchors, proposes and votes: the owner
 delegates its REP votes to it.
@@ -90,7 +91,7 @@ class ChainSubmissionConfig:
     # The AnchorElection (Decision 2026-10-26). Set => anchors go through
     # single-choice elections (anchor_election.ElectionAnchorer).
     anchor_election_address: str = ""
-    # AutonetRepClaim. Set => after the ATN claims the operator also
+    # AutonetRepClaim. Set => after the token claims the operator also
     # claims each household's REP (1:1 on ratified earnings).
     rep_claim_address: str = ""
     # The household this daemon serves (Decision 2026-10-27). Claimed for
@@ -235,7 +236,7 @@ class ChainSubmissionDriver:
         return self._anchorer is not None
 
     def handle_federated_close(self, fed: FederatedCloseResult) -> Dict[str, Any]:
-        """Anchor (if winner) + submit per-agent mints. Subscriber
+        """Anchor (if winner) + submit the household claims. Subscriber
         method registered with AutonetService.
 
         Returns a diagnostic dict with what happened.
@@ -343,7 +344,7 @@ class ChainSubmissionDriver:
                     now = int(count_fn())
                     if now != int(snap):
                         # The close priced its pool at anchor #snap; the
-                        # chain moved, so the on-chain mintPool for this
+                        # chain moved, so the on-chain pool cap for this
                         # anchor would differ. Never anchor a stale close.
                         out["anchor_skipped"] = (
                             f"stale snapshot (closed at anchorCount={snap}, "
@@ -397,7 +398,7 @@ class ChainSubmissionDriver:
         per-agent submitters (and rejoining peers) can fetch them from
         anyone once the anchor lands."""
         cids = []
-        for blob, what in ((result.agent_mint_blob, "agent mint"),
+        for blob, what in ((result.agent_mint_blob, "claims"),
                            (result.payload_bytes, "payload")):
             if not blob:
                 continue
@@ -524,7 +525,7 @@ class ChainSubmissionDriver:
             # An unanchored epoch is never dropped: nothing would reopen it,
             # and every later epoch waits on it.
             if anchored:
-                logger.info("epoch %s anchored by election; submitting mints",
+                logger.info("epoch %s anchored by election; submitting claims",
                             epoch_id)
                 self._submit_agents(epoch_id)
                 with self._lock:
@@ -565,7 +566,7 @@ class ChainSubmissionDriver:
 
     def tick(self) -> None:
         """Advance every pending anchor proposal and election one step;
-        submit agent mints for the ones whose anchor landed."""
+        submit the household claims for the ones whose anchor landed."""
         self._tick_elections()
         self._save_elections()
         with self._lock:
@@ -586,7 +587,7 @@ class ChainSubmissionDriver:
                                    epoch_id, state)
                     done = True
             if anchored:
-                logger.info("epoch %s anchored via the DAO; submitting mints",
+                logger.info("epoch %s anchored via the DAO; submitting claims",
                             epoch_id)
                 self._submit_agents(epoch_id)
                 done = True
@@ -667,8 +668,8 @@ class ChainSubmissionDriver:
         return unique
 
     def _submit_agents(self, epoch_id: str) -> List[Dict[str, Any]]:
-        """Claim the anchored mint for each household this daemon serves,
-        signed by the operator key."""
+        """Claim the anchored leaf of each household this daemon serves and
+        withdraw its tokens, signed by the operator key."""
         op = self._operator()
         if op is None:
             logger.warning("epoch %s: no daemon operator key; household "
@@ -689,7 +690,10 @@ class ChainSubmissionDriver:
                 "claimant": claimant,
                 "success": r.success,
                 "tx_hash": r.tx_hash,
-                "raw_mint": r.raw_mint,
+                "tokens": dict(r.tokens),
+                "value": int(r.value),
+                "withdrawn": dict(r.withdrawn),
+                "withdraw_errors": dict(r.withdraw_errors),
                 "error": r.error,
             })
         self._claim_rep([r["claimant"] for r in results], op)
@@ -738,8 +742,8 @@ class ChainSubmissionDriver:
         return self._verdict_submitter
 
     def _claim_rep(self, claimants: List[str], op: Voter) -> None:
-        """REP follows the ATN (Decision 2026-10-27): claim each
-        household's REP on its new earnings, operator-signed. A household
+        """REP follows the claims (Decision 2026-10-27): claim each
+        household's REP on the value Substrate recorded, operator-signed. A household
         with nothing claimable costs one read."""
         if not self.config.rep_claim_address:
             return

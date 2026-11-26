@@ -1,39 +1,21 @@
-"""Phase 5.6: households read authoritative mint from anchor blob and
-claim on-chain via Substrate.claimFor.
+"""Authoritative claims: a household reads the anchored claims blob and
+claims its leaf on chain via ``Substrate.claim``, then withdraws each
+token it is owed.
 
-Decision 2026-10-27 (the owner wallet claims, the daemon operates): the
-mint map is keyed by household claimant (lowercase), the leaf commits
-(claimant, amount), and the claim is submitted by an operator key (here
-the deployer) that is not the claimant; the ATN lands on the claimant.
+Tested:
 
-This test file is the **architectural successor** to
-``test_phase5_1_chain_submission.py``. The flip:
-
-  - 5.1 encoded "agent submits the projection mint computed by the
-    local daemon's close." Best-effort, projection-level.
-  - 5.6 encodes "agent reads the consensus-ratified authoritative
-    mint from the on-chain anchor blob and submits that exact value."
-    Federation-ratified, contract-level idempotent.
-
-What this validates:
-
-  1. End-to-end: epoch close → canonical_order →
-     federated_epoch_close → anchor on Substrate → agent reads anchor
-     → fetches blob via resolver → CID-verifies → decodes own share
-     → submits on chain.
-  2. ``Substrate.mintForEpoch(agent, epochIdHash)`` matches the scaled
-     authoritative mint.
-  3. Per-(agent, epoch_id) idempotency is enforced by the contract:
-     a second submission for the same (agent, epoch_id) reverts with
-     ``AlreadySubmittedForEpoch``, and the submitter degrades to a
-     no-op success.
-  4. Process restart (fresh submitter, no in-memory seen-set) does
-     NOT double-count: the contract's idempotency catches it.
-  5. Three-agent federation: each agent reads its own attribution
-     from the same blob, all three submit independently, on-chain
-     totals match the authoritative_payload.
-  6. Blob integrity: a tampered blob from the resolver is rejected.
-  7. Zero-mint agents skip the tx (gas savings, configurable).
+  1. End to end: close -> anchor -> the submitter reads the anchor, checks
+     the blob against its cid, proves its leaf, claims (signed by an
+     operator that is not the earner) and withdraws every token to the
+     earner.
+  2. Idempotency: a second pass and a restarted submitter claim nothing
+     twice (``claimedEpoch``).
+  3. Three households claim independently; the amounts on chain are the
+     anchored ones, token by token.
+  4. A tampered blob raises; a missing blob fails cleanly; an earner with
+     no leaf sends nothing; an unanchored epoch fails cleanly.
+  5. A token that cannot be withdrawn (its issuer paused it) blocks none of
+     the others and is retried at the next pass.
 """
 
 from __future__ import annotations
@@ -50,32 +32,28 @@ eth_tester = pytest.importorskip("eth_tester")
 from web3 import Web3
 from web3.providers.eth_tester import EthereumTesterProvider
 
-from nodes.common.authoritative_encoding import (
-    cid_for_blob,
-    decode_agent_mint_blob,
-    encode_agent_mint_blob,
-)
 from nodes.common.authoritative_submitter import (
     AuthoritativeChainSubmitter,
     AuthoritativeSubmitterConfig,
     epoch_id_hash,
 )
-from nodes.common.blob_resolver import (
-    BlobIntegrityError,
-    InMemoryBlobResolver,
-)
+from nodes.common.blob_resolver import BlobIntegrityError, InMemoryBlobResolver
 from nodes.common.canonical_ordering import canonical_order
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
 from nodes.common.event_gossip import EventBatch, Keypair
 from nodes.common.federated_reconcile import federated_epoch_close
 from tests.substrate_chain_helpers import (
+    _deploy,
+    artifact,
     deploy_substrate,
+    index_tokens,
     register_bound,
+    review_snapshot,
     seed_pool,
 )
 
-
-SUBSTRATE_JSON = Path("C:/code/autonet/artifacts/contracts/core/Substrate.sol/Substrate.json")
+SUBSTRATE_JSON = Path(__file__).resolve().parent.parent / "artifacts/contracts/core/Substrate.sol/Substrate.json"
+REVIEWER = "0x" + "9e" * 20
 
 
 def _load_substrate() -> Tuple[list, str]:
@@ -85,468 +63,193 @@ def _load_substrate() -> Tuple[list, str]:
     return data["abi"], data["bytecode"]
 
 
-def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
-    # Genesis-mode anchor authority (account 9, registered).
-    return deploy_substrate(w3, abi, bytecode, deployer)
-
-
-def _register_agent(w3: Web3, contract, agent_addr: str, lineage_seed: str) -> None:
-    peer_id = b"test-peer-" + lineage_seed.encode()
-    receipt = register_bound(w3, contract, agent_addr, peer_id)
-    assert receipt.status == 1, f"registerAgentBound failed: {receipt}"
-
-
-@pytest.fixture
-def chain():
-    """Fresh in-process EVM with Substrate deployed and three test
-    agents registered."""
+def _fixture(*, registry=None, tokens=None) -> Dict[str, Any]:
     abi, bytecode = _load_substrate()
     w3 = Web3(EthereumTesterProvider())
     accounts = w3.eth.accounts
     deployer = accounts[0]
-    addr = _deploy(w3, deployer, abi, bytecode)
+    addr = deploy_substrate(w3, abi, bytecode, deployer, registry=registry)
     contract = w3.eth.contract(address=addr, abi=abi)
-
     agent_addrs = accounts[1:4]
-    for i, addr_ in enumerate(agent_addrs):
-        _register_agent(w3, contract, addr_, f"agent-lineage-{i}")
-    # Fees-only pool: burn real fees + anchor a seed epoch so the test's
-    # anchor carries a mint pool covering the ratified claims.
-    seed_pool(w3, contract)
-
-    return {
-        "w3": w3,
-        "abi": abi,
-        "addr": addr,
-        "contract": contract,
-        "deployer": deployer,
-        "agent_addrs": list(agent_addrs),
-    }
+    for i, a in enumerate(agent_addrs):
+        assert register_bound(w3, contract, a, f"test-peer-{i}".encode()).status == 1
+    tokens = tokens if tokens is not None else index_tokens(contract)
+    window = seed_pool(w3, contract, tokens=tokens)
+    return {"w3": w3, "abi": abi, "addr": addr, "contract": contract,
+            "deployer": deployer, "agent_addrs": list(agent_addrs),
+            "tokens": tokens, "window": window}
 
 
-# ---------------------------------------------------------------------------
-# Helpers to build a federated close
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def chain():
+    return _fixture()
 
 
-def _coord(charter, embed_idx, mag):
-    out = list(charter) + [0.0] * 1024
-    out[4 + embed_idx] = mag
-    return tuple(out)
-
-
-def _make_chain(rpb: str, kp: Keypair, agent_id: str, n: int = 2) -> List[EventBatch]:
-    """v3 mint fixture (mint = tool usage only): each agent authors a
-    pinned tool (digest derived from the agent id so agents don't
-    collide), vetted by a distinct fleet and used by third-party
-    attesting callers. Observation events alone no longer mint."""
+def _registration(rpb: str, agent_id: str) -> EventBatch:
     digest = hashlib.sha256(f"tool-{agent_id}".encode()).hexdigest()
-    coords = [0.0] * (6 + 1024)
-    coords[4] = 0.8
-    coords[6 + 3] = 0.5
-    reg = {
-        "kind": "tool_registered",
-        "seq": 1,
-        "author_agent": agent_id,
-        "artifact_digest": digest,
-        "manifest_meta": {"trust_class": "pinned", "author": agent_id},
-    }
-
-    def _vet(vetter, seq):
-        return {
-            "kind": "tool_used", "seq": seq, "author_agent": vetter,
-            "manifest_digest": digest, "tool_author": agent_id,
-            "receipt_digest": hashlib.sha256(
-                f"vet-{agent_id}-{vetter}".encode()).hexdigest(),
-            "ok": True, "fee_atn": 0.0, "vet": True,
-        }
-
-    def _receipt(caller, seq):
-        return {
-            "kind": "tool_used", "seq": seq, "author_agent": caller,
-            "manifest_digest": digest, "tool_author": agent_id,
-            "receipt_digest": hashlib.sha256(
-                f"use-{agent_id}-{caller}".encode()).hexdigest(),
-            "ok": True, "fee_atn": 0.0, "attested": True, "score": 0.8,
-        }
-
-    def _one(ev):
-        return EventBatch(
-            rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
-            batch_seq=1, events=[ev], prev_batch_hash=b"",
-            timestamp=1_700_000_000.0,
-        )
-
-    return [
-        _one(reg),
-        _one(_vet("vetter-1", 1)), _one(_vet("vetter-2", 1)),
-        _one(_receipt("caller-1", 1)), _one(_receipt("caller-2", 2)),
-    ]
+    ev = {"kind": "tool_registered", "seq": 1, "author_agent": agent_id,
+          "artifact_digest": digest,
+          "manifest_meta": {"trust_class": "pinned", "author": agent_id}}
+    return EventBatch(rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
+                      batch_seq=1, events=[ev], prev_batch_hash=b"",
+                      timestamp=1_700_000_000.0)
 
 
-def _build_close_and_anchor(
-    chain_fixture: Dict[str, Any],
-    agent_ids: List[str],
-    epoch_id: str = "e_5_6",
-    rpb: str = "rpb_5_6",
-) -> Tuple[Dict[str, Any], str, InMemoryBlobResolver]:
-    """Build a federated close from agents, anchor it on chain, and
-    populate a resolver with the blob."""
-    w3 = chain_fixture["w3"]
-    deployer = chain_fixture["deployer"]
-
-    # Build chains for each agent (each gets its own keypair).
-    senders = [Keypair.generate() for _ in agent_ids]
-    batches: List[EventBatch] = []
-    for kp, aid in zip(senders, agent_ids):
-        batches.extend(_make_chain(rpb, kp, aid, n=2))
-
-    canonical = canonical_order(batches)
-    # The mint reads staked reviews (Decision 2026-11-07): one concluding
-    # review round per registered tool, from a REP-holding reviewer.
+def _close_and_anchor(fx, agent_ids: List[str], epoch_id: str):
+    """A close in which every author's tool concludes over the seeded
+    window, anchored; returns (close result, resolver holding the blob)."""
+    canonical = canonical_order([_registration("rpb_5_6", a) for a in agent_ids])
     regs = federated_epoch_close(canonical)["tool_registrations"]
-    reviewer = "0x" + "9e" * 20
-    from tests.substrate_chain_helpers import review_snapshot
-    snapshot = review_snapshot(list(regs), reviewer)
     result = federated_epoch_close(
-        canonical, rep_shares={reviewer: 0.5}, review_snapshot=snapshot)
+        canonical, rep_shares={REVIEWER: 0.5},
+        review_snapshot=review_snapshot(list(regs), REVIEWER),
+        tool_share_window=dict(fx["window"]),
+        parity={t.address.lower(): 10 ** (36 - int(t.functions.decimals().call()))
+                for t in fx["tokens"]})
     result["epoch_id"] = epoch_id
-
-    # Anchor on chain.
     anchorer = EpochAnchorer(
-        config=EpochAnchorerConfig(epoch_anchor_address=chain_fixture["addr"]),
-        web3=w3,
-        contract_abi=chain_fixture["abi"],
-    )
-    anchor_result = anchorer.anchor_close_result(
-        result, from_address=deployer)
-    assert anchor_result.success, anchor_result.error
-
-    # Populate the resolver with the blob.
+        config=EpochAnchorerConfig(epoch_anchor_address=fx["addr"]),
+        web3=fx["w3"], contract_abi=fx["abi"])
+    a = anchorer.anchor_close_result(result, from_address=fx["deployer"])
+    assert a.success, a.error
     resolver = InMemoryBlobResolver()
-    cid = resolver.put(anchor_result.agent_mint_blob)
-    assert cid == anchor_result.agent_mint_cid, "CID mismatch"
-
-    return result, epoch_id, resolver
+    assert resolver.put(a.agent_mint_blob) == a.agent_mint_cid
+    return result, resolver
 
 
-# ---------------------------------------------------------------------------
-# End-to-end happy path
-# ---------------------------------------------------------------------------
-
-
-def test_agent_reads_anchor_and_submits_authoritative_mint(chain):
-    """End-to-end: build close → anchor → agent reads → submits.
-    on-chain mintForEpoch matches the authoritative blob."""
-    agent_addrs = chain["agent_addrs"]
-    contract = chain["contract"]
-    # Agent ids ARE addresses: the merkle leaf names the claimant, so
-    # claimable mint-map entries must be address-keyed. No owner map is
-    # given, so each agent is its own household, keyed lowercase.
-    agent_ids = list(agent_addrs)
-
-    result, epoch_id, resolver = _build_close_and_anchor(chain, agent_ids)
-    # Rebuild the blob exactly as the anchorer does (money only) so the
-    # CID matches.
-    expected_blob_mint = decode_agent_mint_blob(resolver.get(
-        result["authoritative_payload"]["agent_mint"]
-        and cid_for_blob(encode_agent_mint_blob(
-            result["agent_mint"], concluded=result["concluded"]))
-    ))
-
-    # Pick the first agent that actually has mint; submit for it.
-    minting_addr = next((a for a in agent_addrs
-                         if expected_blob_mint.get(a.lower(), 0) > 0), None)
-    assert minting_addr is not None, "close produced no positive mint"
-    minting_agent_id = minting_addr.lower()
-    operator = chain["deployer"]
-    op_balance_before = contract.functions.balanceOf(operator).call()
-
-    submitter = AuthoritativeChainSubmitter(
-        claimant_id=minting_agent_id,
-        claimant_address=minting_addr,
+def _submitter(fx, earner: str, resolver, claimant_id=None):
+    return AuthoritativeChainSubmitter(
+        claimant_id=claimant_id or earner.lower(), claimant_address=earner,
         resolver=resolver,
-        config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=chain["deployer"],
-        web3=chain["w3"],
-        substrate_abi=chain["abi"],
-    )
-
-    # Precondition: nothing submitted yet for this (agent, epoch).
-    eid_hash = epoch_id_hash(epoch_id)
-    assert contract.functions.mintForEpoch(minting_addr, eid_hash).call() == 0
-
-    submission = submitter.submit_for_epoch(epoch_id)
-    assert submission.success, submission.error
-    assert submission.cid_verified is True
-    assert submission.contribution_scaled > 0
-    expected_scaled = int(expected_blob_mint[minting_agent_id] * 1_000_000)
-    assert submission.contribution_scaled == expected_scaled
-
-    # On-chain state matches the authoritative scaled mint.
-    on_chain = contract.functions.mintForEpoch(minting_addr, eid_hash).call()
-    assert on_chain == expected_scaled, (on_chain, expected_scaled)
-    assert contract.functions.agentMintTotal(minting_addr).call() == expected_scaled
-    # The ATN lands on the claimant, not the operator that sent the tx.
-    assert contract.functions.balanceOf(minting_addr).call() == expected_scaled
-    assert contract.functions.balanceOf(operator).call() == op_balance_before
+        config=AuthoritativeSubmitterConfig(substrate_address=fx["addr"]),
+        sender_address=fx["deployer"], web3=fx["w3"], substrate_abi=fx["abi"])
 
 
-# ---------------------------------------------------------------------------
-# Idempotency
-# ---------------------------------------------------------------------------
+def _balances(fx, who):
+    return {t.address.lower(): t.functions.balanceOf(who).call() for t in fx["tokens"]}
 
 
-def test_contract_dedupes_double_submit(chain):
-    """Submit twice for the same (agent, epoch). Second call no-ops
-    via the contract's AlreadySubmittedForEpoch revert."""
-    agent_addrs = chain["agent_addrs"]
-    contract = chain["contract"]
-    agent_ids = list(agent_addrs[:2])
-    result, epoch_id, resolver = _build_close_and_anchor(
-        chain, agent_ids, epoch_id="e_idem",
-    )
-    minting_addr = next(
-        (a for a in agent_ids if result["agent_mint"].get(a.lower(), 0) > 0), None,
-    )
-    assert minting_addr is not None, "no positive mint for idempotency test"
-    minting_agent_id = minting_addr.lower()
+def test_household_claims_its_leaf_and_withdraws_every_token(chain):
+    result, resolver = _close_and_anchor(chain, chain["agent_addrs"], "e_5_6")
+    earner = chain["agent_addrs"][0]
+    expected = result["claims"][earner.lower()]["tokens"]
+    assert len(expected) == 2
+    eid = epoch_id_hash("e_5_6")
+    assert not chain["contract"].functions.claimedEpoch(earner, eid).call()
+    op_before = _balances(chain, chain["deployer"])
 
-    submitter = AuthoritativeChainSubmitter(
-        claimant_id=minting_agent_id,
-        claimant_address=minting_addr,
-        resolver=resolver,
-        config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=chain["deployer"],
-        web3=chain["w3"],
-        substrate_abi=chain["abi"],
-    )
-    s1 = submitter.submit_for_epoch(epoch_id)
-    assert s1.success
-    on_chain_after_first = contract.functions.agentMintTotal(minting_addr).call()
-
-    s2 = submitter.submit_for_epoch(epoch_id)
-    # Second call returns success no-op (in-memory seen-set fast path).
-    assert s2.success
-    assert s2.contribution_scaled == 0
-    on_chain_after_second = contract.functions.agentMintTotal(minting_addr).call()
-    assert on_chain_after_first == on_chain_after_second
+    r = _submitter(chain, earner, resolver).submit_for_epoch("e_5_6")
+    assert r.success, r.error
+    assert r.cid_verified and r.tokens == expected
+    assert r.value == result["claims"][earner.lower()]["value"]
+    assert sorted(r.withdrawn) == sorted(expected) and not r.withdraw_errors
+    assert chain["contract"].functions.claimedEpoch(earner, eid).call()
+    # Substrate values the claim at the parity it stored at the anchor; with
+    # the index unchanged since the snapshot it is the close's value.
+    assert chain["contract"].functions.earnedValue(earner).call() == r.value > 0
+    # The tokens land on the earner, not the operator that sent the txs.
+    assert _balances(chain, earner) == expected
+    assert _balances(chain, chain["deployer"]) == op_before
 
 
-def test_restart_does_not_double_submit(chain):
-    """Process restart: a fresh submitter with empty seen-set tries
-    to re-submit. The contract reverts; the submitter degrades to
-    success no-op rather than failing loudly. On-chain total
-    unchanged."""
-    agent_addrs = chain["agent_addrs"]
-    contract = chain["contract"]
-    agent_ids = list(agent_addrs[:2])
-    result, epoch_id, resolver = _build_close_and_anchor(
-        chain, agent_ids, epoch_id="e_restart",
-    )
-    minting_addr = next(
-        (a for a in agent_ids if result["agent_mint"].get(a.lower(), 0) > 0), None,
-    )
-    assert minting_addr is not None, "no positive mint for restart test"
-    minting_agent_id = minting_addr.lower()
-
-    submitter1 = AuthoritativeChainSubmitter(
-        claimant_id=minting_agent_id, claimant_address=minting_addr,
-        resolver=resolver,
-        config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=chain["deployer"],
-        web3=chain["w3"], substrate_abi=chain["abi"],
-    )
-    s1 = submitter1.submit_for_epoch(epoch_id)
-    assert s1.success and s1.contribution_scaled > 0
-    on_chain_total = contract.functions.agentMintTotal(minting_addr).call()
-
-    # Pretend the process restarted: brand-new submitter, no memory.
-    submitter2 = AuthoritativeChainSubmitter(
-        claimant_id=minting_agent_id, claimant_address=minting_addr,
-        resolver=resolver,
-        config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=chain["deployer"],
-        web3=chain["w3"], substrate_abi=chain["abi"],
-    )
-    s2 = submitter2.submit_for_epoch(epoch_id)
-    # Contract refused the duplicate; submitter degrades to no-op
-    # success. On-chain total unchanged.
-    assert s2.success
-    assert contract.functions.agentMintTotal(minting_addr).call() == on_chain_total
+def test_double_submit_and_restart_claim_once(chain):
+    result, resolver = _close_and_anchor(chain, chain["agent_addrs"][:2], "e_idem")
+    earner = chain["agent_addrs"][0]
+    s1 = _submitter(chain, earner, resolver)
+    assert s1.submit_for_epoch("e_idem").success
+    after = _balances(chain, earner)
+    again = s1.submit_for_epoch("e_idem")
+    assert again.success and again.tx_hash == "" and not again.withdrawn
+    restarted = _submitter(chain, earner, resolver).submit_for_epoch("e_idem")
+    assert restarted.success and restarted.tx_hash == ""
+    assert "already claimed" in restarted.error
+    assert _balances(chain, earner) == after
 
 
-# ---------------------------------------------------------------------------
-# Three-agent federation
-# ---------------------------------------------------------------------------
-
-
-def test_three_agents_each_submit_independently(chain):
-    """Three agents in the same federated close. Each reads its own
-    share, each submits, on-chain totals match the authoritative
-    payload."""
-    agent_addrs = chain["agent_addrs"]
-    contract = chain["contract"]
-    agent_ids = list(agent_addrs)
-    result, epoch_id, resolver = _build_close_and_anchor(
-        chain, agent_ids, epoch_id="e_three",
-    )
-    eid_hash = epoch_id_hash(epoch_id)
-
-    submissions = {}
-    for aid, addr_ in zip(agent_ids, agent_addrs):
-        sub = AuthoritativeChainSubmitter(
-            claimant_id=aid.lower(), claimant_address=addr_,
-            resolver=resolver,
-            config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-            sender_address=chain["deployer"],
-            web3=chain["w3"], substrate_abi=chain["abi"],
-        )
-        submissions[aid] = sub.submit_for_epoch(epoch_id)
-
-    # The reviewer's own leaf is claimed by its own household, not here.
-    expected = {k: v for k, v in result["agent_mint"].items() if k != "0x" + "9e" * 20}
-    assert set(expected) <= {a.lower() for a in agent_ids}
-    network_total_expected = 0
-    n_minted = 0
-    for aid, addr_ in zip(agent_ids, agent_addrs):
-        assert submissions[aid].success, submissions[aid].error
-        on_chain = contract.functions.mintForEpoch(addr_, eid_hash).call()
-        key = aid.lower()
-        if expected.get(key, 0) > 0:
-            scaled = int(expected[key] * 1_000_000)
-            assert on_chain == scaled, (aid, on_chain, scaled)
-            assert contract.functions.balanceOf(addr_).call() == scaled
-            network_total_expected += scaled
-            n_minted += 1
-        else:
-            # Zero mint: submitter skipped the tx entirely.
-            assert on_chain == 0
-
-    assert n_minted > 0
-    assert contract.functions.networkMintTotal().call() == network_total_expected
-
-
-# ---------------------------------------------------------------------------
-# Blob integrity
-# ---------------------------------------------------------------------------
+def test_three_households_claim_independently(chain):
+    result, resolver = _close_and_anchor(chain, chain["agent_addrs"], "e_three")
+    c = chain["contract"]
+    for earner in chain["agent_addrs"]:
+        r = _submitter(chain, earner, resolver).submit_for_epoch("e_three")
+        assert r.success, r.error
+        assert _balances(chain, earner) == result["claims"][earner.lower()]["tokens"]
+    for t in chain["tokens"]:
+        k = t.address.lower()
+        paid = sum(result["claims"][a.lower()]["tokens"][k] for a in chain["agent_addrs"])
+        # The reviewer's own leaf stays unclaimed here.
+        assert c.functions.claimedTotal(t.address).call() == paid
+        assert paid + result["claims"][REVIEWER]["tokens"][k] <= chain["window"][k]
 
 
 def test_tampered_blob_raises_integrity_error(chain):
-    """A resolver returning bytes whose CID doesn't match the
-    advertised CID indicates tampering. The submitter raises."""
-    agent_addrs = chain["agent_addrs"]
-    agent_ids = ["alice", "bob"]
-    result, epoch_id, resolver = _build_close_and_anchor(
-        chain, agent_ids, epoch_id="e_tamper",
-    )
-    minting_agent_id = next(
-        (aid for aid in agent_ids if result["agent_mint"].get(aid, 0) > 0), None,
-    )
-    if minting_agent_id is None:
-        pytest.skip("no positive mint for tamper test")
-    minting_addr = agent_addrs[agent_ids.index(minting_agent_id)]
-
-    # Replace the blob in the resolver with a tampered version that
-    # doesn't match its CID.
+    _, resolver = _close_and_anchor(chain, chain["agent_addrs"][:1], "e_tamper")
     real_cid = list(resolver._store.keys())[0]
-    resolver._store[real_cid] = b'{"schema":1,"agent_mint":{"alice":"99999999.9999999999"}}'
-
-    submitter = AuthoritativeChainSubmitter(
-        claimant_id=minting_agent_id, claimant_address=minting_addr,
-        resolver=resolver,
-        config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=chain["deployer"],
-        web3=chain["w3"], substrate_abi=chain["abi"],
-    )
+    resolver._store[real_cid] = b'{"schema":9,"claims":{}}'
     with pytest.raises(BlobIntegrityError):
-        submitter.submit_for_epoch(epoch_id)
+        _submitter(chain, chain["agent_addrs"][0], resolver).submit_for_epoch("e_tamper")
 
 
 def test_missing_blob_returns_clean_failure(chain):
-    """Anchor exists on chain but the resolver doesn't have the blob.
-    Returns a graceful failure, not a crash."""
-    agent_addrs = chain["agent_addrs"]
-    agent_ids = ["alice"]
-    result, epoch_id, resolver = _build_close_and_anchor(
-        chain, agent_ids, epoch_id="e_missing_blob",
-    )
-    # Empty the resolver.
+    _, resolver = _close_and_anchor(chain, chain["agent_addrs"][:1], "e_missing")
     resolver._store.clear()
-
-    submitter = AuthoritativeChainSubmitter(
-        claimant_id="alice", claimant_address=agent_addrs[0],
-        resolver=resolver,
-        config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=chain["deployer"],
-        web3=chain["w3"], substrate_abi=chain["abi"],
-    )
-    submission = submitter.submit_for_epoch(epoch_id)
-    assert not submission.success
-    assert "blob not found" in submission.error.lower()
+    r = _submitter(chain, chain["agent_addrs"][0], resolver).submit_for_epoch("e_missing")
+    assert not r.success and "blob not found" in r.error.lower()
 
 
-# ---------------------------------------------------------------------------
-# Zero mint
-# ---------------------------------------------------------------------------
+def test_earner_without_a_leaf_sends_nothing(chain):
+    _, resolver = _close_and_anchor(chain, chain["agent_addrs"][:1], "e_zero")
+    other = chain["agent_addrs"][2]
+    r = _submitter(chain, other, resolver).submit_for_epoch("e_zero")
+    assert r.success and r.tx_hash == "" and r.tokens == {}
+    assert not chain["contract"].functions.claimedEpoch(other, epoch_id_hash("e_zero")).call()
 
 
-def test_agent_with_zero_mint_skips_chain_call(chain):
-    """An agent who has no mint share for the epoch shouldn't waste
-    gas on a no-op tx."""
-    agent_addrs = chain["agent_addrs"]
-    contract = chain["contract"]
-    agent_ids = ["alice", "bob"]
-    result, epoch_id, resolver = _build_close_and_anchor(
-        chain, agent_ids, epoch_id="e_zero",
-    )
-    # Use a non-minting agent_id (charlie isn't in the close)
-    submitter = AuthoritativeChainSubmitter(
-        claimant_id="charlie",
-        claimant_address=agent_addrs[2],
-        resolver=resolver,
-        config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=chain["deployer"],
-        web3=chain["w3"], substrate_abi=chain["abi"],
-    )
-    submission = submitter.submit_for_epoch(epoch_id)
-    assert submission.success
-    assert submission.contribution_scaled == 0
-    assert submission.tx_hash == ""
-    # On-chain: nothing recorded for charlie.
-    eid_hash = epoch_id_hash(epoch_id)
-    assert contract.functions.mintForEpoch(agent_addrs[2], eid_hash).call() == 0
-
-
-# ---------------------------------------------------------------------------
-# Anchor-binding: contract refuses claimFor for un-anchored epochs
-# ---------------------------------------------------------------------------
-
-
-def test_unanchored_epoch_rejected_by_contract(chain):
-    """Submit for an epoch that hasn't been anchored yet. Contract
-    reverts EpochNotAnchored; submitter degrades to graceful failure
-    OR success-no-op (the existing 'already submitted on chain' path
-    swallows revert reasons; an EpochNotAnchored revert lands in the
-    same path)."""
-    agent_addrs = chain["agent_addrs"]
+def test_unanchored_epoch_fails_cleanly(chain):
     resolver = InMemoryBlobResolver()
-    # Pre-populate a fake blob the submitter would otherwise read,
-    # so we get past the resolver lookup. But we never anchor the
-    # epoch on chain.
-    fake_blob = b'{"schema":1,"agent_mint":{"alice":"1.0000000000"}}'
-    fake_cid = resolver.put(fake_blob)
+    resolver.put(b'{"schema":9,"claims":{}}')
+    r = _submitter(chain, chain["agent_addrs"][0], resolver).submit_for_epoch("e_never")
+    assert not r.success and r.error
 
-    submitter = AuthoritativeChainSubmitter(
-        claimant_id="alice", claimant_address=agent_addrs[0],
-        resolver=resolver,
-        config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
-        sender_address=chain["deployer"],
-        web3=chain["w3"], substrate_abi=chain["abi"],
-    )
 
-    # The submitter calls getAnchorByEpochId first, which reverts
-    # for an unanchored epoch — surfaces as a clean failure.
-    submission = submitter.submit_for_epoch("e_never_anchored")
-    assert not submission.success
-    assert submission.error
+def test_a_paused_token_blocks_nothing_and_is_retried():
+    w3 = Web3(EthereumTesterProvider())
+    deployer = w3.eth.accounts[0]
+    reg = _deploy(w3, artifact("test/IndexTokenMocks.sol/MockRegistry"), deployer)
+    paused = _deploy(w3, artifact("test/IndexTokenMocks.sol/PausableToken"), deployer)
+    dai = _deploy(w3, artifact("test/IndexTokenMocks.sol/MockIndexToken"), deployer,
+                  "D", "D", 18)
+    for t, p in ((paused, 10 ** 30), (dai, 10 ** 18)):
+        assert w3.eth.wait_for_transaction_receipt(reg.functions.setParity(
+            t.address, p).transact({"from": deployer})).status == 1
+    # A fresh chain per fixture: build it on this provider.
+    abi, bytecode = _load_substrate()
+    addr = deploy_substrate(w3, abi, bytecode, deployer, registry=reg.address)
+    contract = w3.eth.contract(address=addr, abi=abi)
+    agents = w3.eth.accounts[1:3]
+    for i, a in enumerate(agents):
+        assert register_bound(w3, contract, a, f"p-{i}".encode()).status == 1
+    window = seed_pool(w3, contract, tokens=[paused, dai])
+    fx = {"w3": w3, "abi": abi, "addr": addr, "contract": contract,
+          "deployer": deployer, "agent_addrs": list(agents),
+          "tokens": [paused, dai], "window": window}
+    result, resolver = _close_and_anchor(fx, agents, "e_pause")
+    earner = agents[0]
+    owed = result["claims"][earner.lower()]["tokens"]
+
+    w3.eth.wait_for_transaction_receipt(paused.functions.setPaused(True).transact(
+        {"from": deployer}))
+    sub = _submitter(fx, earner, resolver)
+    r = sub.submit_for_epoch("e_pause")
+    assert r.success, r.error                       # the claim itself landed
+    assert list(r.withdrawn) == [dai.address.lower()]
+    assert list(r.withdraw_errors) == [paused.address.lower()]
+    assert dai.functions.balanceOf(earner).call() == owed[dai.address.lower()]
+    assert contract.functions.owed(earner, paused.address).call() == owed[paused.address.lower()]
+
+    # Unpaused: the next pass withdraws what is left, and nothing twice.
+    w3.eth.wait_for_transaction_receipt(paused.functions.setPaused(False).transact(
+        {"from": deployer}))
+    r2 = sub.submit_for_epoch("e_pause")
+    assert r2.success and list(r2.withdrawn) == [paused.address.lower()]
+    assert paused.functions.balanceOf(earner).call() == owed[paused.address.lower()]
+    assert contract.functions.owed(earner, paused.address).call() == 0

@@ -35,10 +35,11 @@ and is not dated more than ``MAX_FUTURE_S`` after its batch.
 **The chain, pinned to the snapshot block** (``snapshot_from_logs``, read
 by ``voice_state.read_service_snapshot`` like the rest of the close's chain
 inputs): the (provider, digest) pairs the ServiceRegistry registered, what
-each payer has paid each provider (Substrate ``ServicePayment`` events
-sent by the payer, and PaymentChannel ``ChannelPaid`` payouts from the
-payer's channels), and the Registry's ``unscored_axis_bps``. With a
-snapshot:
+each payer has paid each provider in each token (Substrate
+``ServicePayment`` events sent by the payer, and PaymentChannel
+``ChannelPaid`` payouts from the payer's channels, each in the token its
+``ChannelOpened`` names), the value index and the Registry's
+``unscored_axis_bps``. With a snapshot:
 
   - a review of a pair that is not registered is dropped, new or carried;
   - a review counts only once its reviewer has paid the provider (any
@@ -53,9 +54,11 @@ hash) replaces the earlier, so a replayed old review changes nothing. A
 service's rating is over its payers' latest paid reviews: the mean of each
 field, the malware share as the share of payers flagging it, each charter
 axis's mean (an unscored axis at the pinned ``unscored_axis_bps``) and
-their mean together, the number of payers, what those payers have paid the
-provider in all (``paid``: for all its services, since credits are per
-provider), and how many reviews wait for a payment. Not counted (kept, so a
+their mean together, the number of payers, the value of what those payers
+have paid the provider in all (``paid``, 6-decimal value units at the
+pinned parity: each token's total valued on its own, then added; for all
+the provider's services, since credits are per provider), and how many
+reviews wait for a payment. Not counted (kept, so a
 change of the pinned inputs counts them again): payers of the provider's
 own household and sanctioned households. Ratings are keyed by (provider
 address, spec digest), so a copy registered under another address never
@@ -290,47 +293,63 @@ def snapshot_from_logs(
     *,
     registered: Iterable[Dict[str, Any]] = (),
     payments: Iterable[Dict[str, Any]] = (),
+    channels: Iterable[Dict[str, Any]] = (),
     payouts: Iterable[Dict[str, Any]] = (),
     unscored_bps: Any = None,
-    channel_address: str = "",
+    parity: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The close's service snapshot from log args, all up to the snapshot
     block: ``ServiceRegistered`` (provider, specDigest), Substrate
-    ``ServicePayment`` (payer, recipient, amount) and PaymentChannel
-    ``ChannelPaid`` (client, provider, amount). Returns::
+    ``ServicePayment`` (payer, recipient, token, amount), PaymentChannel
+    ``ChannelOpened`` (channelId, token) and ``ChannelPaid`` (channelId,
+    client, provider, amount). Returns::
 
       {"registered": ["<provider>:<digest>", ...],
-       "paid": {"<payer>:<provider>": amount},
+       "paid": {"<payer>:<provider>": {token: amount}},
+       "parity": {token: parity},
        "unscored_bps": int}
 
     Payments count only to registered providers. A channel payout counts
-    for the channel's client; the channel contract's own ``ServicePayment``
-    (it pays providers through Substrate) is not counted twice."""
+    for the channel's client in the channel's token (a payout of a channel
+    whose opening is not in the logs is not counted). Substrate's
+    ``ServiceFee`` is not a payment between a payer and a provider and is
+    never read."""
     pairs = sorted({service_key(a.get("provider"), _hex32(a.get("specDigest")))
                     for a in registered})
     providers = {p.split(":", 1)[0] for p in pairs}
-    channel = norm_address(channel_address)
-    paid: Dict[str, int] = {}
+    token_of = {int(a.get("channelId")): norm_address(a.get("token"))
+                for a in channels if a.get("channelId") is not None}
+    paid: Dict[str, Dict[str, int]] = {}
 
-    def add(payer: str, provider: str, amount: Any) -> None:
-        if provider not in providers or not payer:
+    def add(payer: str, provider: str, token: str, amount: Any) -> None:
+        if provider not in providers or not payer or not token:
             return
-        who = f"{payer}:{provider}"
-        paid[who] = paid.get(who, 0) + max(0, int(amount or 0))
+        tokens = paid.setdefault(f"{payer}:{provider}", {})
+        tokens[token] = tokens.get(token, 0) + max(0, int(amount or 0))
     for a in payments:
-        payer = norm_address(a.get("payer"))
-        if channel and payer == channel:
-            continue
-        add(payer, norm_address(a.get("recipient")), a.get("amount"))
+        add(norm_address(a.get("payer")), norm_address(a.get("recipient")),
+            norm_address(a.get("token")), a.get("amount"))
     for a in payouts:
-        add(norm_address(a.get("client")), norm_address(a.get("provider")), a.get("amount"))
+        cid = a.get("channelId")
+        add(norm_address(a.get("client")), norm_address(a.get("provider")),
+            token_of.get(int(cid), "") if cid is not None else "", a.get("amount"))
     return normalize_snapshot({"registered": pairs, "paid": paid,
-                               "unscored_bps": unscored_bps})
+                               "parity": parity or {}, "unscored_bps": unscored_bps})
 
 
 def _hex32(value: Any) -> str:
     raw = value.hex() if isinstance(value, (bytes, bytearray)) else str(value or "")
     return norm_hex(raw).rjust(64, "0")
+
+
+def _amounts(raw: Any) -> Dict[str, int]:
+    """{token (lowercase): non-negative int}, sorted, zeros dropped."""
+    out: Dict[str, int] = {}
+    for k, v in (raw.items() if isinstance(raw, dict) else ()):
+        if (isinstance(v, int) and not isinstance(v, bool)) or str(v).isdigit():
+            if int(v) > 0:
+                out[str(k).lower()] = int(v)
+    return dict(sorted(out.items()))
 
 
 def normalize_snapshot(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -341,10 +360,14 @@ def normalize_snapshot(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]
         bps = int(str(raw.get("unscored_bps")).strip())
     except (TypeError, ValueError):
         bps = UNSCORED_BPS_DEFAULT
-    paid = {str(k): max(0, int(v)) for k, v in sorted((raw.get("paid") or {}).items())
-            if isinstance(v, int) or str(v).isdigit()}
+    paid: Dict[str, Dict[str, int]] = {}
+    for k, v in sorted((raw.get("paid") or {}).items()):
+        tokens = _amounts(v)
+        if tokens:
+            paid[str(k)] = tokens
     return {"registered": sorted({str(p) for p in raw.get("registered") or ()}),
-            "paid": paid, "unscored_bps": max(0, min(BPS, bps))}
+            "paid": paid, "parity": _amounts(raw.get("parity")),
+            "unscored_bps": max(0, min(BPS, bps))}
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +401,8 @@ def _mark_paid(reviews: Dict[str, Dict[str, Dict[str, Any]]],
         for payer in sorted(reviews[key]):
             r = reviews[key][payer]
             r["paid"] = (snapshot is None
-                         or int(snapshot["paid"].get(f"{payer}:{provider}", 0)) > 0)
+                         or any(v > 0 for v in
+                                snapshot["paid"].get(f"{payer}:{provider}", {}).values()))
 
 
 def _bound(reviews: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
@@ -419,10 +443,12 @@ def service_rating(key: str, payers: Dict[str, Dict[str, Any]], *,
                    axis_ids: List[str], household: Any,
                    sanctioned: Iterable[str] = (),
                    unscored_bps: int = UNSCORED_BPS_DEFAULT,
-                   paid: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:
+                   paid: Optional[Dict[str, Dict[str, int]]] = None,
+                   parity: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:
     """One service's rating over its payers' latest paid reviews, or None
     when no review counts. ``household(address)`` maps an address to its
-    household (the pinned owner map)."""
+    household (the pinned owner map). ``paid`` is the snapshot's
+    {"<payer>:<provider>": {token: amount}} and ``parity`` its index."""
     provider, _, digest = key.partition(":")
     banned = set(sanctioned)
     own = household(provider)
@@ -458,9 +484,22 @@ def service_rating(key: str, payers: Dict[str, Dict[str, Any]], *,
         "malware": round(flagged / n, 9),
         "axes": axes,
         "value": round(total / (n * len(axis_ids)) / BPS, 9) if axis_ids else None,
-        "paid": sum(int((paid or {}).get(f"{p}:{provider}", 0)) for p in counted_payers),
+        "paid": _paid_value(paid or {}, parity or {}, counted_payers, provider),
         "latest_ts": max(int(r.get("ts") or 0) for r in counted),
     }
+
+
+def _paid_value(paid: Dict[str, Dict[str, int]], parity: Dict[str, int],
+                payers: List[str], provider: str) -> int:
+    """The value of what ``payers`` paid ``provider``: each token's total
+    over the payers, valued at its parity (0 when out of the index), added."""
+    from .federated_reconcile import basket_value
+
+    totals: Dict[str, int] = {}
+    for p in sorted(payers):
+        for t, v in sorted((paid.get(f"{p}:{provider}") or {}).items()):
+            totals[t] = totals.get(t, 0) + int(v)
+    return basket_value(totals, parity)
 
 
 def close_service_reviews(
@@ -515,7 +554,8 @@ def close_service_reviews(
     for key in sorted(reviews):
         rating = service_rating(key, reviews[key], axis_ids=ids, household=household,
                                 sanctioned=banned, unscored_bps=unscored,
-                                paid=snap["paid"] if snap is not None else None)
+                                paid=snap["paid"] if snap is not None else None,
+                                parity=snap["parity"] if snap is not None else None)
         if rating is not None:
             ratings[key] = rating
     return {"reviews": reviews, "ratings": ratings, "accepted": accepted,

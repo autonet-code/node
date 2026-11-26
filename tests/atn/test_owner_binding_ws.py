@@ -56,9 +56,8 @@ def _load_substrate() -> Tuple[list, str]:
 
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
-    # The deployer is treasury and governor (anchors directly); no vault
-    # minter, anchorer or genesis.
-    return deploy_substrate(w3, abi, bytecode, deployer, vault_minter=_ZERO)
+    # The deployer is treasury and governor (anchors directly); no anchorer.
+    return deploy_substrate(w3, abi, bytecode, deployer)
 
 
 _ZERO = "0x0000000000000000000000000000000000000000"

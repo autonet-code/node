@@ -1,4 +1,4 @@
-# Architecture: the whole system on one page (2026-11-10)
+# Architecture: the whole system on one page (2026-11-26)
 
 Kept current: every decision that changes a component, a connection or a
 user journey updates this page in the same change. The economy's rules are
@@ -183,7 +183,7 @@ external agents only; native agents and the owner surface are refused.
 its Activity log (`atn/agent_activity.py`) and streamed to the app.
 
 **App (`C:\code\atn_web`, Flutter, branch `master`).** The owner's dashboard and wallet. The avatar opens two
-tabs. Household: owner (wallet, ATN, voice, claims), operator key
+tabs. Household: owner (wallet, index tokens, voice, claims), operator key
 (including delegating REP to the operator, the one governance write the
 app does; everything else in governance is werule's), agents
 (registration, owner binding), governance read-only with a link to werule,
@@ -208,13 +208,18 @@ commits (daemons offer them after every close; it provides them in the
 DHT), reach checks. No close, chain or agents. Seeds are listed in the DAO
 Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 
-**Chain.** In this repo (`contracts/core/`): `Substrate.sol` (ATN, epoch
-anchors, agent registry with owner binding, mint records, `payForService`
-with the burn, genesis claim), `AnchorElection.sol`, `ServiceMarket.sol`.
-Each jurisdiction's Substrate is an ERC-1967 proxy over one implementation
-deployed with the suite: its address is the jurisdiction's ATN for good,
-and only the DAO timelock can point it at new code (a constitutional
-proposal), which keeps every balance, anchor and registration. A later
+**Chain.** In this repo (`contracts/core/`): `Substrate.sol` (epoch
+anchors, agent registry with owner binding, tool authorship, service
+payments in the value index's tokens with the fee, one pool per token,
+claims and per-token withdrawals), `AnchorElection.sol`,
+`ServiceMarket.sol`. Substrate is not a token: money is whatever the
+value index lists (Registry `jurisdiction.parity.<token>`), and Substrate
+holds only the pools and what they owe. Each jurisdiction's Substrate is
+an ERC-1967 proxy over one implementation deployed with the suite: only
+the DAO timelock can point it at new code (a constitutional proposal),
+which keeps every pool, claim, anchor and registration, until the same
+kind of proposal renounces upgrades for good (`renounceUpgrades`, only as
+the call of an `upgradeToAndCall`). A later
 version may only add state (`test/storage_layout.test.js` holds the layout
 of record). AnchorElection, ServiceRegistry and PaymentChannel are
 EIP-1167 clones, replaced by attaching a new version of the module. All
@@ -223,7 +228,7 @@ directly deployed one (local chains, tests) is set up by its constructor
 with the same arguments.
 In `C:\code\dao\trustless-contracts` (dao owns it; coordinate through
 `chat.txt`): governor + timelock, Registry (every parameter lives here),
-RepToken, AutonetRepClaim, ToolBond, AutonetVault, and the AutonetSetup
+RepToken, AutonetRepClaim, ToolBond, and the AutonetSetup
 module that werule uses to create a jurisdiction. The indexer
 (`EightRice/indexer`, dao owns) mirrors chain events to Firestore for the
 agent directory.
@@ -275,7 +280,8 @@ agent directory.
   won't start without `substrate`, `rep_token`, `tool_bond`, `dao` and
   `timelock` in its Registry and `epoch_rules` "2". Chain calls run off the
   daemon's event loop.
-- Household on chain: the owner wallet claims ATN and REP; the daemon's
+- Household on chain: the owner wallet is paid from the pools and claims
+  REP; the daemon's
   operator key registers bound to it, gets the owner's REP by delegation,
   proposes and votes epoch elections, and submits claims. It also signs
   every external agent's actions, so its transactions come from several
@@ -305,7 +311,7 @@ agent directory.
   and a baseline tool library built by real agents.
 - **Shadownet** (Etherlink testnet): no deploy until the owner confirms on
   local hardhat.
-- **Mainnet** (Polygon or Arbitrum): virgin mint; the WAN run's tools are
+- **Mainnet**: starts empty; the WAN run's tools are
   re-published from the owner's household as the starting library.
 
 ## Repos and rules

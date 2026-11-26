@@ -2,7 +2,7 @@
 
 Determinism contract: given the same canonical batch sequence, carry-over
 and pinned chain inputs, every honest daemon's ``federated_epoch_close``
-produces the SAME ``agent_mint`` dict at the byte level (same keys in the
+produces the SAME ``claims`` at the byte level (same keys in the
 same order, same values to the last bit) and the same authoritative
 payload. That is what lets the anchor commit one attribution without
 disputes.
@@ -10,13 +10,16 @@ disputes.
 Tested:
 
   1. Three daemons receive the same batches in different arrival orders;
-     all produce identical payloads, mint maps and epoch roots.
-  2. The serialized JSON of the mint map is byte-identical across daemons.
+     all produce identical payloads, claims and epoch roots.
+  2. The serialized JSON of the claims is byte-identical across daemons.
   3. A malformed (broken-chain) sender is dropped by canonical ordering:
-     its registration never lands, so its tool mints nothing, and the
+     its registration never lands, so its tool earns nothing, and the
      others are unaffected.
-  4. An empty epoch yields an empty mint map and the empty-epoch root.
+  4. An empty epoch yields no claims and the empty-epoch root.
   5. A larger library (many authors, many reviewers) is still identical.
+  6. The basket split: two tokens of different decimals, each pool
+     conserved (paid + carry), sanctions withheld into the carry, the
+     value of each claim at the pinned parity.
 """
 
 from __future__ import annotations
@@ -35,6 +38,10 @@ from nodes.common.federated_reconcile import federated_epoch_close
 
 E18 = 10 ** 18
 SUPPLY = 1000 * E18
+USDC = "0x" + "a6" * 20          # 6 decimals, parity 1e30
+DAI = "0x" + "1b" * 20           # 18 decimals, parity 1e18
+WINDOW = {USDC: 10 * 10 ** 6, DAI: 10 * E18}
+PARITY = {USDC: 10 ** 30, DAI: 10 ** 18}
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +95,8 @@ def _review_inputs(digests: List[str], reviewers: List[str]) -> Dict[str, Any]:
                    for d in digests},
     }
     return {"rep_shares": {r: share for r in reviewers},
-            "review_snapshot": snapshot, "emission_pool": 10.0}
+            "review_snapshot": snapshot, "tool_share_window": dict(WINDOW),
+            "parity": dict(PARITY)}
 
 
 # ---------------------------------------------------------------------------
@@ -117,12 +125,12 @@ def test_three_daemons_produce_byte_identical_maps():
     assert (results[0]["authoritative_payload"]
             == results[1]["authoritative_payload"]
             == results[2]["authoritative_payload"])
-    assert results[0]["agent_mint"] == results[1]["agent_mint"] == results[2]["agent_mint"]
+    assert results[0]["claims"] == results[1]["claims"] == results[2]["claims"]
     assert results[0]["epoch_root"] == results[1]["epoch_root"] == results[2]["epoch_root"]
-    # Both tool authors minted (their reviews concluded this close).
-    assert results[0]["agent_mint"].get("alice", 0) > 0
-    assert results[0]["agent_mint"].get("bob", 0) > 0
-    assert results[0]["authoritative_payload"]["schema"] == 8
+    # Both tool authors earn (their reviews concluded this close).
+    assert results[0]["claims"]["alice"]["value"] > 0
+    assert results[0]["claims"]["bob"]["value"] > 0
+    assert results[0]["authoritative_payload"]["schema"] == 9
 
 
 def test_serialized_json_is_byte_identical_across_daemons():
@@ -143,7 +151,7 @@ def test_serialized_json_is_byte_identical_across_daemons():
         d = list(chains)
         rng.shuffle(d)
         result = federated_epoch_close(canonical_order(d), **inputs)
-        serialized.append(json.dumps({"agent_mint": result["agent_mint"],
+        serialized.append(json.dumps({"claims": result["claims"],
                                       "epoch_root": result["epoch_root"]}).encode())
     h0, h1, h2 = (hashlib.sha256(s).hexdigest() for s in serialized)
     assert h0 == h1 == h2, (h0, h1, h2)
@@ -176,21 +184,22 @@ def test_malformed_sender_contributes_zero_others_unaffected():
         d = list(honest + bad_with_gap)
         rng.shuffle(d)
         results.append(federated_epoch_close(canonical_order(d), **inputs))
-    assert results[0]["agent_mint"] == results[1]["agent_mint"] == results[2]["agent_mint"]
-    mint = results[0]["agent_mint"]
-    assert mint.get("honest_alice", 0) > 0
+    assert results[0]["claims"] == results[1]["claims"] == results[2]["claims"]
+    mint = results[0]["claims"]
+    assert mint["honest_alice"]["value"] > 0
     assert "malformed_eve" not in mint
     assert dig_e not in results[0]["tool_registrations"]
 
 
 def test_empty_canonical_yields_empty_authoritative_map():
     result = federated_epoch_close(canonical_order([]))
-    assert result["agent_mint"] == {}
+    assert result["claims"] == {}
     assert result["epoch_root"] == EMPTY_EPOCH_ROOT.hex()
     assert result["scope"] == "federated"
     assert result["authoritative"] is True
     assert set(result["authoritative_payload"]) == {
-        "schema", "epoch_root", "agent_mint", "total_mint", "output_decimals",
+        "schema", "epoch_root", "claims", "pools", "parity", "total_value",
+        "output_decimals",
         "charter_hash", "sanctioned_households", "concluded", "n_batches",
         "n_events"}
 
@@ -223,15 +232,134 @@ def test_many_agents_many_tools_deterministic():
         d = list(chains)
         rng.shuffle(d)
         results.append(federated_epoch_close(canonical_order(d), **inputs))
-    assert results[0]["agent_mint"] == results[1]["agent_mint"] == results[2]["agent_mint"]
-    assert results[0]["total_mint"] == results[1]["total_mint"] == results[2]["total_mint"]
+    assert results[0]["claims"] == results[1]["claims"] == results[2]["claims"]
+    assert results[0]["total_value"] == results[1]["total_value"] == results[2]["total_value"]
     assert len(results[0]["tool_mint"]) == len(digests)
 
 
-def test_household_mint_sums_per_owner_and_keeps_unbound_agents():
-    from nodes.common.federated_reconcile import household_mint
-    mint = {"0xAgentA": 3.0, "0xagentb": 2.0, "0xAgentC": 4.0}
-    owners = {"0xagenta": "0xOWNER1", "0xAgentB": "0xowner1"}
-    assert household_mint(mint, owners, 10) == {"0xagentc": 4.0, "0xowner1": 5.0}
-    assert household_mint(mint, None, 10) == {
-        "0xagenta": 3.0, "0xagentb": 2.0, "0xagentc": 4.0}
+# ---------------------------------------------------------------------------
+# The basket split
+# ---------------------------------------------------------------------------
+
+
+def _one_tool_close(**kw):
+    """One tool by ``alice``, reviewed by two equal reviewers, over a
+    two-token window."""
+    rpb = "rpb_basket"
+    kp = Keypair.generate()
+    dig = "ee" * 32
+    chain = _append_batch([], rpb, kp, [_tool_registration("alice", dig)])
+    r1, r2 = "0x" + "11" * 20, "0x" + "22" * 20
+    inputs = _review_inputs([dig], [r1, r2])
+    inputs.update(kw)
+    return federated_epoch_close(canonical_order(chain), **inputs), (r1, r2)
+
+
+def _paid(result):
+    out: Dict[str, int] = {}
+    for c in result["claims"].values():
+        for t, v in c["tokens"].items():
+            out[t] = out.get(t, 0) + v
+    return out
+
+
+def test_basket_two_tokens_of_different_decimals():
+    result, (r1, r2) = _one_tool_close()
+    claims = result["claims"]
+    assert set(claims) == {"alice", r1, r2}
+    # Every earner takes the same fraction of each pool (to the floor).
+    for c in claims.values():
+        f6 = c["tokens"][USDC] / WINDOW[USDC]
+        f18 = c["tokens"][DAI] / WINDOW[DAI]
+        assert abs(f6 - f18) < 1e-6
+        assert all(isinstance(v, int) for v in c["tokens"].values())
+    # Equal reviewers take equal amounts.
+    assert claims[r1]["tokens"] == claims[r2]["tokens"]
+    assert result["pools"] == WINDOW and result["parity"] == PARITY
+
+
+def test_basket_conserves_each_pool_exactly():
+    result, _ = _one_tool_close()
+    paid = _paid(result)
+    carry = result["tool_rounds"]["pool_carry"]
+    for t, pool in WINDOW.items():
+        assert paid.get(t, 0) + carry.get(t, 0) == pool
+    # The rest the author side does not pay (score below 1) is carried.
+    assert carry[USDC] > 0 and carry[DAI] > 0
+
+
+def test_the_carry_joins_the_next_pool_and_an_int_carry_reads_as_empty():
+    first, _ = _one_tool_close()
+    carry = first["tool_rounds"]["pool_carry"]
+    quiet = federated_epoch_close(canonical_order([]), tool_rounds=first["tool_rounds"],
+                                  tool_share_window={USDC: 5}, parity=PARITY)
+    assert quiet["pools"] == {DAI: carry[DAI], USDC: carry[USDC] + 5}
+    assert quiet["tool_rounds"]["pool_carry"] == quiet["pools"]
+    old = federated_epoch_close(canonical_order([]), tool_rounds={"pool_carry": 123},
+                                tool_share_window={USDC: 5})
+    assert old["pools"] == {USDC: 5}
+
+
+def test_sanctioned_household_is_withheld_into_the_carry():
+    """The author's household is sanctioned: its share is split with the
+    rest, then withheld, so it stays in the carry and nobody else gains."""
+    clean, (r1, r2) = _one_tool_close()
+    house = "0x" + "99" * 20
+    sanctioned, _ = _one_tool_close(agent_owner_map={"alice": house},
+                                    sanctioned_households=[house])
+    assert house not in sanctioned["claims"] and "alice" not in sanctioned["claims"]
+    assert sanctioned["claims"][r1] == clean["claims"][r1]
+    assert sanctioned["claims"][r2] == clean["claims"][r2]
+    withheld = sanctioned["withheld"]["alice"]
+    assert withheld == clean["claims"]["alice"]["tokens"]
+    carry = sanctioned["tool_rounds"]["pool_carry"]
+    for t in WINDOW:
+        assert carry[t] == clean["tool_rounds"]["pool_carry"][t] + withheld[t]
+        assert _paid(sanctioned)[t] + carry[t] == WINDOW[t]
+
+
+def test_values_are_each_token_at_its_parity_summed():
+    result, _ = _one_tool_close()
+    total = 0
+    for c in result["claims"].values():
+        expect = (c["tokens"][USDC] * PARITY[USDC] // 10 ** 30
+                  + c["tokens"][DAI] * PARITY[DAI] // 10 ** 30)
+        assert c["value"] == expect
+        total += expect
+    assert result["total_value"] == total
+    assert result["authoritative_payload"]["total_value"] == total
+    # A token out of the index (no parity) is still paid, at value 0.
+    no_dai, _ = _one_tool_close(parity={USDC: 10 ** 30})
+    for h, c in no_dai["claims"].items():
+        assert c["tokens"][DAI] == result["claims"][h]["tokens"][DAI]
+        assert c["value"] == c["tokens"][USDC]
+    assert no_dai["parity"] == {DAI: 0, USDC: 10 ** 30}
+
+
+def _two_author_close(**kw):
+    rpb = "rpb_basket2"
+    ka, kb = Keypair.generate(), Keypair.generate()
+    da, db = "e1" * 32, "e2" * 32
+    chain = (_append_batch([], rpb, ka, [_tool_registration("alice", da)])
+             + _append_batch([], rpb, kb, [_tool_registration("bob", db)]))
+    inputs = _review_inputs([da, db], ["0x" + "11" * 20])
+    inputs.update(kw)
+    return federated_epoch_close(canonical_order(chain), **inputs)
+
+
+def test_household_amounts_are_added_per_owner_never_resplit():
+    owner = "0x" + "77" * 20
+    alone = _two_author_close()
+    together = _two_author_close(agent_owner_map={"alice": owner, "bob": owner})
+    assert "alice" not in together["claims"] and "bob" not in together["claims"]
+    for t in WINDOW:
+        assert together["claims"][owner]["tokens"][t] == (
+            alone["claims"]["alice"]["tokens"][t] + alone["claims"]["bob"]["tokens"][t])
+    assert together["claims_by_agent"]["alice"] == alone["claims"]["alice"]["tokens"]
+
+
+def test_no_chain_no_split():
+    result, (r1, _) = _one_tool_close(tool_share_window=None, parity=None)
+    assert result["claims"] == {} and result["pools"] == {}
+    assert result["tool_rounds"]["pool_carry"] == {}
+    assert result["household_weights"][r1] > 0

@@ -1,7 +1,7 @@
 """Show ToolBond the malware verdicts of anchored closes (Decisions
 2026-11-09 and 2026-11-10, docs/tool_substrate.md).
 
-Each close commits, in the anchor's agentMintRoot, one leaf per tool that
+Each close commits, in the anchor's claimRoot, one leaf per tool that
 concluded in it with the tool's malware share in bps (the close is the one
 definition of the share). After the anchor lands, someone has to show
 ToolBond each leaf: ``ToolBond.conclude(digest, anchorIndex, shareBps,
@@ -9,8 +9,8 @@ proof)`` records the conclusion and, when more than half the reviewing REP
 said malware, settles the verdict at once (the stake's share to the
 treasury, the household's REP burned). There is no appeal window: the DAO
 clears or designates a verdict by proposal at any time. The call is
-permissionless and idempotent on chain; every daemon that claims a
-household's mint makes it too (the operator pays the gas), so it never
+permissionless and idempotent on chain; every daemon that claims for a
+household makes it too (the operator pays the gas), so it never
 depends on one daemon.
 
 ``conclude_epoch`` runs once per anchored epoch, from the claim path.
@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from .authoritative_encoding import cid_for_blob, decode_agent_mint_blob, decode_concluded
+from .authoritative_encoding import cid_for_blob, decode_claims_blob, decode_concluded
 from .mint_merkle import concluded_proof, verify_concluded_proof
 
 logger = logging.getLogger(__name__)
@@ -48,9 +48,10 @@ TOOL_BOND_VERDICT_ABI = [
 _ANCHOR_COMPONENTS = [
     {"name": "epochId", "type": "string"}, {"name": "epochRoot", "type": "bytes32"},
     {"name": "prevEpochRoot", "type": "bytes32"}, {"name": "prevAnchorHash", "type": "bytes32"},
-    {"name": "agentMintCid", "type": "string"}, {"name": "payloadHash", "type": "bytes32"},
+    {"name": "claimCid", "type": "string"}, {"name": "payloadHash", "type": "bytes32"},
     {"name": "submitter", "type": "address"}, {"name": "blockNumber", "type": "uint256"},
-    {"name": "timestamp", "type": "uint256"}, {"name": "agentMintRoot", "type": "bytes32"},
+    {"name": "timestamp", "type": "uint256"}, {"name": "claimRoot", "type": "bytes32"},
+    {"name": "cutoff", "type": "uint256"},
 ]
 
 
@@ -87,7 +88,7 @@ class VerdictSubmitter:
             concluded = decode_concluded(blob)
             if not concluded:
                 return []
-            mint = decode_agent_mint_blob(blob)
+            claims = decode_claims_blob(blob)
             index = self._anchor_index(epoch_id)
             if index is None:
                 logger.warning("epoch %s: anchor index not found; verdicts not opened",
@@ -101,7 +102,7 @@ class VerdictSubmitter:
         for digest, bps in sorted(concluded.items()):
             row: Dict[str, Any] = {"digest": digest, "share_bps": bps}
             try:
-                proof = concluded_proof(mint, concluded, digest) or []
+                proof = concluded_proof(claims, concluded, digest) or []
                 if not verify_concluded_proof(root, digest, bps, proof):
                     row["error"] = "the concluded leaf does not prove against the anchor"
                     rows.append(row)

@@ -112,7 +112,7 @@ class TestRatings:
         assert "credibility_next" not in out and "tool_review_book_next" not in out
         kp = Keypair.generate()
         close = federated_epoch_close(canonical_order(
-            _batches([_registration_event(1)] + _receipts(), kp)), emission_pool=1.0)
+            _batches([_registration_event(1)] + _receipts(), kp)), tool_share_window={"0x" + "a6" * 20: 1_000_000})
         assert "tool_credibility" not in close and "tool_review_book" not in close
         assert "tool_positions" not in close
 
@@ -120,7 +120,7 @@ class TestRatings:
         kp = Keypair.generate()
         close = federated_epoch_close(
             canonical_order(_batches([_registration_event(1)] + _receipts(), kp)),
-            emission_pool=1.0, review_snapshot={"supply": SUPPLY, "tools": self.TOOLS})
+            tool_share_window={"0x" + "a6" * 20: 1_000_000}, review_snapshot={"supply": SUPPLY, "tools": self.TOOLS})
         assert close["tool_ratings"][DIGEST]["correctness"] == pytest.approx(0.9)
 
 
@@ -434,11 +434,11 @@ class TestDeterminism:
             [_receipt_event(1, "c1"), _receipt_event(2, "c2")], kp_c)
         snap = _snapshot([_rev(AUD_A, 5), _rev(AUD_B, 2)],
                          tools={DIGEST: tool_cells(novelty=0.4)})
-        r1 = federated_epoch_close(canonical_order(batches), emission_pool=3.0,
+        r1 = federated_epoch_close(canonical_order(batches), tool_share_window={"0x" + "a6" * 20: 3_000_000},
                                    review_snapshot=snap)
         shuffled = batches[:]
         random.Random(3).shuffle(shuffled)
-        r2 = federated_epoch_close(canonical_order(shuffled), emission_pool=3.0,
+        r2 = federated_epoch_close(canonical_order(shuffled), tool_share_window={"0x" + "a6" * 20: 3_000_000},
                                    review_snapshot=copy.deepcopy(snap))
         assert r1["authoritative_payload"] == r2["authoritative_payload"]
         assert r1["tool_ratings"] == r2["tool_ratings"]

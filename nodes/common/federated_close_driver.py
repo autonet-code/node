@@ -148,10 +148,11 @@ class FederatedCloseDriver:
         # nothing (_follow). None => always participates.
         self.participating: Optional[Callable[[], bool]] = None
         self._followed_count: Optional[int] = None
-        # (from_ts, to_ts) -> ATN burned by fees between them, from
-        # Substrate's on-chain checkpoints: with a target share set, an
-        # epoch ends on that volume (voice_state.volume_cutoff).
-        self.burned_source: Optional[Callable[[int, int], int]] = None
+        # (token, from_ts, to_ts) -> fees collected in that token between
+        # them, from Substrate's on-chain checkpoints (feesBetween): with a
+        # target value set, an epoch ends when their value at the pinned
+        # index reaches it (voice_state.volume_cutoff).
+        self.fees_source: Optional[Callable[[str, int, int], int]] = None
         # floor_ts -> batches gained: asks peers for the open epoch's batches
         # signed after floor_ts that this daemon is missing, and feeds them
         # to the gossip (issue #41). Called once per window, before closing.
@@ -234,12 +235,12 @@ class FederatedCloseDriver:
         # rep_supply is no longer threaded. Empty => local regime
         # (weight-1.0 drift). Comes from the same voice_state read.
         self.rep_shares: Dict[str, float] = {}
-        # Fees-only emission pool (Decision 2026-07-10): the burned service
-        # fees in the snapshot anchor's window (NO base floor), computed by
-        # the same voice_source refresh. None (no chain source) = no
-        # normalization — raw mint units, the legacy/local behavior; a zero
-        # pool yields zero mint.
-        self.emission_pool: Optional[float] = None
+        # The pools' new money: {token: tool share collected in the snapshot
+        # anchor's window}, and the value index pinned to the same block,
+        # both from the voice_source refresh. None (no chain source) = no
+        # split: the close pays nothing and keeps the carry.
+        self.tool_share_window: Optional[Dict[str, int]] = None
+        self.parity: Dict[str, int] = {}
         # anchorCount at the last successful voice/pool refresh.
         self.snapshot_anchor_count: Optional[int] = None
         # ToolBond review snapshot (docs/multi_jurisdiction.md decision 10):
@@ -497,19 +498,22 @@ class FederatedCloseDriver:
         grace = int(win["grace"])
         step = max(1, grace)
         cutoff = int(win["base"]) + int(win["length"])
-        if int(win.get("target_share") or 0) > 0 and self.burned_source is not None:
-            # Volume ends the epoch (Decision 2026-10-27). Read only time
-            # one grace old, so every daemon sees the same final burns.
-            from .voice_state import volume_cutoff
+        if int(win.get("target_value") or 0) > 0 and self.fees_source is not None:
+            # Volume ends the epoch (Decision 2026-10-27): the fees
+            # collected, valued at the index pinned with the window. Read
+            # only time one grace old, so every daemon sees the same fees.
+            from .voice_state import fees_value_between, volume_cutoff
+            parity = {str(t).lower(): int(p) for t, p in (win.get("parity") or {}).items()}
+            fees = self.fees_source
             try:
                 vol = volume_cutoff(
-                    self.burned_source, start=int(win["base"]),
+                    lambda t0, t1: fees_value_between(fees, parity, t0, t1),
+                    start=int(win["base"]),
                     floor=int(win["floor"]), ceiling=int(win["ceiling"]),
-                    target_share_ppm=int(win["target_share"]),
-                    supply=int(win.get("supply") or 0),
+                    target_value=int(win["target_value"]),
                     final_ts=int(float(self.clock())) - grace)
             except Exception as e:
-                logger.warning("federated close: burned-volume read failed: %s", e)
+                logger.warning("federated close: fee-volume read failed: %s", e)
                 return None
             if vol is None:
                 return None
@@ -633,8 +637,8 @@ class FederatedCloseDriver:
 
     def tool_unpaid(self, digest: str) -> Optional[Dict[str, Any]]:
         """What the tool's author side would have paid had it not concluded
-        on a malware verdict (``{"amounts": {recipient: ATN}, "on":
-        [digests]}``), or None: the amounts a clearing proposal pays from
+        on a malware verdict (``{"amounts": {recipient: {"tokens": {token:
+        amount}, "value": value}}, "on": [digests]}``), or None: the amounts a clearing proposal pays from
         the treasury (Decision 2026-11-10)."""
         key = str(digest).lower().removeprefix("0x")
         entry = ((self._tool_rounds.get("tools") or {}).get(key) or {}).get("unpaid")
@@ -856,9 +860,13 @@ class FederatedCloseDriver:
             if isinstance(shares, dict):
                 updates["rep_shares"] = {
                     str(k): float(v) for k, v in shares.items()}
-            pool = state.get("emission_pool")
-            if pool is not None:
-                updates["emission_pool"] = float(pool)
+            window = state.get("tool_share_window")
+            if isinstance(window, dict):
+                updates["tool_share_window"] = {
+                    str(k).lower(): int(v) for k, v in window.items()}
+            parity = state.get("parity")
+            if isinstance(parity, dict):
+                updates["parity"] = {str(k).lower(): int(v) for k, v in parity.items()}
             if state.get("snapshot_anchor_count") is not None:
                 updates["snapshot_anchor_count"] = int(
                     state["snapshot_anchor_count"])
@@ -1040,7 +1048,8 @@ class FederatedCloseDriver:
                 canonical,
                 tool_registrations=dict(self._tool_registrations),
                 agent_owner_map=dict(self.agent_owner_map),
-                emission_pool=self.emission_pool,
+                tool_share_window=self.tool_share_window,
+                parity=dict(self.parity or {}),
                 tool_rounds=dict(self._tool_rounds),
                 rep_shares=(dict(self.rep_shares or {})
                             if self.rep_shares or chain_backed else None),
@@ -1062,14 +1071,14 @@ class FederatedCloseDriver:
             )
             return None
 
-        # MONEY-ONLY CONTRACT SEAM. ``close_result`` carries ``agent_mint``,
-        # keyed by household claimant (schema 6, Decision 2026-10-27), and
-        # the ``authoritative_payload`` commits it on a 2-field
-        # (claimant, amount) merkle leaf. The household submitter
-        # (nodes/common/authoritative_submitter.py) reads it from the
-        # anchored blob and calls ``claimFor(claimant, amount, epochIdHash,
-        # proof)`` with the daemon operator key. REP is claimed DAO-side on
-        # ratified ATN earnings. This driver does not itself call the chain.
+        # CONTRACT SEAM. ``close_result`` carries ``claims``, keyed by
+        # household earner (Decision 2026-10-27): each household's amount of
+        # every token's pool, committed one leaf each under the claimRoot.
+        # The household submitter (nodes/common/authoritative_submitter.py)
+        # reads them from the anchored blob, calls ``claim(earner,
+        # epochIdHash, tokens, amounts, proof)`` with the daemon operator
+        # key and withdraws each token. REP is claimed DAO-side on the value
+        # Substrate records. This driver does not itself call the chain.
 
         # Advance + persist the tool-registration carry-over for the
         # next epoch (returned map = carried ∪ this epoch's canonical

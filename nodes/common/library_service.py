@@ -424,7 +424,7 @@ class LibraryService:
             self._closes.append({
                 "epoch_id": str(epoch_id or close_result.get("epoch_id") or ""),
                 "closed_at": time.time(),
-                "total_mint": float(close_result.get("total_mint") or 0.0),
+                "total_value": int(close_result.get("total_value") or 0),
                 "tool_mint": dict(close_result.get("tool_mint") or {}),
             })
             self._closes = self._closes[-CLOSES_KEEP:]
@@ -519,7 +519,7 @@ class LibraryService:
 
         Returns ``{registrations: {digest: {author, trust_class, deps}},
         recent_tool_mint: {digest: float}, ratings: {digest: rating},
-        last_epoch: {epoch_id, closed_at, total_mint, tool_mint} | None,
+        last_epoch: {epoch_id, closed_at, total_value, tool_mint} | None,
         epochs_considered: int}``. A rating is the ToolBond means as of the
         latest close (``federated_reconcile.tool_rating``: correctness,
         simplicity, novelty, malware share, charter ``axes`` and their
@@ -557,7 +557,7 @@ class LibraryService:
             "last_epoch": None if last is None else {
                 "epoch_id": last.get("epoch_id"),
                 "closed_at": last.get("closed_at"),
-                "total_mint": last.get("total_mint", 0.0),
+                "total_value": last.get("total_value", 0),
                 "tool_mint": last.get("tool_mint") or {},
             },
             "epochs_considered": len(recent),

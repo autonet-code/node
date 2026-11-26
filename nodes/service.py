@@ -353,12 +353,12 @@ class AutonetService:
                 # debug so they don't fill the console every minute.
                 logger.log(
                     logging.INFO if result.get("n_events") else logging.DEBUG,
-                    "Epoch closed: id=%s, n_events=%d, total_mint=%.4f, "
-                    "agents=%d",
+                    "Epoch closed: id=%s, n_events=%d, total_value=%d, "
+                    "earners=%d",
                     result.get("epoch_id"),
                     result.get("n_events", 0),
-                    result.get("total_mint", 0.0),
-                    len(result.get("agent_mint", {})),
+                    int(result.get("total_value") or 0),
+                    len(result.get("claims", {})),
                 )
 
             candle_min = float(getattr(self.config, "epoch_min_seconds", 0.0) or 0.0)
@@ -627,25 +627,26 @@ class AutonetService:
 
             self._federated_close_driver.chain_source = _chain_source
 
-            # Volume-ended epochs (Decision 2026-10-27): fees burned between
-            # two times, from Substrate's on-chain checkpoints.
-            _burn_contract: list = []
+            # Volume-ended epochs (Decision 2026-10-27): fees collected in a
+            # token between two times, from Substrate's on-chain checkpoints.
+            _fee_contract: list = []
 
-            def _burned_source(from_ts: int, to_ts: int) -> int:
-                if not _burn_contract:
-                    from web3 import Web3
+            def _fees_source(token: str, from_ts: int, to_ts: int) -> int:
+                from web3 import Web3
+                if not _fee_contract:
                     w3 = Web3(Web3.HTTPProvider(rpc_url))
-                    _burn_contract.append(w3.eth.contract(
+                    _fee_contract.append(w3.eth.contract(
                         address=Web3.to_checksum_address(substrate_addr),
-                        abi=[{"name": "burnedBetween", "type": "function",
+                        abi=[{"name": "feesBetween", "type": "function",
                               "stateMutability": "view",
-                              "inputs": [{"name": "fromTs", "type": "uint256"},
+                              "inputs": [{"name": "token", "type": "address"},
+                                         {"name": "fromTs", "type": "uint256"},
                                          {"name": "toTs", "type": "uint256"}],
                               "outputs": [{"name": "", "type": "uint256"}]}]))
-                return int(_burn_contract[0].functions.burnedBetween(
-                    int(from_ts), int(to_ts)).call())
+                return int(_fee_contract[0].functions.feesBetween(
+                    Web3.to_checksum_address(token), int(from_ts), int(to_ts)).call())
 
-            self._federated_close_driver.burned_source = _burned_source
+            self._federated_close_driver.fees_source = _fees_source
 
             # Cheap anchorCount read: the voice refresh (every input pinned
             # to the latest anchor) reruns only when a new anchor lands.

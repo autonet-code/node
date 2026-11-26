@@ -208,22 +208,53 @@ SUBSTRATE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
-    # Household mint claim (Decision 2026-10-27; money only, 2026-07-10).
-    # ``amount`` = ATN mint, merkle-proven: the leaf is
-    # keccak256(bytes.concat(keccak256(abi.encode(claimant, amount)))) under
-    # the anchor's agentMintRoot (built by nodes/common/mint_merkle.py).
-    # Permissionless: anyone submits, the ATN goes to ``claimant`` (the
-    # household's owner wallet). REP is claimed DAO-side on earnings.
+    # Household claims (Decision 2026-10-27). The leaf is
+    # keccak256(bytes.concat(keccak256(abi.encode(CLAIM_TAG, earner, tokens,
+    # amounts)))) under the anchor's claimRoot (nodes/common/mint_merkle.py).
+    # Permissionless: anyone submits, the amounts are owed to ``earner``
+    # (the household's owner wallet) and leave by withdraw, one token at a
+    # time. Substrate records the REP value on chain.
     {
         "inputs": [
-            {"internalType": "address",   "name": "claimant",    "type": "address"},
-            {"internalType": "uint256",   "name": "amount",      "type": "uint256"},
+            {"internalType": "address",   "name": "earner",      "type": "address"},
             {"internalType": "bytes32",   "name": "epochIdHash", "type": "bytes32"},
+            {"internalType": "address[]", "name": "tokens",      "type": "address[]"},
+            {"internalType": "uint256[]", "name": "amounts",     "type": "uint256[]"},
             {"internalType": "bytes32[]", "name": "proof",       "type": "bytes32[]"},
         ],
-        "name": "claimFor",
+        "name": "claim",
         "outputs": [],
         "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "earner", "type": "address"},
+            {"internalType": "address", "name": "token",  "type": "address"},
+        ],
+        "name": "withdraw",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "", "type": "address"},
+            {"internalType": "address", "name": "", "type": "address"},
+        ],
+        "name": "owed",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "", "type": "address"},
+            {"internalType": "bytes32", "name": "", "type": "bytes32"},
+        ],
+        "name": "claimedEpoch",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "view",
         "type": "function",
     },
     # Service payments (Phase 7.2). A labeled ATN transfer taking the
@@ -1213,28 +1244,51 @@ class OnChainService:
             return {"success": False, "error": str(e)}
 
     # ------------------------------------------------------------------
-    # Household mint claim (write)
+    # Household claim (write)
     # ------------------------------------------------------------------
 
-    async def claim_for(
+    def _send_signed(self, w3: Any, account: Any, call: Any, *, gas_floor: int) -> dict[str, Any]:
+        try:
+            estimated = call.estimate_gas({"from": account.address})
+            gas_limit = max(int(estimated * 12 // 10), gas_floor)
+        except Exception:
+            gas_limit = 2_000_000
+        tx = call.build_transaction({
+            "from": account.address,
+            "nonce": next_nonce(w3, account.address),
+            "gas": gas_limit,
+            "gasPrice": w3.eth.gas_price,
+            "chainId": self.config.chain_id or w3.eth.chain_id,
+        })
+        signed = account.sign_transaction(tx)
+        raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+        tx_hash = w3.eth.send_raw_transaction(raw)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        if receipt.status == 1:
+            return {"success": True, "tx_hash": tx_hash.hex()}
+        return {"success": False, "error": "Transaction reverted", "tx_hash": tx_hash.hex()}
+
+    async def claim(
         self,
         private_key: str,
-        claimant: str,
-        amount: int,
+        earner: str,
         epoch_id_hash: str | bytes,
+        tokens: list[str],
+        amounts: list[int],
         proof: list[str | bytes],
     ) -> dict[str, Any]:
-        """Sign and submit ``claimFor(claimant, amount, epochIdHash, proof)``.
+        """Sign and submit ``claim(earner, epochIdHash, tokens, amounts,
+        proof)``, then ``withdraw(earner, token)`` for every token the
+        earner is owed.
 
-        Decision 2026-10-27: the household's owner wallet is the claimant
-        and anyone may submit; ``private_key`` only signs and pays gas.
-        ``amount`` is the federation-ratified ATN mint: the merkle leaf under
-        the anchor's agentMintRoot commits (claimant, amount), so ``proof``
-        must be built over the SAME amount (nodes/common/mint_merkle.py
-        mint_merkle_proof) or the contract reverts MintProofInvalid.
-
-        Per-(claimant, epoch) idempotent on-chain; the epoch must already be
-        anchored.
+        Decision 2026-10-27: the household's owner wallet is the earner and
+        anyone may submit; ``private_key`` only signs and pays gas. The
+        leaf under the anchor's claimRoot commits (earner, tokens,
+        amounts), tokens strictly ascending, so ``proof`` must be built
+        over the same leaf (nodes/common/mint_merkle.py claim_merkle_proof).
+        Once per (earner, epoch) on chain (``claimedEpoch``); the epoch
+        must be anchored. A token whose withdrawal fails is reported in
+        ``withdraw_errors`` and blocks none of the others.
         """
         try:
             from eth_account import Account
@@ -1242,45 +1296,36 @@ class OnChainService:
             w3 = self._get_web3()
             contract = self._get_contract(w3)
             account = Account.from_key(private_key)
-
+            who = w3.to_checksum_address(earner)
             eid = (epoch_id_hash if isinstance(epoch_id_hash, bytes)
                    else _to_bytes32(epoch_id_hash))
-            proof_bytes = [
-                (p if isinstance(p, bytes) else _to_bytes32(p)) for p in proof
-            ]
-
-            nonce = next_nonce(w3, account.address)
-            chain_id = self.config.chain_id or w3.eth.chain_id
-
-            call = contract.functions.claimFor(
-                w3.to_checksum_address(claimant), int(amount), eid, proof_bytes,
-            )
-            try:
-                estimated = call.estimate_gas({"from": account.address})
-                gas_limit = max(int(estimated * 12 // 10), 1_500_000)
-            except Exception:
-                gas_limit = 2_000_000
-
-            tx = call.build_transaction({
-                "from": account.address,
-                "nonce": nonce,
-                "gas": gas_limit,
-                "gasPrice": w3.eth.gas_price,
-                "chainId": chain_id,
-            })
-
-            signed = account.sign_transaction(tx)
-            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
-            tx_hash = w3.eth.send_raw_transaction(raw)
-            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-            if receipt.status == 1:
-                return {"success": True, "tx_hash": tx_hash.hex()}
-            return {"success": False, "error": "Transaction reverted",
-                    "tx_hash": tx_hash.hex()}
+            proof_bytes = [(p if isinstance(p, bytes) else _to_bytes32(p)) for p in proof]
+            token_list = [w3.to_checksum_address(t) for t in tokens]
+            out: dict[str, Any] = {"success": True}
+            if not contract.functions.claimedEpoch(who, eid).call():
+                out = self._send_signed(w3, account, contract.functions.claim(
+                    who, eid, token_list, [int(a) for a in amounts], proof_bytes),
+                    gas_floor=500_000)
+                if not out.get("success"):
+                    return out
+            out["withdrawn"], out["withdraw_errors"] = {}, {}
+            for t in token_list:
+                try:
+                    if int(contract.functions.owed(who, t).call()) <= 0:
+                        continue
+                    r = self._send_signed(w3, account, contract.functions.withdraw(who, t),
+                                          gas_floor=150_000)
+                    if r.get("success"):
+                        out["withdrawn"][t.lower()] = r["tx_hash"]
+                    else:
+                        out["withdraw_errors"][t.lower()] = r.get("error", "reverted")
+                except Exception as e:  # noqa: BLE001 (one token never blocks the rest)
+                    out["withdraw_errors"][t.lower()] = str(e)
+            return out
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
-            log.exception("Failed to claim the household mint on chain")
+            log.exception("Failed to claim the household's leaf on chain")
             return {"success": False, "error": str(e)}
 
     # ------------------------------------------------------------------

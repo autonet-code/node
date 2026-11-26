@@ -234,7 +234,7 @@ class TestMalware:
         assert AUTHOR not in tot
         assert tot[R1] == pytest.approx(0.5 * 0.4 * 0.5)
         # What the author side would have paid is fixed now under its own
-        # key, so the close can record it in ATN; it is never minted.
+        # key, so the close can record it per token; it is never paid.
         assert UNMINTED not in tot
         assert tot[unpaid_key(DIGEST, AUTHOR)] == pytest.approx(0.5 * 0.6)
         assert out["per_digest"][DIGEST]["malware"] is True
@@ -306,9 +306,9 @@ class TestVerdictFlow:
         assert cleared["node_agent"] == {} and cleared["per_digest"] == {}
         assert cleared["concluded"] == {}
         assert cleared["pruned"] == []
-        # The record stays for the proposal that pays it.
-        assert cleared["tool_rounds_next"]["tools"][DIGEST]["unpaid"]["amounts"] == {
-            AUTHOR: pytest.approx(0.5 * 0.6)}
+        # The record stays for the proposal that pays it (its amounts are
+        # the close's split, per token: see TestUnpaidAuthorSide).
+        assert cleared["tool_rounds_next"]["tools"][DIGEST]["unpaid"]["on"] == [DIGEST]
 
     def test_a_dao_designation_needs_no_reviews(self):
         snap = _snap({DIGEST: [_round(1, _rev(R1))]}, tools={DIGEST: tool_cells()})
@@ -411,37 +411,49 @@ class TestRatingsCarry:
             "malware": None, "axes": {}, "value": None, "mass": 0.0}
 
 
+TOKEN = "0x" + "a6" * 20       # 6 decimals, parity 1e30: value == amount
+PARITY = {TOKEN: 10 ** 30}
+
+
+def _paid(result):
+    return sum(c["tokens"].get(TOKEN, 0) for c in result["claims"].values())
+
+
+def _carry(result):
+    return result["tool_rounds"]["pool_carry"].get(TOKEN, 0)
+
+
 class TestCloseCarry:
     def test_unminted_remainder_carries_into_next_pool(self):
         kp = Keypair.generate()
         canonical = canonical_order(_batches([_registration_event(1)], kp))
         snap = _snap({DIGEST: [_round(1, _rev(R1))]}, correctness=0.0)
         out = federated_epoch_close(
-            canonical, emission_pool=10.0,
+            canonical, tool_share_window={TOKEN: 10_000_000}, parity=PARITY,
             tool_registrations=REGS, rep_shares=SHARES, review_snapshot=snap)
-        # Only the reviewer share mints: 40% of the pool; 60% carries.
-        assert sum(out["agent_mint"].values()) == pytest.approx(4.0)
-        assert out["tool_rounds"]["pool_carry"] == 6_000_000
+        # Only the reviewer share is paid: 40% of the pool; 60% carries.
+        assert abs(_paid(out) - 4_000_000) <= 1
+        assert _paid(out) + _carry(out) == 10_000_000
         nothing = federated_epoch_close(
-            canonical, emission_pool=1.0,
+            canonical, tool_share_window={TOKEN: 1_000_000}, parity=PARITY,
             tool_registrations=REGS, rep_shares=SHARES,
             review_snapshot=_snap({}), tool_rounds=out["tool_rounds"])
-        assert nothing["agent_mint"] == {}
-        assert nothing["tool_rounds"]["pool_carry"] == 7_000_000
+        assert nothing["claims"] == {}
+        assert _carry(nothing) == _carry(out) + 1_000_000
 
-    def test_tool_mint_is_in_pool_units(self):
-        """The close's per-tool mint, reviewer mint and author mint are all
-        in ATN, the units of agent_mint (the app shows them side by side)."""
+    def test_tool_mint_is_in_value_units(self):
+        """The close's per-tool mint, reviewer mint and author mint are value
+        units of the pool, the units of the claims' values."""
         kp = Keypair.generate()
         canonical = canonical_order(_batches([_registration_event(1)], kp))
         snap = _snap({DIGEST: [_round(1, _rev(R1))]})
         out = federated_epoch_close(
-            canonical, emission_pool=10.0,
+            canonical, tool_share_window={TOKEN: 10_000_000}, parity=PARITY,
             tool_registrations=REGS, rep_shares=SHARES, review_snapshot=snap)
         e = out["tool_mint"][DIGEST]
-        assert e["reviewer_mint"] == pytest.approx(4.0)
-        assert e["author_mint"] + e["reviewer_mint"] == pytest.approx(e["mint"])
-        assert e["mint"] == pytest.approx(sum(out["agent_mint"].values()), abs=1e-5)
+        assert abs(e["reviewer_mint"] - 4_000_000) <= 1
+        assert abs(e["author_mint"] + e["reviewer_mint"] - e["mint"]) <= 1
+        assert abs(e["mint"] - out["total_value"]) <= 2
 
     def test_deterministic(self):
         a = _mint({DIGEST: [_round(1, _rev(R1), _rev(R2))]})
@@ -450,49 +462,61 @@ class TestCloseCarry:
 
 
 class TestUnpaidAuthorSide:
-    """The author side a malware verdict leaves unpaid is fixed in ATN at the
-    conclusion, recorded, and left unminted: it carries over, and nothing is
-    reserved (Decision 2026-11-10)."""
+    """The author side a malware verdict leaves unpaid is fixed per token at
+    the conclusion, recorded with its value, and left unpaid: it carries
+    over, and nothing is reserved (Decision 2026-11-10)."""
 
-    def _conclude(self, pool=10.0):
+    DAI = "0x" + "1b" * 20       # 18 decimals, parity 1e18
+
+    def _conclude(self):
         kp = Keypair.generate()
         canonical = canonical_order(_batches([_registration_event(1)], kp))
         snap = _snap({DIGEST: [_round(1, _rev(R1), _rev(R2))]}, malware=0.6)
         return canonical, federated_epoch_close(
-            canonical, emission_pool=pool, tool_registrations=REGS,
+            canonical, tool_share_window={TOKEN: 10_000_000, self.DAI: 10 * 10 ** 18},
+            parity={**PARITY, self.DAI: 10 ** 18}, tool_registrations=REGS,
             rep_shares=SHARES, review_snapshot=snap)
 
-    def _next(self, canonical, first, dao, pool=3.0):
+    def _next(self, canonical, first, dao):
         snap = _snap({}, tools={DIGEST: tool_cells(malware=0.6)})
         snap["verdicts"] = {DIGEST: {"concluded": True, "dao": dao}}
         return federated_epoch_close(
-            canonical, emission_pool=pool, tool_registrations=REGS,
-            rep_shares=SHARES, review_snapshot=snap,
+            canonical, tool_share_window={TOKEN: 3_000_000}, parity=PARITY,
+            tool_registrations=REGS, rep_shares=SHARES, review_snapshot=snap,
             tool_rounds=first["tool_rounds"])
 
-    def test_fixed_in_atn_recorded_and_carried(self):
+    def test_fixed_per_token_recorded_and_carried(self):
         _, first = self._conclude()
-        # One tool takes the whole 10 ATN pool: 4 to its reviewers; the
-        # author side, 6 x score 1, is recorded and carried over.
-        assert first["malware_unpaid"] == {DIGEST: {"amounts": {AUTHOR: 6.0}, "on": [DIGEST]}}
-        assert first["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == {AUTHOR: 6.0}
-        assert sum(first["agent_mint"].values()) == pytest.approx(4.0)
-        assert first["tool_rounds"]["pool_carry"] == 6_000_000
-        assert first["tool_mint"][DIGEST]["unpaid"] == pytest.approx(6.0)
+        # One tool takes the whole pool: 40% to its reviewers; the author
+        # side, 60% x score 1, is recorded per token and carried over.
+        rec = first["malware_unpaid"][DIGEST]
+        assert rec["on"] == [DIGEST] and list(rec["amounts"]) == [AUTHOR]
+        part = rec["amounts"][AUTHOR]
+        assert abs(part["tokens"][TOKEN] - 6_000_000) <= 1
+        assert abs(part["tokens"][self.DAI] - 6 * 10 ** 18) <= 10 ** 7
+        assert part["value"] == part["tokens"][TOKEN] + part["tokens"][self.DAI] // 10 ** 12
+        assert first["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == rec["amounts"]
+        assert AUTHOR not in first["claims"]
+        for t, pool in ((TOKEN, 10_000_000), (self.DAI, 10 * 10 ** 18)):
+            paid = sum(c["tokens"].get(t, 0) for c in first["claims"].values())
+            assert paid + first["tool_rounds"]["pool_carry"][t] == pool
+            assert first["tool_rounds"]["pool_carry"][t] >= part["tokens"][t]
+        assert first["tool_mint"][DIGEST]["unpaid"] == part["value"]
         assert first["pruned"] == [DIGEST]
 
     def test_a_later_close_spends_the_carry(self):
         canonical, first = self._conclude()
         later = self._next(canonical, first, None)
-        assert later["agent_mint"] == {} and later["malware_unpaid"] == {}
-        assert later["tool_rounds"]["pool_carry"] == 9_000_000
+        assert later["claims"] == {} and later["malware_unpaid"] == {}
+        assert _carry(later) == _carry(first) + 3_000_000
 
-    def test_a_clearing_mints_nothing_and_keeps_the_record(self):
+    def test_a_clearing_pays_nothing_and_keeps_the_record(self):
         canonical, first = self._conclude()
         cleared = self._next(canonical, first, False)
-        assert cleared["agent_mint"] == {}
-        assert cleared["tool_rounds"]["pool_carry"] == 9_000_000
-        assert cleared["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == {AUTHOR: 6.0}
+        assert cleared["claims"] == {}
+        assert _carry(cleared) == _carry(first) + 3_000_000
+        assert cleared["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == \
+            first["malware_unpaid"][DIGEST]["amounts"]
         assert cleared["pruned"] == []
 
     def test_the_carry_bundle_holds_the_record_and_the_pruned_list(self):
@@ -506,16 +530,16 @@ class TestUnpaidAuthorSide:
                                     "service_ratings": first["service_ratings"]},
                                    epoch_id="e1")
         carry = decode_carry_bundle(blob)["carry"]
-        assert carry["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == {AUTHOR: 6.0}
+        assert carry["tool_rounds"]["tools"][DIGEST]["unpaid"]["amounts"] == \
+            first["malware_unpaid"][DIGEST]["amounts"]
         assert carry["tool_rounds"]["pruned"] == [DIGEST]
+        assert carry["tool_rounds"]["pool_carry"] == first["tool_rounds"]["pool_carry"]
 
     def test_conservation_across_closes(self):
         canonical, first = self._conclude()
         for dao in (None, False, True):
             nxt = self._next(canonical, first, dao)
-            minted = sum(round(v * 1_000_000) for d in (first, nxt)
-                         for v in d["agent_mint"].values())
-            assert minted + nxt["tool_rounds"]["pool_carry"] == 13_000_000
+            assert _paid(first) + _paid(nxt) + _carry(nxt) == 13_000_000
 
 
 class TestSanctionedReviewer:

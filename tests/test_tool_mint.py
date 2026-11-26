@@ -123,8 +123,16 @@ def _standard_batches() -> List[EventBatch]:
     return _batches([_registration_event(1)], Keypair.generate())
 
 
+TOKEN = "0x" + "a6" * 20       # 6 decimals, parity 1e30: value == amount
+
+
+def _val(result, who):
+    return int((result["claims"].get(who) or {}).get("value") or 0)
+
+
 def _close(batches, **kw):
-    kw.setdefault("emission_pool", 10.0)
+    kw.setdefault("tool_share_window", {TOKEN: 10 * 10 ** 6})
+    kw.setdefault("parity", {TOKEN: 10 ** 30})
     kw.setdefault("rep_shares", SHARES)
     kw.setdefault("review_snapshot", _snap())
     return federated_epoch_close(canonical_order(batches), **kw)
@@ -135,13 +143,13 @@ class TestToolMintClose:
         result = _close(_standard_batches())
         assert result["tool_registrations"][DIGEST]["author"] == AUTHOR
         assert result["tool_mint"][DIGEST]["author"] == AUTHOR
-        assert result["agent_mint"].get(AUTHOR, 0) > 0
-        assert result["agent_mint"].get(R1, 0) > 0
+        assert _val(result, AUTHOR) > 0
+        assert _val(result, R1) > 0
 
     def test_double_close_bit_identical(self):
         batches = _standard_batches()
         r1, r2 = _close(list(batches)), _close(list(batches))
-        for key in ("agent_mint", "tool_mint", "tool_registrations",
+        for key in ("claims", "tool_mint", "tool_registrations",
                     "tool_rounds", "authoritative_payload"):
             assert json.dumps(r1[key]) == json.dumps(r2[key]), key
 
@@ -157,7 +165,7 @@ class TestToolMintClose:
             rng.shuffle(delivery)
             results.append(_close(delivery))
         assert results[0]["tool_mint"] == results[1]["tool_mint"] == results[2]["tool_mint"]
-        assert results[0]["agent_mint"] == results[1]["agent_mint"] == results[2]["agent_mint"]
+        assert results[0]["claims"] == results[1]["claims"] == results[2]["claims"]
 
     def test_attested_registration_carries_and_mints_nothing(self):
         batches = _batches([_registration_event(1, trust_class="attested")],
@@ -168,15 +176,15 @@ class TestToolMintClose:
 
     def test_mint_is_keyed_by_owner_wallet(self):
         """Decision 2026-10-27: the owner wallet claims. The anchored
-        agent_mint names the author's lowercase owner, not the agent."""
+        claims name the author's lowercase owner, not the agent."""
         owner_map = {AUTHOR: "0xOwnerA", R1: "0xOwnerB", R2: "0xOwnerC"}
         # REP is read by household (owner wallet), so the shares are keyed by owner.
         result = _close(_standard_batches(), agent_owner_map=owner_map,
                         rep_shares={"0xownerb": 0.3, "0xownerc": 0.2})
-        assert "0xownera" in result["agent_mint"]
-        assert AUTHOR not in result["agent_mint"]
-        assert result["agent_mint_by_agent"][AUTHOR] == result["agent_mint"]["0xownera"]
-        assert result["authoritative_payload"]["agent_mint"] == result["agent_mint"]
+        assert "0xownera" in result["claims"]
+        assert AUTHOR not in result["claims"]
+        assert result["claims_by_agent"][AUTHOR] == result["claims"]["0xownera"]["tokens"]
+        assert result["authoritative_payload"]["claims"] == result["claims"]
 
     def test_no_tool_events_null_case(self):
         kp = Keypair.generate()
@@ -306,19 +314,19 @@ class TestDriverCarryOver:
 
 
 class TestFeesOnlyPool:
-    """The emission pool is FEES-ONLY. A zero pool yields zero mint cleanly;
-    a pool is conserved: minted plus carried-over equals the pool."""
+    """The pools are FEES-ONLY. An empty window pays nothing cleanly; a pool
+    is conserved: paid plus carried-over equals the pool, exactly."""
 
     def test_zero_fee_epoch_zero_mint_clean(self):
-        result = _close(_standard_batches(), emission_pool=0.0)
-        assert result["agent_mint"] == {}
-        assert result["total_mint"] == pytest.approx(0.0)
+        result = _close(_standard_batches(), tool_share_window={})
+        assert result["claims"] == {}
+        assert result["total_value"] == 0
 
     def test_pool_conserved_exactly(self):
-        pool = 12.5
-        result = _close(_standard_batches(), emission_pool=pool)
-        minted = sum(result["agent_mint"].values())
-        carried = result["tool_rounds"]["pool_carry"] / 1e6
-        assert minted > 0
-        assert minted + carried == pytest.approx(pool, rel=1e-9)
-        assert result["total_mint"] == pytest.approx(minted, rel=1e-9)
+        pool = 12_500_001
+        result = _close(_standard_batches(), tool_share_window={TOKEN: pool})
+        paid = sum(c["tokens"].get(TOKEN, 0) for c in result["claims"].values())
+        carried = result["tool_rounds"]["pool_carry"].get(TOKEN, 0)
+        assert paid > 0
+        assert paid + carried == pool
+        assert result["total_value"] == paid

@@ -162,7 +162,7 @@ def test_two_daemons_agree_and_anchor(stack):
     sub = stack["substrate"]
     assert sub.functions.anchorCount().call() == 1
     anchored = sub.functions.getAnchor(0).call()
-    assert anchored[0] == option[0] and anchored[13] == option[7]
+    assert anchored[0] == option[0] and anchored[10] == option[7]
     # Agreeing daemons registered one option between them.
     pid = ea_a.proposal_id(e_a)
     assert stack["election"].functions.optionCount(pid).call() == 2   # reject + one
@@ -182,7 +182,7 @@ def test_split_vote_resolves_to_one_anchor(stack):
     winner = min(e_a.option_hash, e_b.option_hash)
     got = bytes(stack["election"].functions.optionHashOf(
         tuple(sub.functions.getAnchor(0).call()[i] for i in
-              (0, 1, 2, 3, 4, 5, 9, 13))).call())
+              (0, 1, 2, 3, 4, 5, 9, 10))).call())
     assert got == winner
 
 

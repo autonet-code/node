@@ -18,8 +18,8 @@ zero-reputation identity can carry and lets a cold-start network
 REP SOURCE = RepToken (DAO), Decision 2026-07-10. Substrate.sol is now a
 PURE MONEY contract — its reputation surface (``reputationOfAt`` /
 ``reputationTotalSupplyAt`` / ``agentReputation``) is DELETED. Reputation
-lives DAO-side in RepToken, claimed by agents on their ratified ATN
-earnings. We read each household's REP share from RepToken pinned to the
+lives DAO-side in RepToken, claimed on the REP value of the households'
+ratified claims. We read each household's REP share from RepToken pinned to the
 previous epoch's anchor. RepToken is TIMESTAMP-clocked (ERC20Votes,
 ``mode=timestamp``), so we pin on the anchor's ``timestamp`` (Anchor
 struct field 8), not its block number, using RepToken's balance
@@ -45,11 +45,15 @@ checkpoints serve historical reads from current state; the agent set +
 owner map derive from ``AgentRegistered`` / ``OwnerBound`` event logs up
 to the snapshot block (last binding per agent wins).
 
-The emission pool is FEES-ONLY (Decision 2026-07-10): the burned
-ServiceFee shares in the snapshot anchor's window, no base floor. Since
-2026-10-12 it is read from the anchor struct's ``windowBurned`` (the exact
-quantity Substrate caps the next epoch's mints at), not summed from logs. Zero
-service volume => zero pool => zero mint. It is MONEY, ATN-denominated.
+The pools are FEES-ONLY: one per token of the value index, filled by the
+tool share of each service fee. The window the close allocates is, per
+token, ``Substrate.toolShareBetween(token, prev, cutoff)`` between the two
+cutoffs before the snapshot (lag one: Substrate caps a token's claims at
+its tool share up to the cutoff before the latest anchor, so the close and
+the cap cannot disagree). Zero service volume => empty pools => nothing
+paid. The value index (``jurisdiction.parity.<token>`` in the DAO
+Registry) is read pinned to the same block: it values the claims for REP
+and the fees that end an epoch.
 
 No prior anchor = no agreed snapshot: the refresh returns empty maps and
 the close runs with weights=None (the uniform pre-voice behavior) —
@@ -92,17 +96,27 @@ _REP_ABI = [
 
 _VOICE_ABI = [
     {
-        "inputs": [{"internalType": "uint256", "name": "blockNumber", "type": "uint256"}],
-        "name": "atnTotalSupplyAt",
+        "inputs": [{"internalType": "address", "name": "token", "type": "address"},
+                   {"internalType": "uint256", "name": "fromTs", "type": "uint256"},
+                   {"internalType": "uint256", "name": "toTs", "type": "uint256"}],
+        "name": "toolShareBetween",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
     },
     {
-        "inputs": [{"internalType": "uint256", "name": "fromTs", "type": "uint256"},
+        "inputs": [{"internalType": "address", "name": "token", "type": "address"},
+                   {"internalType": "uint256", "name": "fromTs", "type": "uint256"},
                    {"internalType": "uint256", "name": "toTs", "type": "uint256"}],
-        "name": "burnedBetween",
+        "name": "feesBetween",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "poolTokens",
+        "outputs": [{"internalType": "address[]", "name": "", "type": "address[]"}],
         "stateMutability": "view",
         "type": "function",
     },
@@ -129,15 +143,12 @@ _VOICE_ABI = [
                 {"internalType": "bytes32", "name": "epochRoot",     "type": "bytes32"},
                 {"internalType": "bytes32", "name": "prevEpochRoot", "type": "bytes32"},
                 {"internalType": "bytes32", "name": "prevAnchorHash","type": "bytes32"},
-                {"internalType": "string",  "name": "agentMintCid",  "type": "string"},
+                {"internalType": "string",  "name": "claimCid",      "type": "string"},
                 {"internalType": "bytes32", "name": "payloadHash",   "type": "bytes32"},
                 {"internalType": "address", "name": "submitter",     "type": "address"},
                 {"internalType": "uint256", "name": "blockNumber",   "type": "uint256"},
                 {"internalType": "uint256", "name": "timestamp",     "type": "uint256"},
-                {"internalType": "bytes32", "name": "agentMintRoot", "type": "bytes32"},
-                {"internalType": "uint256", "name": "windowBurned",  "type": "uint256"},
-                {"internalType": "uint256", "name": "mintPool",      "type": "uint256"},
-                {"internalType": "uint256", "name": "minted",        "type": "uint256"},
+                {"internalType": "bytes32", "name": "claimRoot",     "type": "bytes32"},
                 {"internalType": "uint256", "name": "cutoff",        "type": "uint256"},
             ],
             "internalType": "struct Substrate.Anchor",
@@ -178,23 +189,20 @@ _VOICE_ABI = [
         "name": "OwnerBound",
         "type": "event",
     },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True,  "internalType": "address", "name": "payer",      "type": "address"},
-            {"indexed": True,  "internalType": "address", "name": "recipient",  "type": "address"},
-            {"indexed": False, "internalType": "uint256", "name": "amount",     "type": "uint256"},
-            {"indexed": False, "internalType": "uint256", "name": "burned",     "type": "uint256"},
-            {"indexed": False, "internalType": "uint256", "name": "toTreasury", "type": "uint256"},
-        ],
-        "name": "ServiceFee",
-        "type": "event",
-    },
 ]
 
-# Chain amounts are ATN x 1e6 (the agent-side submitter scaling);
-# emission pools are float ATN units on the close side.
-_ATN_SCALE = 1_000_000.0
+# Anchor struct indices (Substrate.Anchor, getAnchor's tuple).
+ANCHOR_EPOCH_ID = 0
+ANCHOR_EPOCH_ROOT = 1
+ANCHOR_CLAIM_CID = 4
+ANCHOR_BLOCK = 7
+ANCHOR_TIMESTAMP = 8
+ANCHOR_CLAIM_ROOT = 9
+ANCHOR_CUTOFF = 10
+
+# The value index: Registry ``jurisdiction.parity.<token>`` (0x and 40
+# lowercase hex digits), a decimal string; 0 or unset = out of the index.
+PARITY_KEY_PREFIX = "jurisdiction.parity."
 
 _ZERO = "0x0000000000000000000000000000000000000000"
 
@@ -635,8 +643,12 @@ _SERVICE_EVENTS_ABI = {
         ("specDigest", "bytes32", True), ("askAmount", "uint256", False)])],
     "substrate": [_ev("ServicePayment", [
         ("payer", "address", True), ("recipient", "address", True),
-        ("amount", "uint256", False), ("requestId", "bytes32", True)])],
+        ("token", "address", True), ("amount", "uint256", False),
+        ("requestId", "bytes32", False)])],
     "channel": [
+        _ev("ChannelOpened", [("channelId", "uint256", True), ("client", "address", True),
+                              ("provider", "address", True), ("token", "address", False),
+                              ("deposit", "uint256", False)]),
         _ev("ChannelPaid", [("channelId", "uint256", True), ("client", "address", True),
                             ("provider", "address", True), ("amount", "uint256", False),
                             ("paidTotal", "uint256", False)])],
@@ -656,7 +668,8 @@ def read_service_snapshot(
     jurisdiction_id: str = "autonet", start_block: Optional[int] = None,
 ) -> Dict[str, Any]:
     """The service snapshot as of ``block`` (``service_reviews.
-    snapshot_from_logs``). A contract left unset contributes nothing, so its
+    snapshot_from_logs``), with the payments valued at the parity pinned in
+    ``registry_writes``. A contract left unset contributes nothing, so its
     reviews never count. Raises on RPC failure, like the rest of the voice
     read."""
     from web3 import Web3
@@ -677,9 +690,10 @@ def read_service_snapshot(
         registered=logs(service_registry_address, "registry", "ServiceRegistered"),
         payments=(logs(substrate_address, "substrate", "ServicePayment")
                   if service_registry_address else []),
+        channels=logs(payment_channel_address, "channel", "ChannelOpened"),
         payouts=logs(payment_channel_address, "channel", "ChannelPaid"),
         unscored_bps=writes.get(UNSCORED_AXIS_KEY.format(jurisdiction=jurisdiction_id)),
-        channel_address=payment_channel_address)
+        parity=parity_from_writes(writes))
 
 
 def tool_round_reviews_from_logs(
@@ -970,6 +984,23 @@ def _last_writes(records: List[Dict[str, Any]], block: int) -> Dict[str, str]:
     return last
 
 
+def parity_from_writes(writes: Dict[str, str]) -> Dict[str, int]:
+    """The value index in a Registry's last writes: {token (lowercase 0x):
+    parity} for every non-zero ``jurisdiction.parity.<token>``, sorted. A
+    malformed value counts as 0 (out of the index)."""
+    out: Dict[str, int] = {}
+    for key, value in writes.items():
+        if not str(key).startswith(PARITY_KEY_PREFIX):
+            continue
+        token = str(key)[len(PARITY_KEY_PREFIX):].strip().lower()
+        text = str(value or "").strip()
+        if len(token) != 42 or not token.startswith("0x") or not text.isdigit():
+            continue
+        if int(text) > 0:
+            out[token] = int(text)
+    return dict(sorted(out.items()))
+
+
 def _json_list(text: str, field: str) -> List[str]:
     text = (text or "").strip()
     if not text:
@@ -1031,10 +1062,11 @@ def robot_policy(
 # epochId), not from local state.
 #
 # An epoch ends on VOLUME (Decision 2026-10-27): at the first moment after
-# the previous cutoff when the fees burned since it reach
-# ``epoch_target_share`` of the ATN supply (pinned at the last anchor),
-# read from Substrate's on-chain burn checkpoints (``burnedBetween``), so
-# every daemon finds the same moment. Bounded below by one DAO proposal
+# the previous cutoff when the fees collected since it, each token valued at
+# the parity pinned at the last anchor and added, reach
+# ``epoch_target_value`` (6-decimal value units), read from Substrate's
+# on-chain fee checkpoints (``feesBetween``), so every daemon finds the same
+# moment. Bounded below by one DAO proposal
 # lifecycle (voting delay + voting period + timelock delay: an epoch cannot
 # be anchored faster) and above by ``epoch_ceiling_votes`` voting periods,
 # so a quiet network still pays out. Integer arithmetic. (This replaced a
@@ -1042,10 +1074,10 @@ def robot_policy(
 # ---------------------------------------------------------------------------
 
 EPOCH_RULE_DEFAULTS: Dict[str, int] = {
-    # Share of the ATN supply one epoch should burn in fees, in parts per
-    # million: the volume that ends an epoch. 0 = unset (set by the DAO at
-    # deployment): every epoch lasts the floor.
-    "epoch_target_share": 0,
+    # Value of the fees (6-decimal value units, at the pinned index) one
+    # epoch should collect: the volume that ends an epoch. 0 = unset (set by
+    # the DAO): every epoch lasts the floor.
+    "epoch_target_value": 0,
     # Retired with the retarget (volume ends an epoch now); still read so
     # an old Registry key is harmless.
     "epoch_retarget_window": 4,
@@ -1061,7 +1093,6 @@ EPOCH_RULE_DEFAULTS: Dict[str, int] = {
 }
 
 EPOCH_ID_PREFIX = "epoch"
-SHARE_SCALE = 1_000_000
 
 _GOVERNOR_EVENTS_ABI = list((
         {"anonymous": False, "type": "event", "name": "VotingDelaySet",
@@ -1168,36 +1199,49 @@ def governor_lifecycle(
     return out
 
 
+def fees_value_between(
+    fees_between: Callable[[str, int, int], int], parity: Dict[str, int],
+    from_ts: int, to_ts: int,
+) -> int:
+    """The value of the fees collected after ``from_ts``, at or before
+    ``to_ts``: each token of the index (``parity``, pinned) read from
+    Substrate's fee checkpoints (``fees_between(token, from, to)``), valued
+    on its own and added. Monotonic in ``to_ts`` while the parity is fixed."""
+    from .federated_reconcile import value_of
+    return sum(value_of(int(fees_between(t, int(from_ts), int(to_ts))), parity[t])
+               for t in sorted(parity) if int(parity[t]) > 0)
+
+
 def volume_cutoff(
-    burned_between: Callable[[int, int], int], *, start: int, floor: int,
-    ceiling: int, target_share_ppm: int, supply: int, final_ts: int,
+    value_between: Callable[[int, int], int], *, start: int, floor: int,
+    ceiling: int, target_value: int, final_ts: int,
 ) -> Optional[int]:
     """The cutoff of the epoch that began at ``start``, or None while it is
     still open.
 
     It is the first second t in [start + floor, start + ceiling] at which
-    ``burned_between(start, t)`` (Substrate's on-chain burn checkpoints)
-    reaches ``target_share_ppm`` of ``supply``. Only time at or before
-    ``final_ts`` is read, so every daemon sees the same, final burns and
-    lands on the same second. Unset target (or no supply) => start + floor.
-    A quiet network still closes at start + ceiling."""
+    ``value_between(start, t)`` (the fees collected, valued at the pinned
+    index: ``fees_value_between``) reaches ``target_value``. Only time at or
+    before ``final_ts`` is read, so every daemon sees the same, final fees
+    and lands on the same second. Unset target => start + floor. A quiet
+    network still closes at start + ceiling."""
     floor = max(0, int(floor))
     ceiling = max(floor, int(ceiling))
     lo, hi_cap = int(start) + floor, int(start) + ceiling
-    threshold = (int(target_share_ppm) * int(supply)) // SHARE_SCALE
-    if target_share_ppm <= 0 or threshold <= 0:
+    threshold = int(target_value)
+    if threshold <= 0:
         return lo if final_ts >= lo else None
     hi = min(int(final_ts), hi_cap)
     if hi < lo:
         return None
-    if int(burned_between(int(start), hi)) < threshold:
+    if int(value_between(int(start), hi)) < threshold:
         return hi_cap if final_ts >= hi_cap else None
-    if int(burned_between(int(start), lo)) >= threshold:
+    if int(value_between(int(start), lo)) >= threshold:
         return lo
-    # burned(lo) < threshold <= burned(hi): smallest t with burned(t) >= it.
+    # value(lo) < threshold <= value(hi): smallest t with value(t) >= it.
     while hi - lo > 1:
         mid = (lo + hi) // 2
-        if int(burned_between(int(start), mid)) >= threshold:
+        if int(value_between(int(start), mid)) >= threshold:
             hi = mid
         else:
             lo = mid
@@ -1209,24 +1253,23 @@ def epoch_window(contract: Any, *, number: int, prev_root: str,
                  records: List[Dict[str, Any]],
                  jurisdiction_id: str = "autonet",
                  lifecycle: Optional[Dict[str, int]] = None,
-                 history: Optional[List[Tuple[int, int]]] = None,
-                 supply: int = 0) -> Dict[str, Any]:
+                 history: Optional[List[Tuple[int, int]]] = None) -> Dict[str, Any]:
     """The window of epoch ``number``.
 
     ``prev_root`` is the hex root of epoch number-1 and ``start`` its
     cutoff (None for epoch 1, which counts from ``Substrate.deployedAt``);
     ``params_block`` the block the governed rules are read at (None = the
     defaults); ``records`` the DAO Registry writes; ``lifecycle`` the
-    governor settings (``governor_lifecycle``); ``history`` the earlier
-    epochs as (cutoff, fees burned in that epoch's window), oldest first,
-    ending with epoch number-1; ``supply`` the ATN supply at the pin.
+    governor settings (``governor_lifecycle``); ``history`` is not used.
     Returns {number, prev_root, start, base, length, floor, ceiling, grace,
-    skew, target_share, supply}: with a target share set the epoch ends on
-    volume (``volume_cutoff``), ``length`` being its floor; ``history`` is
-    no longer used."""
+    skew, target_value, parity}: with a target value set the epoch ends on
+    volume (``volume_cutoff`` over ``fees_value_between`` at ``parity``,
+    the index as of ``params_block``), ``length`` being its floor."""
     deployed_at = int(contract.functions.deployedAt().call())
     lc = lifecycle or {}
     params = epoch_rule_params(records, params_block, jurisdiction_id)
+    parity = (parity_from_writes(_last_writes(records, int(params_block)))
+              if params_block is not None else {})
     base = deployed_at if start is None else int(start)
     floor = (int(lc.get("voting_delay", 0)) + int(lc.get("voting_period", 0))
              + int(lc.get("min_delay", 0)))
@@ -1241,18 +1284,18 @@ def epoch_window(contract: Any, *, number: int, prev_root: str,
         "ceiling": max(floor, ceiling),
         "grace": params["epoch_grace"],
         "skew": params["epoch_skew"],
-        "target_share": int(params["epoch_target_share"]),
-        "supply": int(supply),
+        "target_value": int(params["epoch_target_value"]),
+        "parity": parity,
     }
 
 
 def _anchor_cutoff(anchor: Any) -> int:
     """An anchor's cutoff: its own field, else the one its id carries,
-    else (an anchor from before cutoffs) its timestamp."""
-    if len(anchor) > 13 and int(anchor[13]) > 0:
-        return int(anchor[13])
-    c = epoch_id_cutoff(str(anchor[0]))
-    return int(anchor[8]) if c is None else c
+    else its timestamp."""
+    if len(anchor) > ANCHOR_CUTOFF and int(anchor[ANCHOR_CUTOFF]) > 0:
+        return int(anchor[ANCHOR_CUTOFF])
+    c = epoch_id_cutoff(str(anchor[ANCHOR_EPOCH_ID]))
+    return int(anchor[ANCHOR_TIMESTAMP]) if c is None else c
 
 
 def read_recent_anchors(substrate_address: str, rpc_url: str, last_n: int = 20,
@@ -1260,9 +1303,8 @@ def read_recent_anchors(substrate_address: str, rpc_url: str, last_n: int = 20,
     """The jurisdiction's anchored epochs: {"anchor_count": N, "anchors":
     [...]} with the last ``last_n`` anchors, oldest first. Each anchor is
     {number, epoch_id, epoch_root, cutoff, closed_at (= cutoff),
-    anchored_at (block time), block_number, submitter, window_burned,
-    mint_pool, minted} (amounts as wei strings). Raises when the chain is
-    unreadable."""
+    anchored_at (block time), block_number, submitter, claim_root}. Raises
+    when the chain is unreadable."""
     from web3 import Web3
     w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": timeout}))
     c = w3.eth.contract(address=Web3.to_checksum_address(substrate_address),
@@ -1281,9 +1323,7 @@ def read_recent_anchors(substrate_address: str, rpc_url: str, last_n: int = 20,
             "anchored_at": int(a[8]),
             "block_number": int(a[7]),
             "submitter": str(a[6]),
-            "window_burned": str(int(a[10])) if len(a) > 10 else "0",
-            "mint_pool": str(int(a[11])) if len(a) > 11 else "0",
-            "minted": str(int(a[12])) if len(a) > 12 else "0",
+            "claim_root": "0x" + bytes(a[ANCHOR_CLAIM_ROOT]).hex(),
         })
     return {"anchor_count": n, "anchors": anchors}
 
@@ -1298,8 +1338,7 @@ def _window_after(w3: Any, contract: Any, anchor_count: int, anchor: Any,
         contract, number=anchor_count + 1, prev_root=bytes(anchor[1]).hex(),
         start=_anchor_cutoff(anchor), params_block=block, records=records,
         jurisdiction_id=jurisdiction_id,
-        lifecycle=governor_lifecycle(w3, governor_address, block, start_block),
-        supply=int(contract.functions.atnTotalSupplyAt(block).call()))
+        lifecycle=governor_lifecycle(w3, governor_address, block, start_block))
 
 
 def _window_pinned(w3: Any, contract: Any, pin: Dict[str, Any], block: int,
@@ -1313,8 +1352,7 @@ def _window_pinned(w3: Any, contract: Any, pin: Dict[str, Any], block: int,
         contract, number=int(pin["number"]), prev_root=str(pin["prev_root"]),
         start=cutoffs[-1], params_block=block, records=records,
         jurisdiction_id=jurisdiction_id,
-        lifecycle=governor_lifecycle(w3, governor_address, block, start_block),
-        supply=int(contract.functions.atnTotalSupplyAt(block).call()))
+        lifecycle=governor_lifecycle(w3, governor_address, block, start_block))
 
 
 _BLOCK_AT_CACHE: Dict[Any, int] = {}
@@ -1397,6 +1435,22 @@ def sanctioned_households(
     return sorted(out)
 
 
+def read_tool_share_window(contract: Any, from_ts: int, to_ts: int) -> Dict[str, int]:
+    """{token (lowercase): tool share collected after ``from_ts``, at or
+    before ``to_ts``} for each of Substrate's pool tokens (read at the
+    latest block: a token listed later has nothing in a past window), the
+    zeros dropped, sorted."""
+    from web3 import Web3
+
+    out: Dict[str, int] = {}
+    for token in sorted({str(t).lower() for t in contract.functions.poolTokens().call()}):
+        amount = int(contract.functions.toolShareBetween(
+            Web3.to_checksum_address(token), int(from_ts), int(to_ts)).call())
+        if amount > 0:
+            out[token] = amount
+    return out
+
+
 def read_voice_state(
     substrate_address: str,
     rpc_url: str = "",
@@ -1415,7 +1469,7 @@ def read_voice_state(
     payment_channel_address: str = "",
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, rep_shares, rep_supply, supply,
-    snapshot_block, emission_pool, recycled, weight_source,
+    snapshot_block, tool_share_window, parity, weight_source,
     review_snapshot, service_snapshot} as of the previous epoch's anchor.
 
     ``service_snapshot`` (service reviews, Decision 2026-11-10): the
@@ -1435,9 +1489,13 @@ def read_voice_state(
     snapshot block (``read_pinned_charter_text``). None when
     ``dao_registry_address`` is unset, at genesis, or never written.
 
-    ``emission_pool`` (Decision 2026-07-10, fees-only) = the burned fee
-    shares (ServiceFee logs) in the snapshot anchor's window — NO base
-    floor. Zero service volume => zero pool. MONEY, ATN-denominated.
+    ``tool_share_window`` = {token: the tool share collected in it between
+    the cutoff of the anchor before the snapshot (0 for the first anchor)
+    and the snapshot anchor's cutoff}, for each of Substrate's pool tokens
+    with a non-zero window (lowercase, sorted); the close adds the carry.
+    ``parity`` = the value index as of the snapshot block (Registry
+    ``jurisdiction.parity.<token>``, non-zero entries only), empty without
+    ``dao_registry_address``.
 
     Voice weights are REPUTATION-based, read from RepToken (DAO) pinned to
     the anchor TIMESTAMP (RepToken is ERC20Votes, mode=timestamp — see
@@ -1461,9 +1519,8 @@ def read_voice_state(
     lands. ``pin["cutoffs"]`` are the cutoffs of epochs 1..number-1 (the
     agreed ones plus this daemon's own view of any unanchored ones) and
     ``pin["prev_root"]`` the root of epoch number-1. REP is read at that
-    cutoff, logs up to the last block at or before it, and the pool is the
-    fees burned between the two cutoffs before it (lag-1, the window the
-    chain records as that epoch's windowBurned).
+    cutoff, logs up to the last block at or before it, and the window is the
+    tool share collected between the two cutoffs before it (lag one).
     """
     start = int(deploy_block) if deploy_block else None
     from web3 import Web3
@@ -1498,9 +1555,8 @@ def read_voice_state(
             "rep_supply": 0,
             "supply": 0,
             "snapshot_block": None,
-            "emission_pool": 0.0,
-            "recycled": 0.0,
-            "emission_pool_raw": 0,
+            "tool_share_window": {},
+            "parity": {},
             "snapshot_anchor_count": 0,
             "weight_source": "reputation",
             "review_snapshot": {
@@ -1530,20 +1586,19 @@ def read_voice_state(
                 deployed_at if number == 2 else None)
         if prev is None:
             raise ValueError("pin needs the two latest cutoffs past epoch 2")
-        # The pool this epoch may mint: what the chain records as epoch
-        # number-1's windowBurned (fees between its two cutoffs).
-        burned_raw = int(contract.functions.burnedBetween(prev, timestamp).call())
+        window_from, window_to = int(prev), int(timestamp)
     else:
         anchor = contract.functions.getAnchor(anchor_count - 1).call()
-        block = int(anchor[7])       # Anchor.blockNumber (struct field 7)
-        timestamp = int(anchor[8])   # Anchor.timestamp (struct field 8)
-        # Fees-only emission, read from the SAME on-chain quantity
-        # Substrate caps mints with (2026-10-12): the snapshot anchor's
-        # windowBurned. Substrate sets the next anchor's mintPool to
-        # exactly this value, so the close's pool and the on-chain cap
-        # cannot disagree.
-        burned_raw = int(anchor[10]) if len(anchor) > 10 else 0
-    recycled = burned_raw / _ATN_SCALE
+        block = int(anchor[ANCHOR_BLOCK])
+        timestamp = int(anchor[ANCHOR_TIMESTAMP])
+        # The window: the tool share between the cutoff of the anchor
+        # before the snapshot (0 for the first) and the snapshot's cutoff.
+        # When the next anchor lands, Substrate's poolCutoff becomes this
+        # cutoff, so the close's pool and the on-chain cap cannot disagree.
+        window_to = _anchor_cutoff(anchor)
+        window_from = (_anchor_cutoff(contract.functions.getAnchor(anchor_count - 2).call())
+                       if anchor_count >= 2 else 0)
+    tool_share_window = read_tool_share_window(contract, window_from, window_to)
 
     # Agent set + owner map from event logs up to the snapshot block —
     # deterministic (chain history) and served by non-archive nodes.
@@ -1603,7 +1658,7 @@ def read_voice_state(
         rep = w3.eth.contract(
             address=Web3.to_checksum_address(rep_token_address), abi=_REP_ABI,
         )
-        # Denominator is REPUTATION total supply (voice), not ATN.
+        # Denominator is the REPUTATION total supply.
         supply = int(rep.functions.getPastTotalSupply(timestamp).call())
 
         def _reputation_at(addr: str) -> int:
@@ -1655,6 +1710,7 @@ def read_voice_state(
             lambda reg: reg_records if reg == own
             else _registry_records(w3, reg, block, start),
             own, block, jurisdiction_id)
+    parity = parity_from_writes(_last_writes(reg_records, block)) if reg_records else {}
     rotations = [
         (int(log["blockNumber"]), str(log["args"]["agent"]).lower(),
          str(log["args"]["prevOwner"]).lower(),
@@ -1707,16 +1763,15 @@ def read_voice_state(
         # Raw rep share per household (un-floored) + supply alias.
         "rep_shares": rep_shares,
         "rep_supply": int(supply),
-        # Reputation supply — the voice-weight denominator (not ATN).
+        # Reputation supply: the voice-weight denominator.
         "supply": int(supply),
         "snapshot_block": block,
-        # Fees-only pool (Decision 2026-07-10): burned fees, no base floor.
-        "emission_pool": round(recycled, 10),
-        "recycled": round(recycled, 10),
-        # Exact on-chain pool (base units) + which anchor it was read at:
-        # the anchor this close produces is valid only as anchor number
-        # snapshot_anchor_count (else its on-chain mintPool differs).
-        "emission_pool_raw": burned_raw,
+        # The pools' new money per token (base units) and the value index,
+        # both pinned; and which anchor they were read at: the anchor this
+        # close produces is valid only as anchor number
+        # snapshot_anchor_count + 1 (else its on-chain cap differs).
+        "tool_share_window": tool_share_window,
+        "parity": parity,
         "snapshot_anchor_count": int(anchor_count),
         "weight_source": "reputation",
         "review_snapshot": review_snapshot,

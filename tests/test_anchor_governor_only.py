@@ -4,10 +4,10 @@
     governor's anchor lands (direct and through the real EpochAnchorer).
   - The hash chain still binds: a stale prevEpochRoot / prevAnchorHash
     reverts even from the governor, and an epoch anchors once.
-  - floor_mint_to_pool: integer shares never exceed the pool, and the
-    merkle leaves built from them sum to <= the on-chain pool exactly.
-  - An honest anchor at the seeded pool lets every leaf claim; the claims
-    sum to <= mintPool.
+  - split_pools: integer shares never exceed a pool, token by token, and
+    the claim leaves built from them sum to <= the pool exactly.
+  - An honest anchor at the seeded pools lets every leaf claim; the claims
+    of each token sum to <= its pool cap.
 """
 
 from __future__ import annotations
@@ -26,12 +26,13 @@ from web3.providers.eth_tester import EthereumTesterProvider
 
 from nodes.common.authoritative_submitter import epoch_id_hash
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
-from nodes.common.federated_reconcile import floor_mint_to_pool
-from nodes.common.mint_merkle import mint_leaves, mint_merkle_proof
+from nodes.common.federated_reconcile import split_pools
+from nodes.common.mint_merkle import claim_leaves, claim_merkle_proof
 from tests.substrate_chain_helpers import (
     ZERO,
     anchor_direct,
     deploy_substrate,
+    index_tokens,
     register_bound,
     seed_pool,
 )
@@ -45,28 +46,22 @@ ARTIFACT = (Path(__file__).resolve().parent.parent / "artifacts" / "contracts"
 # ---------------------------------------------------------------------------
 
 
+def _claims(baskets):
+    return {k: {"tokens": v, "value": 0} for k, v in baskets.items()}
+
+
 @pytest.mark.parametrize("seed", range(20))
-def test_floor_mint_to_pool_never_exceeds_pool(seed):
+def test_split_never_exceeds_any_pool(seed):
     rng = random.Random(seed)
-    pool_raw = rng.randint(1, 10 ** 13)
-    pool = pool_raw / 1_000_000
+    t6, t18 = "0x" + "a6" * 20, "0x" + "1b" * 20
+    pools = {t6: rng.randint(1, 10 ** 13), t18: rng.randint(1, 10 ** 30)}
     n = rng.randint(1, 40)
-    weights = [rng.random() for _ in range(n)]
-    total = sum(weights)
-    addrs = [Account.create().address for _ in range(n)]
-    mint = {a: pool * w / total for a, w in zip(addrs, weights)}
-    floored = floor_mint_to_pool(mint, pool)
-    leaves = mint_leaves(floored)
-    s = sum(amt for _, amt in leaves)
-    assert s <= pool_raw
-    assert pool_raw - s <= n
-
-
-def test_floor_mint_to_pool_trims_float_overshoot():
-    pool = 3.0
-    mint = {"0x" + "1" * 40: 1.5000004, "0x" + "2" * 40: 1.5000004}
-    floored = floor_mint_to_pool(mint, pool)
-    assert sum(amt for _, amt in mint_leaves(floored)) == 3_000_000
+    weights = {Account.create().address: rng.randint(1, 10 ** 12) for _ in range(n)}
+    leaves = claim_leaves(_claims(split_pools(pools, weights)))
+    for t, pool in pools.items():
+        paid = sum(a for _, toks, amts in leaves for tt, a in zip(toks, amts)
+                   if tt.lower() == t)
+        assert pool - n <= paid <= pool
 
 
 # ---------------------------------------------------------------------------
@@ -94,13 +89,13 @@ def chain():
             "agents": list(agents), "anchorer": anchorer, "data": data}
 
 
-def _close(mint, epoch_id):
+def _close(claims, epoch_id):
     payload = {
-        "epoch_root": "22" * 32, "agent_mint": mint,
-        "total_mint": sum(mint.values()), "output_decimals": 10,
-        "n_batches": 1, "n_events": len(mint),
+        "epoch_root": "22" * 32, "claims": claims, "pools": {}, "parity": {},
+        "total_value": 0, "output_decimals": 10,
+        "n_batches": 1, "n_events": len(claims),
     }
-    return {"authoritative_payload": payload, "agent_mint": mint,
+    return {"authoritative_payload": payload, "claims": claims,
             "epoch_id": epoch_id}
 
 
@@ -140,11 +135,12 @@ def test_epoch_anchorer_outsider_rejected_governor_accepted(chain):
     anchorer, c = chain["anchorer"], chain["contract"]
     attacker = chain["agents"][0]
     evil = anchorer.anchor_close_result(
-        _close({attacker: 10 ** 9}, "evil"), from_address=attacker)
+        _close({attacker: {"tokens": {"0x" + "a6" * 20: 10 ** 9}, "value": 0}}, "evil"),
+        from_address=attacker)
     assert not evil.success
     assert c.functions.anchorCount().call() == 0
     ok = anchorer.anchor_close_result(
-        _close({attacker: 0.0}, "honest"), from_address=chain["deployer"])
+        _close({}, "honest"), from_address=chain["deployer"])
     assert ok.success, ok.error
     assert c.functions.isAnchored("honest").call()
 
@@ -174,30 +170,26 @@ def test_hash_chain_still_binds_the_governor(chain):
     assert c.functions.anchorCount().call() == 2
 
 
-def test_pool_floored_close_claims_fully_and_conserves(chain):
+def test_split_close_claims_fully_and_conserves(chain):
     w3, c, anchorer = chain["w3"], chain["contract"], chain["anchorer"]
-    pool_raw = seed_pool(w3, c, gross=10 ** 9 + 7)
-    pool = pool_raw / 1_000_000
+    pools = seed_pool(w3, c, gross=10 ** 9 + 7)
     agents = chain["agents"]
-    w = [0.37, 1.11, 2.9]
-    mint = {a: pool * x / sum(w) for a, x in zip(agents, w)}
-    mint = floor_mint_to_pool(mint, pool)
+    claims = _claims(split_pools(pools, dict(zip(agents, [37, 111, 290]))))
     r = anchorer.anchor_close_result(
-        _close(mint, "e-cons"), from_address=chain["deployer"])
+        _close(claims, "e-cons"), from_address=chain["deployer"])
     assert r.success, r.error
-    anchor = c.functions.getAnchorByEpochId("e-cons").call()
-    assert anchor[11] == pool_raw          # mintPool
+    tokens = index_tokens(c)
+    for t in tokens:
+        assert c.functions.poolCap(t.address).call() == pools[t.address.lower()]
     eid = epoch_id_hash("e-cons")
-    total = 0
-    for addr, amount in mint_leaves(mint):
-        proof = mint_merkle_proof(mint, addr)
-        # claimFor is permissionless: the deployer (an operator key) sends
-        # every claim; the ATN lands on the leaf's claimant.
-        before = c.functions.balanceOf(addr).call()
-        tx = c.functions.claimFor(addr, amount, eid, proof).transact(
+    for earner, toks, amts in claim_leaves(claims):
+        proof = claim_merkle_proof(claims, earner)
+        # claim is permissionless: the deployer (an operator key) sends every
+        # claim; the amounts are owed to the leaf's earner.
+        tx = c.functions.claim(earner, eid, toks, amts, proof).transact(
             {"from": chain["deployer"], "gas": 1_500_000})
         assert w3.eth.wait_for_transaction_receipt(tx).status == 1
-        assert c.functions.balanceOf(addr).call() == before + amount
-        total += amount
-    assert total <= pool_raw
-    assert c.functions.getAnchorByEpochId("e-cons").call()[12] == total
+        for tt, a in zip(toks, amts):
+            assert c.functions.owed(earner, tt).call() == a
+    for t in tokens:
+        assert c.functions.claimedTotal(t.address).call() <= pools[t.address.lower()]

@@ -7,13 +7,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-from nodes.common.authoritative_encoding import encode_agent_mint_blob
+from nodes.common.authoritative_encoding import encode_claims_blob
 from nodes.common.blob_resolver import InMemoryBlobResolver
-from nodes.common.mint_merkle import mint_merkle_root, verify_concluded_proof
+from nodes.common.mint_merkle import claim_merkle_root, verify_concluded_proof
 from nodes.common.verdict_submitter import VerdictSubmitter
 
 CLEAN, BAD = "aa" * 32, "bb" * 32
-MINT = {"0x" + "11" * 20: 2.0}
+MINT = {"0x" + "11" * 20: {"tokens": {"0x" + "a6" * 20: 2_000_000}, "value": 2_000_000}}
 CONCLUDED = {CLEAN: 1000, BAD: 7000}
 
 
@@ -52,14 +52,14 @@ class FakeSubstrate:
                 return _Call(lambda: anchors[i])
 
             def getAnchorByEpochId(self, eid):
-                return _Call(lambda: ("e2", b"", b"", b"", cid, b"", "", 0, 0, root))
+                return _Call(lambda: ("e2", b"", b"", b"", cid, b"", "", 0, 0, root, 0))
         self.functions = F()
 
 
 def _setup():
     resolver = InMemoryBlobResolver()
-    cid = resolver.put(encode_agent_mint_blob(MINT, concluded=CONCLUDED))
-    root = mint_merkle_root(MINT, concluded=CONCLUDED)
+    cid = resolver.put(encode_claims_blob(MINT, concluded=CONCLUDED))
+    root = claim_merkle_root(MINT, concluded=CONCLUDED)
     bond = FakeBond()
     w3 = SimpleNamespace(to_checksum_address=lambda a: a,
                          eth=SimpleNamespace(contract=lambda address, abi: bond,

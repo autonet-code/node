@@ -269,28 +269,26 @@ class TestRules:
 
 
 class TestVolumeCutoff:
-    """Decision 2026-10-27: an epoch ends when the fees burned since the
-    previous cutoff reach the target share of the supply."""
+    """Decision 2026-10-27: an epoch ends when the fees collected since the
+    previous cutoff, valued at the pinned index, reach the target value."""
 
     @staticmethod
     def _burns(events):
-        """burned_between over a list of (timestamp, amount) burns."""
+        """value_between over a list of (timestamp, value) fees."""
         def between(t0, t1):
             return sum(a for t, a in events if t0 < t <= t1)
         return between
 
     def test_cuts_at_the_second_the_volume_is_reached(self):
-        # 10 ppm of 1e9 = 10_000 ends the epoch.
+        # A value of 10_000 ends the epoch.
         burns = self._burns([(1100, 4_000), (1350, 5_000), (1420, 1_000), (1500, 9)])
-        kw = dict(start=1000, floor=100, ceiling=1000, target_share_ppm=10,
-                  supply=10**9)
+        kw = dict(start=1000, floor=100, ceiling=1000, target_value=10_000)
         assert volume_cutoff(burns, final_ts=5000, **kw) == 1420
         # Not final yet at 1400: the epoch is still open.
         assert volume_cutoff(burns, final_ts=1400, **kw) is None
 
     def test_floor_and_ceiling(self):
-        kw = dict(start=0, floor=100, ceiling=1000, target_share_ppm=10,
-                  supply=10**9)
+        kw = dict(start=0, floor=100, ceiling=1000, target_value=10_000)
         # Reached before the floor: the floor.
         assert volume_cutoff(self._burns([(5, 10**6)]), final_ts=5000, **kw) == 100
         # A quiet network still closes at the ceiling.
@@ -298,27 +296,44 @@ class TestVolumeCutoff:
         assert volume_cutoff(self._burns([]), final_ts=1000, **kw) == 1000
         # Unset target: every epoch lasts the floor.
         assert volume_cutoff(self._burns([]), final_ts=100, start=0, floor=100,
-                             ceiling=1000, target_share_ppm=0, supply=10**9) == 100
+                             ceiling=1000, target_value=0) == 100
 
     def test_daemons_reading_at_different_times_agree(self):
         burns = self._burns([(t, 37) for t in range(1001, 2000, 7)])
-        kw = dict(start=1000, floor=10, ceiling=5000, target_share_ppm=3,
-                  supply=10**9)
+        kw = dict(start=1000, floor=10, ceiling=5000, target_value=3_000)
         cuts = {volume_cutoff(burns, final_ts=f, **kw) for f in (1900, 2500, 4000)}
         assert len(cuts) == 1 and None not in cuts
 
-    def test_window_reports_target_and_supply(self):
+    def test_window_reports_target_and_pinned_parity(self):
         contract = MagicMock()
         contract.functions.deployedAt.return_value.call.return_value = 0
+        usdc, dai = "0x" + "a6" * 20, "0x" + "1b" * 20
         recs = [{"block": 1, "index": 0,
-                 "key": "jurisdiction.autonet.epoch_target_share",
-                 "value": "10"}]
+                 "key": "jurisdiction.autonet.epoch_target_value", "value": "10"},
+                {"block": 1, "index": 1, "key": "jurisdiction.parity." + usdc,
+                 "value": str(10 ** 30)},
+                {"block": 1, "index": 2, "key": "jurisdiction.parity." + dai,
+                 "value": str(10 ** 18)},
+                # Written after the pin: not in this window.
+                {"block": 2, "index": 0, "key": "jurisdiction.parity." + dai,
+                 "value": "0"}]
         lc = {"voting_delay": 0, "voting_period": 1_000, "min_delay": 0}
         win = epoch_window(contract, number=4, prev_root=ROOT, start=3000,
-                           params_block=1, records=recs, lifecycle=lc,
-                           supply=10**9)
-        assert win["target_share"] == 10 and win["supply"] == 10**9
+                           params_block=1, records=recs, lifecycle=lc)
+        assert win["target_value"] == 10
+        assert win["parity"] == {dai: 10 ** 18, usdc: 10 ** 30}
         assert win["base"] == 3000 and win["length"] == win["floor"]
+
+    def test_fees_value_each_token_at_its_parity(self):
+        from nodes.common.voice_state import fees_value_between
+        usdc, dai, gone = "0x" + "a6" * 20, "0x" + "1b" * 20, "0x" + "cc" * 20
+        fees = {usdc: [(10, 2_000_000)], dai: [(20, 3 * 10 ** 18)], gone: [(5, 99)]}
+
+        def fees_between(token, t0, t1):
+            return sum(a for t, a in fees.get(token, []) if t0 < t <= t1)
+        parity = {usdc: 10 ** 30, dai: 10 ** 18}
+        assert fees_value_between(fees_between, parity, 0, 15) == 2_000_000
+        assert fees_value_between(fees_between, parity, 0, 30) == 5_000_000
 
     def test_lifecycle_from_settings_events(self):
         from nodes.common import voice_state
@@ -363,16 +378,18 @@ class TestVolumeCutoff:
 
 
 class TestVolumeEndedEpoch:
-    def test_closes_when_the_burned_volume_is_reached(self):
+    def test_closes_when_the_fee_volume_is_reached(self):
         """The window stays open on volume, then cuts at the crossing second
         (plus the grace wait), taking only batches signed up to it."""
         kp = Keypair.generate()
         buf = _Buffer(kp, [_batch(kp, 1, BASE + 50), _batch(kp, 2, BASE + 400)])
-        win = dict(_window(), floor=10, ceiling=10_000, target_share=10,
-                   supply=10**9)
-        burns = [(BASE + 300, 10_000)]       # 10 ppm of 1e9 reached at +300
+        token = "0x" + "a6" * 20
+        win = dict(_window(), floor=10, ceiling=10_000, target_value=10_000,
+                   parity={token: 10 ** 30})
+        fees = [(BASE + 300, 10_000)]        # the target value reached at +300
         d = _driver(buf, win, BASE + 200)
-        d.burned_source = lambda t0, t1: sum(a for t, a in burns if t0 < t <= t1)
+        d.fees_source = lambda tok, t0, t1: sum(
+            a for t, a in fees if t0 < t <= t1) if tok == token else 0
         assert d.run({}) is None             # volume not reached yet
         d.clock = lambda: BASE + 300 + 119
         assert d.run({}) is None             # reached, but not one grace old

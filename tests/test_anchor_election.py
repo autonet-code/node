@@ -152,7 +152,7 @@ def test_register_vote_and_anchor_the_winner(env):
 
     assert sub.functions.anchorCount().call() == 1
     anchored = sub.functions.getAnchor(0).call()
-    assert anchored[0] == "epoch-b" and anchored[13] == opt_b[7]
+    assert anchored[0] == "epoch-b" and anchored[10] == opt_b[7]
     # The anchor hash is content-only, so it was computable in advance.
     assert bytes(sub.functions.latestAnchorHash().call()) == bytes(
         sub.functions.anchorHashOf(*opt_b).call())
@@ -272,24 +272,20 @@ def test_params_are_governed(env):
 
 
 def test_fee_windows_between_cutoffs(env):
-    """windowBurned counts fees burned between the previous cutoff and this
-    one, so a later anchor of an earlier cutoff gets the same pool."""
+    """A window counts the tool share collected between the previous cutoff
+    and this one, so a later anchor of an earlier cutoff gets the same pool."""
+    from tests.substrate_chain_helpers import index_tokens, pay_fees
     w3, sub, acc = env["w3"], env["sub"], env["acc"]
-    payer, recip = acc[7], acc[6]
-    _send(w3, sub.functions.mintFromVault(payer, 10 ** 9), acc[8])
+    token = index_tokens(sub)[0]
 
-    def pay(amount):
-        _send(w3, sub.functions.payForService(recip, amount, bytes(32)), payer)
-        return int(sub.functions.totalBurned().call())
-
-    pay(10 ** 8)
+    before_c1 = pay_fees(w3, sub, 10 ** 8, tokens=[token])[token.address.lower()]
     c1 = _ts(w3)
-    burned_c1 = int(sub.functions.totalBurned().call())
-    pay(10 ** 8)            # after c1: belongs to the next window
+    after_c1 = pay_fees(w3, sub, 10 ** 8, tokens=[token])[token.address.lower()]
     assert anchor_direct(w3, sub, "w1", b"\x01" * 32, "c", b"\x02" * 32,
                          bytes(32), cutoff=c1).status == 1
-    assert sub.functions.getAnchor(0).call()[10] == burned_c1
-    assert int(sub.functions.burnedSinceAnchor().call()) > 0
+    assert sub.functions.getAnchor(0).call()[10] == c1
+    assert sub.functions.toolShareBetween(token.address, 0, c1).call() == before_c1
+    assert sub.functions.toolShareBetween(token.address, c1, _ts(w3)).call() == after_c1
     def refused(**kw) -> bool:
         try:
             return anchor_direct(w3, sub, "w2", b"\x03" * 32, "c",

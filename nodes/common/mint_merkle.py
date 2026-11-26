@@ -1,38 +1,33 @@
-"""Merkle tree over an epoch's agent mint map.
+"""Merkle tree over an epoch's claims.
 
-Counterpart of ``Substrate.claimFor``'s proof check: mint amounts are
-never self-reported — the anchor commits a root over (claimant address,
-scaled ATN amount) leaves, and each household's leaf is proven when it is
-claimed. The claimant is the household's owner wallet (Decision
-2026-10-27); anyone may submit the claim.
+Counterpart of ``Substrate.claim``'s proof check: claims are never
+self-reported. The anchor's ``claimRoot`` commits one leaf per earner (a
+household's owner wallet): the amount it takes of each token's pool (the
+same fraction of every pool, the basket). The REP value is not in the
+leaf: Substrate computes it on chain from the capped amounts at each
+token's parity stored when the epoch is anchored (the close's ``value`` is
+informational). Anyone may submit the claim; the leaf fixes the earner.
 
-Money only (Decision 2026-07-10, docs/tool_substrate.md §4): the leaf
-commits the ATN mint alone. REP is no longer minted on the close path —
-it is claimed DAO-side (RepToken) on ratified ATN earnings — so the v4.1
-3-field ``(agent, amount, repAmount)`` leaf reverts to the 2-field
-``(agent, amount)`` money-only leaf.
+Encoding (must match the contract byte for byte)::
 
-Encoding (must match the contract byte-for-byte):
-
-  leaf  = keccak256(bytes.concat(keccak256(
-              abi.encode(address, uint256 amount))))
-          (double-hashed, OpenZeppelin convention, so a leaf preimage
-          can never be confused with an interior node)
-  node  = keccak256(sorted_pair(a, b))   — ascending byte order, so
-          proofs carry no left/right index bits
+  leaf  = keccak256(bytes.concat(keccak256(abi.encode(
+              CLAIM_TAG, address earner,
+              address[] tokens, uint256[] amounts))))
+          CLAIM_TAG = keccak256("autonet.claim"); tokens strictly
+          ascending, one amount each (double-hashed, OpenZeppelin
+          convention, so a leaf preimage can never be confused with an
+          interior node)
+  node  = keccak256(sorted_pair(a, b)): ascending byte order, so proofs
+          carry no left/right index bits
   odd levels promote the unpaired node unchanged
   single-leaf tree: root == leaf, proof == []
 
-Scaling: ``round(raw_float * mint_scale)`` (scale_mint), the same
-conversion the agent-side submitter applies (default 1e6).
-Both sides MUST route through ``scale_mint`` here — a one-ulp float
-disagreement means an unprovable leaf.
+Claims are ``{earner: {"tokens": {token: int}, "value": int}}`` (the
+close's ``claims``). Only earners that parse as 0x addresses enter the
+tree (nothing else can claim on chain), and only tokens with a non-zero
+amount; an earner with no token has no leaf.
 
-Only keys that parse as 0x addresses enter the tree: non-address agent
-ids could never be paid on-chain anyway. Zero ATN shares are excluded (the contract treats zero
-as a no-op without a proof).
-
-Concluded tools (Decision 2026-11-09) share the tree: after the mint
+Concluded tools (Decision 2026-11-09) share the tree: after the claim
 leaves, sorted by digest, one leaf per tool that concluded in the close,
 
   leaf = keccak256(bytes.concat(keccak256(abi.encode(
@@ -40,59 +35,55 @@ leaves, sorted by digest, one leaf per tool that concluded in the close,
              uint256 shareBps))))
 
 which ``ToolBond.conclude`` proves to open the tool's malware verdict.
-Its first word is a hash, never an abi-encoded address, so it cannot
-collide with a mint leaf.
+Each leaf type starts with its own tag hash, so the two cannot collide.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from eth_abi import encode as abi_encode
 from eth_utils import is_address, keccak, to_checksum_address
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MINT_SCALE = 1_000_000
 EMPTY_ROOT = b"\x00" * 32
+CLAIM_TAG = keccak(text="autonet.claim")
 CONCLUDED_TAG = keccak(text="autonet.tool_concluded")
 
-
-def scale_mint(raw: float, mint_scale: int = DEFAULT_MINT_SCALE) -> int:
-    """The canonical float->int scaling, shared by the anchor (merkle root)
-    and the agent-side submitter. ROUNDS to the nearest base unit (changed
-    2026-10-12 from truncation): the close floors pool shares to exact
-    integers k and emits k/scale, which truncation could turn into k-1
-    (k/1e6*1e6 is not always exactly k in binary floating point)."""
-    return int(round(float(raw) * mint_scale))
+ClaimLeaf = Tuple[str, List[str], List[int]]
 
 
-def mint_leaves(
-    agent_mint: Dict[str, float],
-    mint_scale: int = DEFAULT_MINT_SCALE,
-) -> List[Tuple[str, int]]:
-    """Address-keyed, nonzero-ATN, deterministically-ordered leaf entries.
-
-    Returns [(checksum_address, scaled_amount)] sorted by lowercase
-    address. Non-address keys (test agents, pubkey-hex authors) are
-    skipped — they have no on-chain claim path.
-    """
-    entries: List[Tuple[str, int]] = []
-    for key, raw in agent_mint.items():
+def claim_leaves(claims: Dict[str, Any]) -> List[ClaimLeaf]:
+    """The claim leaves in tree order: ``[(earner checksum, tokens
+    (checksum, ascending), amounts)]`` sorted by lowercase earner.
+    Non-address earners and zero amounts are skipped; an earner left with
+    no token has no leaf."""
+    out: List[ClaimLeaf] = []
+    for key in sorted(claims, key=lambda k: str(k).lower()):
         if not is_address(str(key)):
             continue
-        scaled = scale_mint(float(raw), mint_scale)
-        if scaled <= 0:
+        entry = claims[key] or {}
+        raw_tokens = entry.get("tokens") or {}
+        pairs = sorted(
+            (str(t).lower(), int(a)) for t, a in raw_tokens.items()
+            if is_address(str(t)) and int(a) > 0)
+        if not pairs:
             continue
-        entries.append((to_checksum_address(str(key)), scaled))
-    entries.sort(key=lambda e: e[0].lower())
-    return entries
+        out.append((to_checksum_address(str(key)),
+                    [to_checksum_address(t) for t, _ in pairs],
+                    [a for _, a in pairs]))
+    return out
 
 
-def _leaf_hash(address: str, amount: int) -> bytes:
+def claim_leaf(earner: str, tokens: List[str], amounts: List[int]) -> bytes:
+    """One earner's leaf (``Substrate.claimLeaf``). ``tokens`` must already
+    be strictly ascending."""
     return keccak(keccak(abi_encode(
-        ["address", "uint256"], [address, amount])))
+        ["bytes32", "address", "address[]", "uint256[]"],
+        [CLAIM_TAG, to_checksum_address(earner),
+         [to_checksum_address(t) for t in tokens], [int(a) for a in amounts]])))
 
 
 def concluded_leaf(digest: str, share_bps: int) -> bytes:
@@ -102,15 +93,16 @@ def concluded_leaf(digest: str, share_bps: int) -> bytes:
         ["bytes32", "bytes32", "uint256"], [CONCLUDED_TAG, d, int(share_bps)])))
 
 
-def _all_leaves(agent_mint: Dict[str, float], concluded: Optional[Dict[str, int]],
-                mint_scale: int) -> List[bytes]:
-    """The tree's leaves: mint leaves (by address), then concluded leaves
+def _concluded_order(concluded: Optional[Dict[str, int]]) -> List[Tuple[str, int]]:
+    norm = {str(k).lower().removeprefix("0x"): int(v) for k, v in (concluded or {}).items()}
+    return [(d, norm[d]) for d in sorted(norm)]
+
+
+def _all_leaves(claims: Dict[str, Any], concluded: Optional[Dict[str, int]]) -> List[bytes]:
+    """The tree's leaves: claim leaves (by earner), then concluded leaves
     (by digest)."""
-    leaves = [_leaf_hash(a, m) for a, m in mint_leaves(agent_mint, mint_scale)]
-    for digest in sorted(str(d).lower().removeprefix("0x") for d in (concluded or {})):
-        share = {str(k).lower().removeprefix("0x"): v
-                 for k, v in (concluded or {}).items()}[digest]
-        leaves.append(concluded_leaf(digest, share))
+    leaves = [claim_leaf(*leaf) for leaf in claim_leaves(claims)]
+    leaves.extend(concluded_leaf(d, s) for d, s in _concluded_order(concluded))
     return leaves
 
 
@@ -122,7 +114,7 @@ def _proof_at(leaves: List[bytes], target: int) -> List[bytes]:
         sibling = idx + 1 if idx % 2 == 0 else idx - 1
         if sibling < len(level):
             proof.append(level[sibling])
-        # else: odd node promoted unchanged — no proof element.
+        # else: odd node promoted unchanged, no proof element.
         idx //= 2
     return proof
 
@@ -145,75 +137,62 @@ def _build_levels(leaf_hashes: List[bytes]) -> List[List[bytes]]:
     return levels
 
 
-def mint_merkle_root(
-    agent_mint: Dict[str, float],
-    mint_scale: int = DEFAULT_MINT_SCALE,
-    concluded: Optional[Dict[str, int]] = None,
-) -> bytes:
-    """Root over the mint map and the concluded tools. EMPTY_ROOT (32
-    zero bytes) when the tree has no leaf — the contract rejects claims
-    against it.
-    """
-    leaves = _all_leaves(agent_mint, concluded, mint_scale)
+def claim_merkle_root(claims: Dict[str, Any],
+                      concluded: Optional[Dict[str, int]] = None) -> bytes:
+    """Root over the claims and the concluded tools. EMPTY_ROOT (32 zero
+    bytes) when the tree has no leaf: the contract rejects claims against
+    it."""
+    leaves = _all_leaves(claims, concluded)
     if not leaves:
         return EMPTY_ROOT
     return _build_levels(leaves)[-1][0]
 
 
-def mint_merkle_proof(
-    agent_mint: Dict[str, float],
-    address: str,
-    mint_scale: int = DEFAULT_MINT_SCALE,
-    concluded: Optional[Dict[str, int]] = None,
-) -> Optional[List[bytes]]:
-    """Proof for one agent's leaf, or None when the agent has no
-    claimable ATN share. A single-leaf tree yields an empty proof.
-    """
-    entries = mint_leaves(agent_mint, mint_scale)
-    target = None
-    for i, (addr, _amt) in enumerate(entries):
-        if addr.lower() == str(address).lower():
-            target = i
-            break
-    if target is None:
-        return None
-    return _proof_at(_all_leaves(agent_mint, concluded, mint_scale), target)
+def claim_entry(claims: Dict[str, Any], earner: str) -> Optional[ClaimLeaf]:
+    """The earner's leaf fields, or None when it has none."""
+    for leaf in claim_leaves(claims):
+        if leaf[0].lower() == str(earner).lower():
+            return leaf
+    return None
 
 
-def concluded_proof(
-    agent_mint: Dict[str, float],
-    concluded: Dict[str, int],
-    digest: str,
-    mint_scale: int = DEFAULT_MINT_SCALE,
-) -> Optional[List[bytes]]:
+def claim_merkle_proof(claims: Dict[str, Any], earner: str,
+                       concluded: Optional[Dict[str, int]] = None) -> Optional[List[bytes]]:
+    """Proof for one earner's leaf, or None when it has none. A single-leaf
+    tree yields an empty proof."""
+    for i, leaf in enumerate(claim_leaves(claims)):
+        if leaf[0].lower() == str(earner).lower():
+            return _proof_at(_all_leaves(claims, concluded), i)
+    return None
+
+
+def concluded_proof(claims: Dict[str, Any], concluded: Dict[str, int],
+                    digest: str) -> Optional[List[bytes]]:
     """Proof for one concluded tool's leaf, or None when the close did not
     conclude it."""
     d = str(digest).lower().removeprefix("0x")
-    ordered = sorted(str(k).lower().removeprefix("0x") for k in concluded)
+    ordered = [x for x, _ in _concluded_order(concluded)]
     if d not in ordered:
         return None
-    target = len(mint_leaves(agent_mint, mint_scale)) + ordered.index(d)
-    return _proof_at(_all_leaves(agent_mint, concluded, mint_scale), target)
+    target = len(claim_leaves(claims)) + ordered.index(d)
+    return _proof_at(_all_leaves(claims, concluded), target)
+
+
+def _verify(leaf: bytes, root: bytes, proof: List[bytes]) -> bool:
+    computed = leaf
+    for p in proof:
+        computed = _hash_pair(computed, bytes(p))
+    return computed == bytes(root)
 
 
 def verify_concluded_proof(root: bytes, digest: str, share_bps: int,
                            proof: List[bytes]) -> bool:
     """Python mirror of ToolBond.conclude's proof check."""
-    computed = concluded_leaf(digest, share_bps)
-    for p in proof:
-        computed = _hash_pair(computed, p)
-    return computed == root
+    return _verify(concluded_leaf(digest, share_bps), root, proof)
 
 
-def verify_mint_proof(
-    root: bytes,
-    address: str,
-    amount: int,
-    proof: List[bytes],
-) -> bool:
-    """Python mirror of the contract's check, for tests and pre-flight
-    validation before spending gas."""
-    computed = _leaf_hash(to_checksum_address(address), amount)
-    for p in proof:
-        computed = _hash_pair(computed, p)
-    return computed == root
+def verify_claim_proof(root: bytes, earner: str, tokens: List[str],
+                       amounts: List[int], proof: List[bytes]) -> bool:
+    """Python mirror of ``Substrate.claim``'s proof check, for tests and
+    pre-flight validation before spending gas."""
+    return _verify(claim_leaf(earner, tokens, amounts), root, proof)

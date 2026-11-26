@@ -9,54 +9,55 @@ Spec
 
 The authoritative payload is a dict with these fields, in this order:
 
-  1. schema:           int (currently 8)
+  1. schema:           int (currently 9)
   2. epoch_id:         str
   3. epoch_root:       64-char lowercase hex string (sha256 digest)
   4. prev_epoch_root:  64-char lowercase hex string (sha256 digest)
-  5. agent_mint:       dict[str, str] — claimant -> fixed-format float string.
-                       The claimant is the household's lowercase owner
-                       wallet (Decision 2026-10-27).
-  6. total_mint:       fixed-format float string
-  7. output_decimals:  int
-  8. n_batches:        int
-  9. n_events:         int
-  10. carry_cid:       str — sha256 cid of the carry-over bundle blob
+  5. claims:           dict, earner -> {"tokens": {token: amount},
+                       "value": value}. The earner is the household's
+                       lowercase owner wallet, each token a lowercase 0x
+                       address, amounts in the token's base units, the
+                       value in 6-decimal value units at the pinned
+                       parity. One leaf each under the anchor's claimRoot,
+                       over the tokens and amounts only: the value is
+                       informational (Substrate computes REP on chain from
+                       the capped amounts at the parity it stores at the
+                       anchor).
+  6. pools:            dict, token -> the epoch's pool of it (the window's
+                       tool share plus the carry).
+  7. parity:           dict, token -> the parity the close valued it at
+                       (the tokens of ``pools``; 0 = out of the index).
+  8. total_value:      the claims' values summed.
+  9. output_decimals:  int, the precision weights are turned into
+                       integers at before the split.
+  10. n_batches:       int
+  11. n_events:        int
+  12. carry_cid:       str, sha256 cid of the carry-over bundle blob
                        (``encode_carry_bundle``): the tool maps this close
                        produced, i.e. the INPUTS of the next close. A
                        daemon that boots after anchors exist fetches and
                        verifies it instead of trusting a peer.
-  11. charter_hash:    str, sha256 hex of the charter the close ran
+  13. charter_hash:    str, sha256 hex of the charter the close ran
                        against (a charter change is a fork boundary).
-  12. sanctioned_households: list[str], sorted lowercase households under
-                       a DAO sanction at the snapshot (their mint is
-                       withheld).
-  13. concluded:       dict[str, int] — each tool that concluded in this
+  14. sanctioned_households: list[str], sorted lowercase households under
+                       a DAO sanction at the snapshot (their share is
+                       withheld into the carry).
+  15. concluded:       dict[str, int], each tool that concluded in this
                        close (digest hex) -> its malware share in bps; the
-                       anchor's agentMintRoot holds one leaf per entry,
-                       from which ToolBond opens the tool's verdict
-                       (Decision 2026-11-09).
-  14. seed:            true, ONLY on a genesis seed anchor
+                       anchor's claimRoot holds one leaf per entry, from
+                       which ToolBond opens the tool's verdict.
+  16. seed:            true, ONLY on a genesis seed anchor
                        (docs/multi_jurisdiction.md decision 9): the
                        carry bundle is an adopted snapshot, not the output
-                       of an observed epoch. Omitted entirely otherwise, so
-                       every ordinary close payload keeps its exact bytes
-                       (no schema bump).
+                       of an observed epoch. Omitted entirely otherwise.
 
-Float formatting
-----------------
+Integers
+--------
 
-Floats are serialized as ``f"{x:.10f}"`` (10 decimal places, fixed
-notation, no trailing/leading whitespace). Negative zero is normalized
-to positive zero. This avoids ALL Python-version dependence in JSON
-float formatting.
-
-Dict ordering
--------------
-
-agent_mint has its keys sorted ascending. The outer
-dict has keys in the order listed above (NOT alphabetical) — this
-is the order we serialize, and it matches the documented field
-order in this spec.
+Every amount, value and parity is written as its decimal string
+(``str(int)``), so no JSON reader ever turns an 18-decimal amount into a
+float. Maps have their keys sorted ascending; the outer dict has keys in
+the order listed above (NOT alphabetical).
 
 JSON encoding
 -------------
@@ -64,57 +65,46 @@ JSON encoding
 ``json.dumps(payload, ensure_ascii=False, separators=(",", ":"))``
 produces the canonical bytes. UTF-8 encoding.
 
-agent_mint_cid
---------------
+The claims blob
+---------------
 
-The CID for the off-chain agent_mint blob is just sha256 of the blob
-bytes, hex-encoded. The blob is itself a canonical-encoded JSON of
-the ``agent_mint`` dict alone (schema, agent_id->str, sorted keys),
-NOT the full authoritative_payload.
-
-The blob lets agents look up only what they need (their own mint
-amount) without parsing the full payload, while the on-chain
-``payload_hash`` covers everything for integrity.
+The blob the anchor's ``claimCid`` names (sha256 of its bytes, hex) holds
+the claims and the concluded tools, everything a submitter needs to
+rebuild the claimRoot tree and prove a leaf, while the on-chain
+``payload_hash`` covers the whole payload.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 
-# Schema 7 (Decision 2026-11-08, the world leaves the system): the payload
-# drops agent_novelty, total_novelty, gate_applied and world_cid; the carry
-# bundle is the whole anchored state.
-# Schema 5 (Decision 2026-10-26): the payload commits ``charter_hash`` and
-# ``sanctioned_households``; both decide the mint, so two daemons that ran
-# against different charters or sanction lists must not sign the same hash.
-# Schema 4 (verifiable carry-over): the payload gains ``carry_cid``, the
-# cid of the canonical carry-over bundle (see ``encode_carry_bundle``), so
-# a joiner can verify the five tool maps against the anchor. FLAG DAY:
-# every daemon must run this build, on a fresh genesis.
-# Schema 3 (fees-only, Decision 2026-07-10): MONEY ONLY. The authoritative
-# payload was always money-only; the off-chain mint blob drops its optional
-# ``agent_rep`` key (REP is claimed DAO-side now, never anchored). Schema 2
-# was the v4.1 era (3-field merkle leaf + agent_rep blob key); bumped so the
-# blob shape change is explicit, not silently reusing a different-shape number.
+# Schema 9 (the value index's tokens replace ATN): ``claims`` (per earner,
+# an amount of each token's pool and the REP value), ``pools``, ``parity``
+# and ``total_value`` replace agent_mint and total_mint; every money number
+# is a decimal string.
 # Schema 8 (Decision 2026-11-09): the payload commits ``concluded`` (each
-# concluding tool's malware share in bps), and the mint blob carries it so
-# a submitter rebuilds the whole agentMintRoot tree.
-SCHEMA_VERSION = 8
+# concluding tool's malware share in bps).
+# Schema 7 (Decision 2026-11-08): the payload drops the world's fields.
+# Schema 5 (Decision 2026-10-26): the payload commits ``charter_hash`` and
+# ``sanctioned_households``.
+# Schema 4: the payload gains ``carry_cid``.
+SCHEMA_VERSION = 9
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
-# this sequence, NOT alphabetical. Anchored once → permanent.
+# this sequence, NOT alphabetical. Anchored once, permanent.
 _FIELD_ORDER = [
     "schema",
     "epoch_id",
     "epoch_root",
     "prev_epoch_root",
-    "agent_mint",
-    "total_mint",
+    "claims",
+    "pools",
+    "parity",
+    "total_value",
     "output_decimals",
     "n_batches",
     "n_events",
@@ -125,24 +115,43 @@ _FIELD_ORDER = [
 ]
 
 
-def _format_float(x: float, decimals: int = DEFAULT_DECIMALS) -> str:
-    """Fixed-decimal string form. Normalizes -0.0 -> 0.0."""
-    v = float(x)
-    if v == 0.0:
-        v = 0.0  # collapse negative zero
-    if not math.isfinite(v):
-        # Reject non-finite values explicitly. Anchoring NaN/Inf
-        # would be a footgun.
-        raise ValueError(f"non-finite float in authoritative payload: {x!r}")
-    return f"{v:.{decimals}f}"
+def _uint(value: Any) -> int:
+    """A non-negative integer from an int or a decimal string; anything
+    else (a float, a negative) is refused."""
+    if isinstance(value, bool):
+        raise TypeError(f"not an amount: {value!r}")
+    if isinstance(value, int):
+        v = value
+    elif isinstance(value, str) and value.isdigit():
+        v = int(value)
+    else:
+        raise TypeError(f"not an integer amount: {value!r}")
+    if v < 0:
+        raise ValueError(f"negative amount: {value!r}")
+    return v
 
 
-def _format_agent_dict(d: Dict[str, float], decimals: int) -> Dict[str, str]:
-    """Sort agent_id keys ascending, format values as fixed-decimal."""
-    return {
-        k: _format_float(d[k], decimals)
-        for k in sorted(d.keys())
-    }
+def _addr(value: Any) -> str:
+    return str(value).lower()
+
+
+def _format_amounts(d: Dict[str, Any]) -> Dict[str, str]:
+    """{address: amount} with lowercase keys, sorted, decimal strings."""
+    out = {_addr(k): str(_uint(v)) for k, v in (d or {}).items()}
+    return {k: out[k] for k in sorted(out)}
+
+
+def _format_claims(claims: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """The claims in canonical form: earner (lowercase, sorted) ->
+    {"tokens": {token: "amount"}, "value": "value"}."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for earner in sorted((claims or {}), key=_addr):
+        entry = claims[earner] or {}
+        out[_addr(earner)] = {
+            "tokens": _format_amounts(entry.get("tokens") or {}),
+            "value": str(_uint(entry.get("value") or 0)),
+        }
+    return {k: out[k] for k in sorted(out)}
 
 
 def _format_concluded(d: Dict[str, Any]) -> Dict[str, int]:
@@ -175,18 +184,16 @@ def encode_authoritative_payload(
     a few caller-supplied identifiers (``epoch_id``,
     ``prev_epoch_root``).
     """
-    decimals = int(payload.get("output_decimals", DEFAULT_DECIMALS))
-
     canonical = {
         "schema": SCHEMA_VERSION,
         "epoch_id": str(epoch_id),
         "epoch_root": _validate_hex32("epoch_root", epoch_root_hex),
         "prev_epoch_root": _validate_hex32("prev_epoch_root", prev_epoch_root_hex),
-        "agent_mint": _format_agent_dict(
-            payload.get("agent_mint", {}), decimals,
-        ),
-        "total_mint": _format_float(payload.get("total_mint", 0.0), decimals),
-        "output_decimals": decimals,
+        "claims": _format_claims(payload.get("claims") or {}),
+        "pools": _format_amounts(payload.get("pools") or {}),
+        "parity": _format_amounts(payload.get("parity") or {}),
+        "total_value": str(_uint(payload.get("total_value") or 0)),
+        "output_decimals": int(payload.get("output_decimals", DEFAULT_DECIMALS)),
         "n_batches": int(payload.get("n_batches", 0)),
         "n_events": int(payload.get("n_events", 0)),
         "carry_cid": str(payload.get("carry_cid", "")),
@@ -196,16 +203,11 @@ def encode_authoritative_payload(
         "concluded": _format_concluded(payload.get("concluded") or {}),
     }
 
-    # Canonical order: NOT alphabetical, but the explicit _FIELD_ORDER.
-    # We rebuild a fresh dict in that order so dict-iteration order
-    # matches the spec.
     ordered = {field: canonical[field] for field in _FIELD_ORDER}
-    # Genesis seed marker (decision 9): appended last and only when set,
-    # so ordinary payload bytes are unchanged.
+    # Genesis seed marker (decision 9): appended last and only when set.
     if payload.get("seed") is True:
         ordered["seed"] = True
 
-    # Compact JSON, no whitespace, UTF-8.
     return json.dumps(
         ordered,
         ensure_ascii=False,
@@ -213,33 +215,26 @@ def encode_authoritative_payload(
     ).encode("utf-8")
 
 
-def encode_agent_mint_blob(
-    agent_mint: Dict[str, float],
+def encode_claims_blob(
+    claims: Dict[str, Any],
     *,
-    decimals: int = DEFAULT_DECIMALS,
     concluded: Dict[str, Any] | None = None,
 ) -> bytes:
-    """Encode the off-chain ``agent_mint`` blob.
+    """Encode the off-chain claims blob the anchor's ``claimCid`` names.
 
-    Format:
-      {
-        "schema": 8,
-        "agent_mint": {claimant: float-as-str (sorted keys)},
-        "concluded": {digest: share bps (sorted keys)}   (only when any)
-      }
+    Format::
 
-    ``concluded`` holds the tools whose leaves share the agentMintRoot
-    tree with the mint leaves (Decision 2026-11-09), so a submitter can
-    rebuild the tree and prove either kind.
+      {"schema": 9,
+       "claims": {earner: {"tokens": {token: "amount"}, "value": "value"}},
+       "concluded": {digest: share bps}}   (only when any)
 
-    Decision 2026-07-10 (money only): the v4.1 decoupled ``agent_rep``
-    key is gone — REP is claimed DAO-side (RepToken) on ratified ATN
-    earnings, never anchored on the close path. The submitter builds its
-    merkle proof from the ``agent_mint`` map alone (2-field leaf).
+    ``concluded`` holds the tools whose leaves share the claimRoot tree
+    with the claim leaves (Decision 2026-11-09), so a submitter can rebuild
+    the tree and prove either kind.
     """
     blob: Dict[str, Any] = {
         "schema": SCHEMA_VERSION,
-        "agent_mint": _format_agent_dict(agent_mint, decimals),
+        "claims": _format_claims(claims),
     }
     if concluded:
         blob["concluded"] = _format_concluded(concluded)
@@ -266,22 +261,24 @@ def payload_hash(payload_bytes: bytes) -> bytes:
     return hashlib.sha256(payload_bytes).digest()
 
 
-def decode_agent_mint_blob(blob: bytes) -> Dict[str, float]:
-    """Reverse of ``encode_agent_mint_blob`` (mint map only). Returns
-    floats.
-
-    Used by agents to read their mint amount after the chain anchor
-    points them at a CID.
-    """
+def decode_claims_blob(blob: bytes) -> Dict[str, Dict[str, Any]]:
+    """Reverse of ``encode_claims_blob`` (claims only): earner ->
+    {"tokens": {token: int}, "value": int}. Raises ValueError on a blob of
+    another schema."""
     data = json.loads(blob.decode("utf-8"))
-    out: Dict[str, float] = {}
-    for k, v in data.get("agent_mint", {}).items():
-        out[str(k)] = float(v)
+    if data.get("schema") != SCHEMA_VERSION:
+        raise ValueError(f"unsupported claims blob schema: {data.get('schema')!r}")
+    out: Dict[str, Dict[str, Any]] = {}
+    for earner, entry in (data.get("claims") or {}).items():
+        out[str(earner)] = {
+            "tokens": {str(t): _uint(a) for t, a in (entry.get("tokens") or {}).items()},
+            "value": _uint(entry.get("value") or 0),
+        }
     return out
 
 
 def decode_concluded(blob: bytes) -> Dict[str, int]:
-    """The concluded tools a mint blob carries (digest -> share bps)."""
+    """The concluded tools a claims blob carries (digest -> share bps)."""
     data = json.loads(blob.decode("utf-8"))
     return _format_concluded(data.get("concluded") or {})
 

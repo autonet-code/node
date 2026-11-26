@@ -67,12 +67,12 @@ def _driver(tmp_path, *, voice_state=None, enforce=True, paths=True):
 
 # read_voice_state shapes: snapshot_block None <=> anchorCount == 0.
 GENESIS = {"owner_map": {}, "voice_weights": {}, "snapshot_block": None,
-           "emission_pool": 0.0}
+           "tool_share_window": {}}
 # Past the genesis seed window: anchor counts 1 or none open it (the driver
 # then consults carry_source), so a steady-state test pins a later anchor.
 ANCHORED = {"owner_map": {}, "voice_weights": {}, "snapshot_block": 123,
             "snapshot_anchor_count": 3,
-            "emission_pool": 0.0}
+            "tool_share_window": {}}
 
 
 def _write_all(tmp_path):

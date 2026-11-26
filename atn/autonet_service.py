@@ -1645,8 +1645,8 @@ class AutonetBridge:
                     "is_us": bool(fed.is_winner),
                     "epoch_root": str(fed.close_result.get("epoch_root", "")),
                     "carry_cid": getattr(fed, "carry_cid", ""),
-                    "total_mint": fed.close_result.get("total_mint", 0.0),
-                    "agent_mint": fed.close_result.get("agent_mint", {}),
+                    "total_value": int(fed.close_result.get("total_value") or 0),
+                    "claims": fed.close_result.get("claims", {}),
                 }
             except Exception:
                 log.exception("federated close payload build failed")

@@ -226,8 +226,9 @@ def test_decode_rejects_non_canonical_or_malformed():
 def test_payload_encodes_carry_cid_charter_and_sanctions():
     payload = {
         "epoch_root": ROOT_B,
-        "agent_mint": {"bob": 1.0, "alice": 2.0},
-        "total_mint": 3.0,
+        "claims": {"0xbob": {"tokens": {"0xt": 1}, "value": 1},
+                   "0xalice": {"tokens": {"0xt": 2}, "value": 2}},
+        "total_value": 3,
         "carry_cid": "cc" * 32,
         "charter_hash": "AB" * 32,
         "sanctioned_households": ["0xBEEF", "0xaaaa", "0xbeef"],
@@ -235,12 +236,12 @@ def test_payload_encodes_carry_cid_charter_and_sanctions():
     raw = encode_authoritative_payload(
         payload, epoch_id="e1", epoch_root_hex=ROOT_B, prev_epoch_root_hex=ROOT_A)
     decoded = json.loads(raw)
-    assert SCHEMA_VERSION == 8
-    assert decoded["schema"] == 8
+    assert SCHEMA_VERSION == 9
+    assert decoded["schema"] == 9
     assert decoded["carry_cid"] == "cc" * 32
     assert list(decoded) == [
-        "schema", "epoch_id", "epoch_root", "prev_epoch_root", "agent_mint",
-        "total_mint", "output_decimals", "n_batches", "n_events",
+        "schema", "epoch_id", "epoch_root", "prev_epoch_root", "claims",
+        "pools", "parity", "total_value", "output_decimals", "n_batches", "n_events",
         "carry_cid", "charter_hash", "sanctioned_households", "concluded"]
     assert decoded["concluded"] == {}
     assert decoded["charter_hash"] == "ab" * 32
@@ -379,7 +380,7 @@ def test_joiner_fetches_verifies_installs_and_closes_identically(network, tmp_pa
         assert (joiner_dir / f"{k}.json").exists()
     # Bit-identical close: payload bytes, mint, and the next bundle.
     assert _payload_bytes(fed_join) == _payload_bytes(fed_on)
-    assert fed_join.close_result["agent_mint"] == fed_on.close_result["agent_mint"]
+    assert fed_join.close_result["claims"] == fed_on.close_result["claims"]
     assert fed_join.carry_bundle_blob == fed_on.carry_bundle_blob
     assert fed_join.carry_cid == fed_on.carry_cid
     # Control: without the carry-over, the same close forks.
@@ -439,7 +440,7 @@ def test_fetch_reports_anchor_and_carry(network):
         network["chain"]["contract"], network["resolver"])
     assert fetch.status == "ok"
     assert fetch.epoch_id == "e3"
-    assert fetch.payload_schema == 8
+    assert fetch.payload_schema == 9
     assert fetch.carry == {
         k: json.loads(json.dumps(v))
         for k, v in network["always_on"].carry_over_maps().items()

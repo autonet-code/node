@@ -111,7 +111,8 @@ class TestReviews:
 
 
 class TestClose:
-    POOL = 7.0
+    TOKEN = "0x" + "a6" * 20
+    POOL = 7_000_000
     SHARES = {AUD_A: 0.3, AUD_B: 0.2}
 
     def _close(self, **kw):
@@ -119,35 +120,40 @@ class TestClose:
         batches = _batches([_registration_event(1)], kp_a)
         kw.setdefault("rep_shares", self.SHARES)
         return federated_epoch_close(
-            canonical_order(batches), emission_pool=self.POOL,
+            canonical_order(batches), tool_share_window={self.TOKEN: self.POOL},
+            parity={self.TOKEN: 10 ** 30},
             review_snapshot=_snap(), **kw)
 
     def test_sanctioned_reviewer_earns_nothing_and_nobody_gains(self):
         plain = self._close()
         cut = self._close(sanctioned_households=[AUD_B])
-        assert AUD_B not in cut["agent_mint"]
+        assert AUD_B not in cut["claims"]
         # The close zeroes a sanctioned household's REP, so as a reviewer it
-        # earns nothing to withhold (an author's mint is withheld below).
-        assert AUD_B not in cut["withheld_mint"]
-        assert cut["total_mint"] <= self.POOL + 1e-9
+        # earns nothing to withhold (an author's share is withheld below).
+        assert AUD_B not in cut["withheld"]
+        assert cut["total_value"] <= self.POOL
         assert cut["authoritative_payload"]["sanctioned_households"] == [AUD_B]
 
     def test_sanctioned_author_is_withheld_reviewers_untouched(self):
         plain = self._close()
         cut = self._close(sanctioned_households=[AUTHOR])
-        assert AUTHOR not in cut["agent_mint"]
-        assert cut["withheld_mint"] == {AUTHOR: plain["agent_mint"][AUTHOR]}
+        assert AUTHOR not in cut["claims"]
+        assert cut["withheld"] == {AUTHOR: plain["claims"][AUTHOR]["tokens"]}
         for agent in (AUD_A, AUD_B):
-            assert cut["agent_mint"][agent] == plain["agent_mint"][agent]
+            assert cut["claims"][agent] == plain["claims"][agent]
+        # The withheld share stays in the pool for the next close.
+        assert (cut["tool_rounds"]["pool_carry"].get(self.TOKEN, 0)
+                == plain["tool_rounds"]["pool_carry"].get(self.TOKEN, 0)
+                + plain["claims"][AUTHOR]["tokens"][self.TOKEN])
 
     def test_household_of_a_bound_agent_is_withheld(self):
         owner = {AUD_A: HOUSE, AUD_B: AUD_B}
         cut = self._close(sanctioned_households=[HOUSE], agent_owner_map=owner,
                           rep_shares={HOUSE: 0.3, AUD_B: 0.2})
-        assert HOUSE not in cut["agent_mint"]
-        assert AUD_B in cut["agent_mint"]
+        assert HOUSE not in cut["claims"]
+        assert AUD_B in cut["claims"]
 
     def test_no_sanctions_changes_nothing_but_the_payload_field(self):
         plain = self._close()
-        assert plain["withheld_mint"] == {}
+        assert plain["withheld"] == {}
         assert plain["authoritative_payload"]["sanctioned_households"] == []

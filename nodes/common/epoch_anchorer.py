@@ -23,7 +23,8 @@ What this module does
   - Reads the on-chain ``latestAnchorHash`` and ``latestEpochRoot``
     so the new anchor links into the chain correctly.
   - Encodes the authoritative payload via the canonical encoding spec.
-  - Encodes the agent_mint blob, computes its CID.
+  - Encodes the claims blob (the claims and the concluded tools), computes
+    its CID, and builds the claimRoot over the same leaves.
   - Anchors via ``Substrate.anchor(...)`` (governor only; see governed_anchor).
   - Returns an AnchorResult with the on-chain tx hash, the encoded
     payload bytes (so the caller can serve the blob over P2P), and
@@ -49,11 +50,11 @@ from typing import Any, Dict, List, Optional
 
 from .authoritative_encoding import (
     cid_for_blob,
-    encode_agent_mint_blob,
+    encode_claims_blob,
     encode_authoritative_payload,
     payload_hash,
 )
-from .mint_merkle import mint_merkle_root
+from .mint_merkle import claim_merkle_root
 from .tx_nonce import next_nonce
 
 
@@ -62,7 +63,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AnchorFields:
-    """The eight arguments of ``Substrate.anchor``."""
+    """The eight arguments of ``Substrate.anchor``. ``agent_mint_cid`` is
+    its ``claimCid`` (the claims blob's sha256) and ``agent_mint_root`` its
+    ``claimRoot``."""
     epoch_id: str
     epoch_root: bytes
     prev_epoch_root: bytes
@@ -258,18 +261,17 @@ class EpochAnchorer:
 
             ph = payload_hash(payload_bytes)
 
-            # Encode + CID the off-chain agent_mint blob (money only,
-            # Decision 2026-07-10 — no agent_rep map; REP is DAO-claimed).
-            agent_mint = close_result.get("agent_mint") or payload.get("agent_mint", {})
+            # Encode + CID the off-chain claims blob.
+            claims = payload.get("claims") or close_result.get("claims") or {}
             concluded = payload.get("concluded") or close_result.get("concluded") or {}
-            mint_blob = encode_agent_mint_blob(agent_mint, concluded=concluded)
+            mint_blob = encode_claims_blob(claims, concluded=concluded)
             cid = cid_for_blob(mint_blob)
 
-            # Merkle root over the mint map and the concluded tools: each
-            # household's share is proven against this when claimed
-            # (claimFor, a 2-field (claimant, amount) leaf), and each
-            # concluded tool's leaf opens its verdict (ToolBond.conclude).
-            mint_root = mint_merkle_root(agent_mint, concluded=concluded)
+            # Merkle root over the claims and the concluded tools: each
+            # household's leaf (earner, tokens, amounts) is proven against
+            # this when claimed (Substrate.claim), and each concluded
+            # tool's leaf opens its verdict (ToolBond.conclude).
+            mint_root = claim_merkle_root(claims, concluded=concluded)
 
             from .voice_state import epoch_id_cutoff
             cutoff = epoch_id_cutoff(epoch_id)

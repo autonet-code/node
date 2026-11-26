@@ -1,4 +1,4 @@
-# Economy design: the current state (2026-11-10)
+# Economy design: the current state (2026-11-26)
 
 One page, kept current. Where this disagrees with older text elsewhere,
 this wins; the reasoning behind each rule is in `tool_substrate.md`
@@ -8,8 +8,8 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 
 ## Who is who
 
-- **Household** = an owner wallet. Its ATN and REP are claimed to it (the
-  daemon's operator key submits the claims; `claimFor` is permissionless,
+- **Household** = an owner wallet. Its pay and REP are claimed to it (the
+  daemon's operator key submits the claims; `claim` is permissionless,
   and an agent bound after a close's owner snapshot is paid at its own
   address). Agents and the daemon's operator key are bound to it; the
   operator proposes and votes with REP the owner delegates to it. No automatic delegation; a delegate
@@ -18,8 +18,8 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   external session's tools, bonds, reviews and payments come from the
   operator's address and balance. So a household reviews as one batch per
   epoch (no second review of a tool that ToolBond would weigh at zero),
-  and the owner funds only the operator: ATN for bonds and services, the
-  native token for gas. Native agents keep their own addresses and spend
+  and the owner funds only the operator: index tokens for bonds and
+  services, the native token for gas. Native agents keep their own addresses and spend
   only their own balances.
 - **Reward pools** (decided 2026-11-06, being built): a passive income pool
   on REP balance and a delegate pool paid only to delegates whose weight
@@ -31,73 +31,76 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 - **A household never earns from its own tools' reviews.** Earning needs
   other households.
 
-## Money (ATN)
+## Money: the value index's tokens (Decision 2026-11-25)
 
-- Each jurisdiction's Substrate is its own ATN token, so wallets can tell
-  them apart: named `<DAO name> ATN`, symbol `<first 8 characters of the
-  REP symbol>ATN` (REP gives REPATN), set at setup. 6 decimals: 1 ATN is
-  1e6 base units.
-- The tool pool is funded only by **burned service fees**: each
-  `payForService` takes a fee (setup default 2.5%, the DAO retunes it
-  between 0.5% and 10%), split between the DAO treasury and a burn (setup
-  default half each; the DAO retunes the treasury share up to 90%, so at
-  least a tenth always burns). Each anchor adds the fees burned between
-  the two previous cutoffs to the pool (the mint lags the burns by one
-  epoch), and claims are capped on-chain at the cumulative pool
-  (`Substrate.mintPoolTotal`), so whatever a close leaves unminted carries
-  over to the next epoch's pool. Zero volume, zero mint. Amounts are
-  floored to 1e-6 ATN; the dust carries over too. Besides the pool,
-  ATN is minted only by the vault (bought, below) and, for forks and
-  splits, the genesis claim.
-- **Bought, never redeemed.** The vault (`AutonetVault`, DAO side) sells
-  newly minted ATN for the tokens in the jurisdiction's value index
-  (Registry `jurisdiction.parity.<token>`, a stablecoin by default) at a
-  DAO-set parity, uncapped, and sends the payment straight to the treasury.
-  The same key converts project earnings to REP (times
-  `jurisdiction.economy.rep_rate_bps`), so a parity edit is constitutional
-  (decided 2026-11-18; it was ordinary while the two had separate keys).
-  There is no redeem path. So the parity is a ceiling on ATN's price, not a
-  peg: nobody pays more on a market than the vault asks, and nothing holds
-  the price up from below.
-- **ATN is money; REP is the scarce stake.** Supply follows demand at the
-  ceiling, which keeps prices of services stable in ATN and gives no reason
-  to hold ATN for appreciation. Scarcity, and the stake in the network, is
-  REP: soulbound, earned only from the tool pool, and the only voice.
-- **Cash-out is the open market, outside Autonet.** Earners (service
-  providers, tool authors, reviewers) sell ATN on exchanges or DEX pools
-  that anyone can open and anyone can provide liquidity to; nothing in
-  Autonet trades ATN for cash. Below the ceiling the market price is ATN's
-  value and service prices adjust to it. Keeping trading outside the
-  framework, with no redemption and no fixed value promised, keeps the
-  legal exposure low. Pools are expected to form wherever there is volume;
-  a small jurisdiction's thin pool costs its providers a wider spread.
-- **Why providers sell here anyway.** Selling a service through Autonet
-  costs less than elsewhere: a fee (2.5% by default; the DAO sets it
-  between 0.5% and 10%) with atomic payment and no
+- **No token of its own.** A jurisdiction is paid in the tokens of its
+  value index: every token with a non-zero Registry
+  `jurisdiction.parity.<token>` (6 to 18 decimals). The index is the
+  jurisdiction's own price: a parity says what one token is worth in the
+  jurisdiction's value unit (6 decimals; value = amount x parity / 1e30,
+  so 1 USDC at parity 1e30 and 1 DAI at 1e18 are both worth 1). Contracts
+  know no peg, oracle or fiat. Editing the index is constitutional (the
+  same key prices REP). Nothing is sold, minted or redeemed: there is no
+  vault and no genesis claim. A jurisdiction may later launch a token of
+  its own as an optional module; it joins the index like any other token.
+- **Providers price in a token of the index; the buyer pays in it.** Each
+  payment takes the service fee (setup default 2.5%, the DAO retunes it
+  between 0.5% and 10%, rounded up so no split of a payment escapes it).
+  Fees are collected, not burned: the treasury's share of the fee (setup
+  default half; the DAO retunes it up to 90%) goes to the treasury, and
+  the rest, the **tool share** (at least a tenth of every fee), fills that
+  token's pool in Substrate. The less the treasury takes, the more tool
+  authors and reviewers earn in money and REP.
+- **One pool per token, paid as a basket.** Each close splits the epoch's
+  pools among the tools that concluded (below): every earner takes the
+  same fraction of every token's pool, in one claim. The pool an epoch
+  pays is the tool share collected between the two previous cutoffs (one
+  epoch behind), plus whatever earlier closes left unpaid, and claims of a
+  token are capped on chain at its tool share collected up to the cutoff
+  before the latest one (`Substrate.poolCap`). Zero volume, zero pay.
+  Amounts are whole base units of each token; the dust carries over. The
+  parity never moves money: it prices only REP and bond sizes.
+- **Claimed, then withdrawn per token.** A claim credits each token's
+  amount as owed to the household and adds its value to `earnedValue`, the
+  base of its REP. The money then leaves by `withdraw`, one token at a
+  time, so a token whose issuer freezes or pauses it blocks nothing else;
+  a household may withdraw to another address it names. The treasury's
+  share is withdrawn the same way. Tokens sent to Substrate outside a
+  payment belong to the treasury (`sweep`): the pools take only fees.
+- **Custody stays split.** Substrate holds only the pools and what is owed
+  from them; channel deposits stay in PaymentChannel and bonds in ToolBond.
+  A token that delivers less than it was asked to move (a transfer fee) is
+  refused. The DAO vets each token before indexing it: no contract can
+  prove a token is not rebasing, not upgradeable or not owned by an
+  attacker, and an issuer can freeze any address that holds its token.
+- **REP is the scarce stake.** Money is whatever the index lists; REP is
+  soulbound, earned only from the tool share, and the only voice.
+- **Why providers sell here.** Selling a service through Autonet costs
+  less than elsewhere: a fee (2.5% by default) with atomic payment and no
   chargebacks (card processing is about 3%), no platform cut (freelance
-  marketplaces take 10 to 20%, app stores 15 to 30%), and buyers who find
-  the service through the probe without a sales process. That margin is
-  what absorbs the cash-out spread; where a pool is so thin its spread
-  exceeds it, providers would rather sell elsewhere.
+  marketplaces take 10 to 20%, app stores 15 to 30%), paid in a token the
+  provider already holds, and buyers who find the service through the
+  probe without a sales process.
 - **Services** (`ServiceMarket.sol`) are whatever needs an advantage that
   can't be copied: hardware (bare metal, GPUs, LLM inference), a human
   credential (a lawyer who passed the bar), data or access, physical
   presence (robots). Anything that is only know-how ends up a tool. They
-  earn money only: no mint, no REP, no standing; trust in them is
-  behavioral.
-- **Paying for services** (Decision 2026-11-12): holding ATN is the
-  household's credit in the service economy. Its credits with one provider
-  are a payment channel for all that provider's services, opened and
-  topped up by its Agent (nothing does either automatically). Vouchers pay
-  ahead by the provider's voucher size, so a buyer never has more than one
-  voucher at risk, and a request the provider refuses or fails costs
-  nothing; the provider cashes credits in without closing them, and its
-  fee burns as it earns. A one-off request to a provider the buyer holds
-  no credits with is paid directly. Prices are the provider's signed price
-  list (per request, or for a session per seconds, gigabytes, input tokens
-  and output tokens), changed without a transaction; a session keeps the
-  prices it opened with. The registry's price is optional and enforces
-  nothing.
+  earn money only: no REP, no standing; trust in them is behavioral.
+- **Paying for services** (Decision 2026-11-12): a household's credits
+  with one provider are a payment channel for all that provider's
+  services, in one token of the index fixed when it opens, opened and
+  topped up by its Agent (nothing does either automatically). Vouchers
+  name the token and pay ahead by the provider's voucher size, so a buyer
+  never has more than one voucher at risk, and a request the provider
+  refuses or fails costs nothing; the provider cashes credits in without
+  closing them, receiving the net from the deposit while the fee goes to
+  Substrate. A channel in a token the DAO removes from the index still
+  settles, closes and refunds, but takes no top-up. A one-off request to
+  a provider the buyer holds no credits with is paid directly. Prices are
+  the provider's signed price list, which names its token (per request,
+  or for a session per seconds, gigabytes, input tokens and output
+  tokens), changed without a transaction; a session keeps the prices it
+  opened with. The registry's price is optional and enforces nothing.
 - **Service reviews** (Decisions 2026-11-10 and 2026-11-12,
   `services_market.md`): a buyer rates a service with a tool review's
   fields (correctness, simplicity read as the buyer's convenience,
@@ -109,20 +112,20 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   its services; that still costs a real payment to that provider. The
   reviews ride the epoch batches; the close keeps each payer's latest per
   service and commits the ratings (means, the share flagging malware,
-  payers, what they paid the provider) in the anchored state. They inform
-  other buyers and enforce nothing: no mint, no REP, no slashing.
-- **OPEN:** a legal opinion (EU, MiCA) on the vault sale and on any
-  redemption from treasury reserves, which would turn the ceiling into a
-  peg; the launch parity; and a monetary model of ATN earned against ATN
-  bought, and of the pool depth at which cash-out costs more than the
-  channel saves (separate from the consensus design search,
-  `autonet-sims/DESIGN_SEARCH.md`).
+  payers, what they paid the provider, valued at the index) in the
+  anchored state. They inform other buyers and enforce nothing: no REP,
+  no slashing.
+- **OPEN:** a legal opinion on holding third parties' tokens in the pools,
+  bonds and channels (custody: EU payment and transfer services, US money
+  transmission; it may turn on who can upgrade the contracts), and the
+  launch index.
 
 ## Epochs
 
-- An epoch ends when burned fees reach `epoch_target_share` of ATN supply,
-  between a floor (the DAO's voting delay + voting period + timelock delay)
-  and a ceiling (`epoch_ceiling_votes`, 10, voting periods): more activity,
+- An epoch ends when the fees collected since the last cutoff, valued at
+  the index, reach `epoch_target_value` (Registry, value units), between a
+  floor (the DAO's voting delay + voting period + timelock delay) and a
+  ceiling (`epoch_ceiling_votes`, 10, voting periods): more activity,
   shorter epochs. Unset (0, unless the deployment sets it), every epoch
   lasts the floor. Daemons close `epoch_grace` (120 s) after a cutoff.
 - Every daemon with a registered agent or operator computes the close from
@@ -134,7 +137,7 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   is and the next attempt opens.
 - A silent chain pauses settlement only; work continues.
 
-## Tool mint (the only mint rail; Decisions 2026-11-07 and 2026-11-09)
+## Tool pay (the only earning rail; Decisions 2026-11-07, 2026-11-09, 2026-11-25)
 
 - **Paid once, from reviews.** Nothing can observe a household's private
   use, so attestations count for nothing and daemons no longer gossip them
@@ -183,10 +186,10 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   N (the novelty mean) of it; the declared dependencies split 1 - N
   equally, each composite dependency keeping its own N (0.7 while
   unrated), up to depth 4; cycles, missing or unpayable deps forfeit.
-  Without dependencies 1 - N stays unminted (a copy earns nothing). A
+  Without dependencies 1 - N stays unpaid (a copy earns nothing). A
   badly rated dependency still gets its part from a correct composite (it
-  comes out of the composite author's pay). What isn't paid stays unminted
-  and carries over.
+  comes out of the composite author's pay). What isn't paid stays in the
+  pools and carries over.
 - **Malware verdict** (Decision 2026-11-10): more than half the REP that
   reviewed the tool says malware (the share in bps, as the close computes
   it), judged once its reviewers clear the conclusion gate. It settles at
@@ -197,9 +200,9 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   author household's REP. The slashed bond never goes to the flaggers (no
   profit from a false flag; the deterrent stays). The author can't
   withdraw the bond while a verdict is forming. What the author side would
-  have paid (the author's and the dependencies' parts) is fixed in ATN at
-  the conclusion and recorded in the carried state, but stays unminted and
-  carries over: nothing is reserved.
+  have paid (the author's and the dependencies' parts, per token) is fixed
+  at the conclusion and recorded in the carried state, but stays in the
+  pools and carries over: nothing is reserved.
 - **The DAO's word, at any time, by proposal**: `ToolBond.clear` reverses a
   verdict (the reviewers' or its own) and gives back the REP ToolBond
   burned for the tool, an ordinary proposal; the same proposal returns the
@@ -220,16 +223,20 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   one against the DAO's values stays in the library, spreads to every
   daemon, shows in search with its ratings and can be adopted. A fix is a
   new version with a new bond.
-- **Excluded**: unbonded tools, and sanctioned households' mint (withheld).
-- **Bounty** (ToolBond, on chain): anyone can add ATN to a tool's bounty
+- **Excluded**: unbonded tools, and sanctioned households' pay (withheld).
+- **Bond**: in one token of the index, valued at the parity of the moment
+  it was posted (a later index edit never unbonds an existing tool).
+- **Bounty** (ToolBond, on chain): anyone can add to a tool's bounty, in
+  the bond's token
   (`addBounty`). As each round finalizes, every settled review takes
   bounty x (its REP / the REP a tool needs to conclude) x its accuracy,
   paid to its household; a household whose REP alone covers the
   requirement can take it all. Never by the scores given, also when the
   tool is disqualified or malicious. Sanctioned households get none. It is
-  author money, not mint, so it earns no REP and REP may weigh it. The
-  author gets the unspent rest back only with the bond.
-- **No ATN stakes on reviews.** They deterred nothing (the reviewer chose
+  money from outside the pools, so it earns no REP and REP may weigh it.
+  The unspent rest goes to the treasury when the author withdraws the
+  bond: it is other people's money (ToolBond review R6, 2026-11-17).
+- **No money stakes on reviews.** They deterred nothing (the reviewer chose
   the amount, default 0), changed no weight, rating or payment, and as a
   group lost the fee. A household with no REP at the epoch's start (the
   previous anchor) cannot review (ToolBond refuses its commit); its daemon
@@ -239,8 +246,12 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 
 ## Voice (REP)
 
-- Soulbound. Claimed through `AutonetRepClaim`, 1:1 on cumulative
-  **tool-pool** earnings (`agentMintTotal`). Service revenue earns no REP.
+- Soulbound. Claimed through `AutonetRepClaim`, 1:1 on the cumulative
+  value of **tool-pool** earnings (`Substrate.earnedValue`: each claim's
+  amounts at the parities Substrate stored when the epoch was anchored,
+  computed on chain from amounts the pool cap bounds, so no anchor can
+  grant more REP than the fees collected are worth).
+  Service revenue earns no REP.
 - Weighs reviews (by the reviewer's household REP), votes, elections.
 - **Moves on reviews** (ToolBond): each review risks `degradeBps` (10%) of the
   household REP it weighed, losing that x (1 - accuracy), reassigned to the
@@ -284,7 +295,7 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 - Detection is off-chain and per node (nodes notice, report, coordinate).
   It ends attacks; the deterministic rules only price and slow them.
 - A **sanction** is an ordinary governor proposal at its quorum: it
-  withholds the households' mint (not redistributed) and weighs their
+  withholds the households' pay (not redistributed) and weighs their
   reviews at 0. Burning their farmed REP (`RepToken.burn`, the timelock is
   its admin) makes the proposal constitutional: For from two thirds of all REP.
 - Holds below about a third of REP bribed; above half, the honest side
@@ -295,16 +306,14 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 
 ## Splits, reunions, forks (`resilience.md` 5.1)
 
-- A new jurisdiction's genesis carries REP (deploy member list) and ATN
-  (`Substrate.claimGenesis`, merkle root from `scripts/build_atn_genesis.py`).
-- These are procedures, not yet code beyond the genesis builder
-  (`scripts/build_atn_genesis.py` copies current ATN and REP balances minus
-  an exclusion list). Split: REP re-derived from everyone's earnings.
-  Reunion: both sides' earnings count. Fork: genesis minus every address
-  that voted against the sanction.
+- A new jurisdiction's genesis carries REP (deploy member list). Money is
+  not carried: households keep the tokens they hold, and what the old
+  jurisdiction's pools owe them stays claimable there.
+- These are procedures, not code. Split: REP re-derived from everyone's
+  earnings. Reunion: both sides' earnings count. Fork: genesis minus every
+  address that voted against the sanction.
 
 ## Launch
 
-- Mainnet starts with a **virgin mint**: nothing from test networks
-  carries over. The WAN run's tools are re-published as a baseline
+- Mainnet starts **empty**: nothing from test networks carries over. The WAN run's tools are re-published as a baseline
   library from the owner's household.

@@ -37,9 +37,6 @@ eth_tester = pytest.importorskip("eth_tester")
 from web3 import Web3
 from web3.providers.eth_tester import EthereumTesterProvider
 
-from nodes.common.authoritative_encoding import (
-    decode_agent_mint_blob,
-)
 from nodes.common.authoritative_submitter import epoch_id_hash
 from nodes.common.blob_resolver import InMemoryBlobResolver
 from nodes.common.canonical_ordering import canonical_order
@@ -51,10 +48,10 @@ from nodes.common.chain_submission_driver import (
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
 from nodes.common.event_gossip import EventBatch, Keypair
 from nodes.common.federated_close_driver import FederatedCloseResult
-from nodes.common.mint_merkle import scale_mint
 from tests.substrate_chain_helpers import (
     account_key,
     deploy_substrate,
+    index_tokens,
     register_bound,
     reviewed_close,
     seed_pool,
@@ -97,8 +94,8 @@ def chain():
     agent_addrs = accounts[1:4]
     for i, a in enumerate(agent_addrs):
         _register_agent(w3, contract, a, f"agent-lineage-{i}")
-    # Fees-only pool covering the test anchor's mints.
-    seed_pool(w3, contract)
+    # Fees-only pools covering the test anchor's claims.
+    window = seed_pool(w3, contract)
     return {
         "w3": w3,
         "abi": abi,
@@ -106,6 +103,7 @@ def chain():
         "contract": contract,
         "deployer": deployer,
         "agent_addrs": list(agent_addrs),
+        "window": window,
     }
 
 
@@ -123,6 +121,7 @@ def _build_federated_close_result(
     rpb: str,
     agent_addrs: List[str],
     is_winner: bool = True,
+    window=None,
 ) -> Tuple[FederatedCloseResult, List[bytes]]:
     """Build a real federated close result + the canonical sender list."""
     senders = [Keypair.generate() for _ in agent_addrs]
@@ -130,7 +129,7 @@ def _build_federated_close_result(
     for kp, aid in zip(senders, agent_addrs):
         batches.extend(_make_chain(rpb, kp, aid))
     canonical = canonical_order(batches)
-    close_result = reviewed_close(canonical)
+    close_result = reviewed_close(canonical, tool_share_window=window)
     close_result["epoch_id"] = epoch_id
     sender_pubkeys = [s.public_key for s in senders]
     fed = FederatedCloseResult(
@@ -159,14 +158,15 @@ def test_winner_drives_anchor_and_each_agent_mint_lands(chain):
         rpb="rpb_phase10_5",
         agent_addrs=agent_addrs,
         is_winner=True,
+        window=chain["window"],
     )
-    payload_mint = fed.close_result["authoritative_payload"]["agent_mint"]
+    claims = fed.close_result["authoritative_payload"]["claims"]
     # Every agent authored a tool whose review round concluded, so every
-    # agent mints. Claimants keyed lowercase (no owner map => each agent
-    # is its own household).
-    minting_addrs = [a for a in agent_addrs
-                     if payload_mint.get(a.lower(), 0.0) > 0]
-    assert minting_addrs == agent_addrs, f"mint map: {payload_mint}"
+    # agent earns. Earners keyed lowercase (no owner map => each agent is
+    # its own household).
+    minting_addrs = [a for a in agent_addrs if a.lower() in claims]
+    assert minting_addrs == agent_addrs, f"claims: {claims}"
+    tokens = index_tokens(contract)
 
     # Build the chain submission driver wired to eth_tester.
     # Use the existing _build_anchorer escape-hatch by passing an
@@ -202,8 +202,8 @@ def test_winner_drives_anchor_and_each_agent_mint_lands(chain):
         anchorer=anchorer,
         submitter_web3=w3,
     )
-    bal_before = {a: contract.functions.balanceOf(a).call()
-                  for a in agent_addrs + [deployer]}
+    bal_before = {(a, t.address.lower()): t.functions.balanceOf(a).call()
+                  for a in agent_addrs + [deployer] for t in tokens}
 
     out = driver.handle_federated_close(fed)
 
@@ -211,29 +211,18 @@ def test_winner_drives_anchor_and_each_agent_mint_lands(chain):
     assert out["anchor_tx"], out
     assert len(out["agent_submissions"]) == len(agent_addrs)
 
-    # On-chain: every agent that had positive authoritative mint
-    # has the matching scaled value recorded for this epoch.
+    # On-chain: every household claimed its leaf, and the tokens landed on
+    # the earner although the operator sent the txs.
     eid_hash = epoch_id_hash(fed.epoch_id)
     for a in minting_addrs:
-        on_chain = contract.functions.mintForEpoch(a, eid_hash).call()
-        scaled = scale_mint(payload_mint[a.lower()])
-        assert on_chain == scaled, (
-            f"agent {a}: on_chain={on_chain} expected={scaled}"
-        )
-        # ATN landed on the claimant although the operator sent the tx.
-        assert contract.functions.balanceOf(a).call() == bal_before[a] + scaled
-    assert contract.functions.balanceOf(deployer).call() == bal_before[deployer]
+        assert contract.functions.claimedEpoch(a, eid_hash).call()
+        for t in tokens:
+            k = t.address.lower()
+            assert t.functions.balanceOf(a).call() == (
+                bal_before[(a, k)] + claims[a.lower()]["tokens"][k])
+    for t in tokens:
+        assert t.functions.balanceOf(deployer).call() == bal_before[(deployer, t.address.lower())]
     assert {r["claimant"].lower() for r in out["agent_submissions"]} == {
         a.lower() for a in agent_addrs}
     assert all(r["success"] for r in out["agent_submissions"]), out
-
-    # Agents with no authoritative mint should remain at zero —
-    # ``skip_zero=True`` means the submitter doesn't even attempt
-    # the tx. (They show up in agent_submissions with success=True
-    # and contribution_scaled=0.)
-    for a in agent_addrs:
-        if a in minting_addrs:
-            continue
-        assert contract.functions.mintForEpoch(a, eid_hash).call() == 0
-
-
+    assert all(not r["withdraw_errors"] for r in out["agent_submissions"]), out

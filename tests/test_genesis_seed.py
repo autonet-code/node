@@ -148,7 +148,7 @@ def test_seed_payload_and_anchor_args():
     payload = json.loads(seed["payload"])
     assert payload["seed"] is True and list(payload)[-1] == "seed"
     assert payload["carry_cid"] == seed["carry_cid"]
-    assert payload["epoch_id"] == "seed" and payload["agent_mint"] == {}
+    assert payload["epoch_id"] == "seed" and payload["claims"] == {}
     assert payload["prev_epoch_root"] == ZERO
     a = seed["anchor_args"]
     assert a["payloadHash"] == "0x" + cid_for_blob(seed["payload"])

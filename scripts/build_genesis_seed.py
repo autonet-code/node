@@ -179,7 +179,7 @@ def build_seed(carry: Dict[str, Any], *, chain_id: int,
     root = seed_epoch_root(carry_cid, chain_id)
     payload = encode_authoritative_payload(
         {
-            "agent_mint": {}, "total_mint": 0.0, "n_batches": 0,
+            "claims": {}, "total_value": 0, "n_batches": 0,
             "n_events": 0, "carry_cid": carry_cid, "seed": True,
         },
         epoch_id=SEED_EPOCH_ID, epoch_root_hex=root,

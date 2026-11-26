@@ -81,12 +81,12 @@ class TestReadEconomyGraph:
     def test_recent_mint_and_last_epoch(self, economy):
         svc, dep, comp = economy
         svc.note_federated_close({"tool_mint": {comp: {"mint": 2.0}, dep: {"mint": 1.0}},
-                                  "total_mint": 3.0}, epoch_id="ep-econ-2")
+                                  "total_value": 3}, epoch_id="ep-econ-2")
         eg = svc.read_economy_graph(last_n_epochs=5)
         assert eg["recent_tool_mint"][comp] == pytest.approx(2.0)
         assert eg["recent_tool_mint"][dep] == pytest.approx(1.0)
         assert eg["last_epoch"]["epoch_id"] == "ep-econ-2"
-        assert eg["last_epoch"]["total_mint"] == 3.0
+        assert eg["last_epoch"]["total_value"] == 3
         # The later close carried no registrations: the earlier ones stand.
         assert set(eg["registrations"]) == {dep, comp}
 

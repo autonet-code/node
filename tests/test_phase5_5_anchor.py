@@ -12,10 +12,10 @@ Validates:
      mismatches revert.
   4. Empty epochs can be anchored (using EMPTY_EPOCH_ROOT).
   5. Three-daemon federation: same canonical close -> same encoded
-     payload -> same payload_hash -> same agent_mint_cid; first
+     payload -> same payload_hash -> same claims cid; first
      submission wins, others get EpochAlreadyAnchored.
-  6. Off-chain agent_mint blob is decodable via the CID and reproduces
-     the original agent_mint dict.
+  6. The off-chain claims blob is decodable via the CID and reproduces
+     the close's claims.
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ from web3.providers.eth_tester import EthereumTesterProvider
 
 from nodes.common.authoritative_encoding import (
     cid_for_blob,
-    decode_agent_mint_blob,
-    encode_agent_mint_blob,
+    decode_claims_blob,
+    encode_claims_blob,
     encode_authoritative_payload,
     payload_hash,
 )
@@ -162,16 +162,17 @@ def test_encoding_is_byte_identical_across_calls():
     assert decoded["epoch_root"] == payload["epoch_root"]
 
 
-def test_encoding_rejects_non_finite_floats():
-    """NaN / inf in agent_mint must be rejected, not silently anchored."""
+@pytest.mark.parametrize("bad", [float("inf"), 1.5, -1, True])
+def test_encoding_rejects_amounts_that_are_not_whole_numbers(bad):
+    """A float, a negative or a bool amount must be rejected, never
+    anchored: every amount is an integer of base units."""
     payload = {
         "epoch_root": "00" * 32,
-        "agent_mint": {"alice": float("inf")},
-        "total_mint": 0.0,
+        "claims": {"alice": {"tokens": {"0x" + "a6" * 20: bad}, "value": 0}},
         "n_batches": 0,
         "n_events": 0,
     }
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         encode_authoritative_payload(
             payload,
             epoch_id="e_bad",
@@ -180,15 +181,27 @@ def test_encoding_rejects_non_finite_floats():
         )
 
 
-def test_agent_mint_blob_round_trip():
-    """The off-chain blob decodes back to the original mint dict."""
-    mint = {"alice": 1.234567890123, "bob": 0.5, "carol_zzz": 7.7}
-    blob = encode_agent_mint_blob(mint)
-    decoded = decode_agent_mint_blob(blob)
-    # Values are rounded to 10 decimals at encode time.
-    assert decoded["alice"] == pytest.approx(round(1.234567890123, 10))
-    assert decoded["bob"] == 0.5
-    assert decoded["carol_zzz"] == 7.7
+def test_amounts_are_decimal_strings_in_the_payload():
+    big = 123_456_789 * 10 ** 18 + 7
+    t = "0x" + "1B" * 20
+    encoded = encode_authoritative_payload(
+        {"claims": {"0xAB": {"tokens": {t: big}, "value": 5}}, "pools": {t: big},
+         "parity": {t: 10 ** 18}, "total_value": 5},
+        epoch_id="e", epoch_root_hex="00" * 32, prev_epoch_root_hex="00" * 32)
+    d = json.loads(encoded)
+    assert d["schema"] == 9
+    assert d["claims"] == {"0xab": {"tokens": {t.lower(): str(big)}, "value": "5"}}
+    assert d["pools"] == {t.lower(): str(big)} and d["parity"] == {t.lower(): str(10 ** 18)}
+    assert d["total_value"] == "5"
+
+
+def test_claims_blob_round_trip():
+    """The off-chain blob decodes back to the original claims, exactly."""
+    t6, t18 = "0x" + "a6" * 20, "0x" + "1b" * 20
+    claims = {"alice": {"tokens": {t6: 1_234_567, t18: 10 ** 24 + 1}, "value": 1_234_567},
+              "bob": {"tokens": {t6: 5}, "value": 5}}
+    blob = encode_claims_blob(claims)
+    assert decode_claims_blob(blob) == claims
     # CID is sha256 hex.
     cid = cid_for_blob(blob)
     assert len(cid) == 64
@@ -384,7 +397,7 @@ def test_empty_epoch_can_be_anchored(chain):
     result = federated_epoch_close(canonical)
     result["epoch_id"] = "e_empty"
     assert result["epoch_root"] == EMPTY_EPOCH_ROOT.hex()
-    assert result["agent_mint"] == {}
+    assert result["claims"] == {}
 
     submission = anchorer.anchor_close_result(
 
@@ -452,7 +465,7 @@ def test_three_daemons_compute_same_payload_first_anchor_wins(chain):
     ]
     assert encoded[0] == encoded[1] == encoded[2]
     # And the same CIDs.
-    blobs = [encode_agent_mint_blob(r["agent_mint"]) for r in results]
+    blobs = [encode_claims_blob(r["claims"]) for r in results]
     assert blobs[0] == blobs[1] == blobs[2]
     assert (
         cid_for_blob(blobs[0])
@@ -515,13 +528,5 @@ def test_agent_reads_mint_from_cid_blob(chain):
     blob = submission.agent_mint_blob
     assert cid_for_blob(blob) == cid_on_chain
 
-    # Decode and look up the agent's mint.
-    mint_map = decode_agent_mint_blob(blob)
-    expected = result["agent_mint"]
-    # Whatever agents are in the authoritative map decode back with
-    # matching values. (Empty map is also valid — the federation may
-    # cluster all events into one agent's contributions, or none if
-    # all canonical batches dropped.)
-    assert set(mint_map.keys()) == set(expected.keys())
-    for agent_id in expected:
-        assert mint_map[agent_id] == pytest.approx(expected[agent_id])
+    # Decode: the claims decode back exactly (empty is valid too).
+    assert decode_claims_blob(blob) == result["claims"]
