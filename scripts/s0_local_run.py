@@ -103,7 +103,7 @@ MODEL_DIR = Path(os.environ.get("S0_MODEL_DIR") or (S0_DIR / "models"))
 MODEL_FROM_PEERS = {n.strip() for n in os.environ.get("S0_MODEL_FROM_PEERS", "h4").split(",")
                     if n.strip()}
 
-RPC_PORT = 8545
+RPC_PORT = int(os.environ.get("S0_RPC_PORT", "8545"))
 # S2 VMs point this at the hub chain (https://rpc.autonet.computer/<token>).
 RPC_URL = os.environ.get("S0_RPC_URL") or f"http://127.0.0.1:{RPC_PORT}"
 EXTERNAL_CHAIN = os.environ.get("S0_EXTERNAL_CHAIN", "") == "1"
@@ -392,6 +392,8 @@ def deploy_jurisdiction(run: Path, tokens: Dict[str, Any], owners: List[str],
         "PARITY_TOKENS": ",".join(tokens[k].address for k in INDEX),
         "PARITY_VALUES": ",".join(str(INDEX[k]["parity"]) for k in INDEX),
         "OUT": str(out),
+        # The dao suite's hardhat network "localhost" follows E2E_RPC_URL.
+        "E2E_RPC_URL": RPC_URL,
         "MSYS_NO_PATHCONV": "1",
     })
     npx = "npx.cmd" if os.name == "nt" else "npx"
@@ -1065,6 +1067,120 @@ class Activity:
             self.queued.setdefault(s.agent_id, {}).setdefault(int(q["epoch"]), set()).add(
                 str(q.get("reviewer") or "").lower())
 
+    # ---- services between real daemons, through the agent API ---------------
+    SERVICE_NAME = "s0_upper_service"
+
+    async def services_leg(self) -> None:
+        """The launch path for services: external agents of three households
+        buy and sell through the agent API, between their real daemons.
+        h1's owner grants its agent selling; the agent registers a tool and
+        publishes a request service priced in tt6. h2's agent finds it,
+        opens credits with h1's operator and buys three requests on them;
+        h3's agent buys one with a direct payment. Both review it. The
+        provider's daemon cashes the credits in by itself
+        (report_services)."""
+        self.svc: Dict[str, Any] = {"ok": False}
+        if len(self.hs) < 3 or "tt6" not in self.tokens:
+            log("SERVICES: skipped (needs three households and tt6)")
+            return
+        seller_h, buyer_h, direct_h = self.hs[0], self.hs[1], self.hs[2]
+        seller, buyer, direct = (self.sessions(seller_h)[0], self.sessions(buyer_h)[0],
+                                 self.sessions(direct_h)[0])
+        from atn.agent_tools import EXTERNAL_DEFAULT_TOOLS
+        g = await self.call(seller_h, {"type": "update_agent", "agent_id": seller.agent_id,
+                                       "tools": list(EXTERNAL_DEFAULT_TOOLS) + ["services"]},
+                            "grant_selling")
+        if "error" in g:
+            return
+        t = await self.call(seller, {"type": "register_tool", "name": self.SERVICE_NAME,
+                                     "description": "Uppercase a text, sold as a service.",
+                                     "input_schema": TEXT_SCHEMA,
+                                     "code": _prog("print(json.dumps({'text': args['text'].upper()}))")},
+                            "register_service_tool")
+        digest = t.get("digest") or (t.get("tool") or {}).get("digest") or ""
+        idx = await self.call(seller, {"type": "list_index_tokens"}, "list_index_tokens")
+        tt6 = self.tokens["tt6"].address
+        listed = [str(x.get("token", "")).lower() for x in (idx.get("tokens") or [])]
+        log(f"SERVICES: index tokens the agent sees: {listed}")
+        price = amount_for_value("tt6", 1_000_000)      # one unit of the index per request
+        reg = await self.call(seller, {"type": "register_service", "mode": "request",
+                                       "backing_tool": digest, "name": self.SERVICE_NAME,
+                                       "description": "Uppercases a text. Paid in tt6.",
+                                       "token": tt6, "price": price, "voucher": price},
+                              "register_service")
+        sid = reg.get("service_id")
+        if sid is None:
+            log(f"SERVICES: register_service gave no service id: {str(reg)[:300]}")
+            return
+        # The buyers' daemons learn the service from the chain and the gossip.
+        found = None
+        deadline = time.time() + 180
+        while time.time() < deadline and found is None:
+            fs = await self.call(buyer, {"type": "find_services", "query": "uppercase text"},
+                                 "find_services")
+            found = next((s for s in fs.get("services") or [] if s.get("service_id") == sid), None)
+            if found is None:
+                await asyncio.sleep(5)
+        log(f"SERVICES: h2 finds service {sid}: {found is not None}")
+        if found is None:
+            return
+        provider = self.w3.to_checksum_address(seller_h.operator)
+        oc = await self.call(buyer, {"type": "open_credits", "provider_address": provider,
+                                     "token": tt6, "deposit": 10 * price}, "open_credits")
+        results = []
+        for text in SAMPLE_TEXTS[:3]:
+            r = await self.call(buyer, {"type": "request_service", "service_id": sid,
+                                        "payload": {"text": text}, "pay": "credits"},
+                                "request_service_credits")
+            results.append((text, r))
+        def answered(r: Dict[str, Any], text: str) -> bool:
+            return text.upper() in json.dumps(r.get("result"))
+
+        good = sum(answered(r, text) for text, r in results)
+        for text, r in results:
+            log(f"SERVICES: request {text!r} -> {str(r)[:200]}")
+        d = await self.call(direct, {"type": "request_service", "service_id": sid,
+                                     "payload": {"text": "direct payment"}, "pay": "direct"},
+                            "request_service_direct")
+        log(f"SERVICES: direct -> {str(d)[:200]}")
+        direct_ok = answered(d, "direct payment")
+        lc = await self.call(buyer, {"type": "list_credits"}, "list_credits")
+        review = {"service_id": sid, "correctness": 0.9, "simplicity": 0.8, "novelty": 0.2,
+                  "malware": False, "note": "s0: does what it says"}
+        rv1 = await self.call(buyer, {"type": "review_service", **review}, "review_service")
+        rv2 = await self.call(direct, {"type": "review_service", **review}, "review_service")
+        self.svc = {"ok": "error" not in oc and good == 3 and direct_ok, "service_id": sid,
+                    "price": price, "credits_ok": good, "direct_ok": direct_ok,
+                    "provider": provider, "buyer": self.w3.to_checksum_address(buyer_h.operator),
+                    "reviews": ["error" not in rv1, "error" not in rv2]}
+        log(f"SERVICES: credits opened {'error' not in oc}; {good}/3 requests on credits "
+            f"answered right; direct payment answered right {direct_ok}; "
+            f"credits now {str(lc.get('credits') or lc)[:300]}; reviews sent "
+            f"{self.svc['reviews']}")
+
+    def report_services(self) -> bool:
+        """What the provider's daemon cashed in from the buyer's credits by
+        itself (ChannelPaid), and the service's rating in the latest close."""
+        svc = getattr(self, "svc", {"ok": False})
+        if not svc.get("ok"):
+            log(f"SERVICES: FAILED ({svc})")
+            return False
+        a = self.j.get("autonet", {})
+        pc_addr = a.get("paymentChannel") or a.get("payment_channel")
+        paid = 0
+        if pc_addr:
+            pc_art = REPO / "artifacts" / "contracts" / "core" / "ServiceMarket.sol" / "PaymentChannel.json"
+            pc = self.w3.eth.contract(address=self.w3.to_checksum_address(pc_addr),
+                                      abi=json.loads(pc_art.read_text(encoding="utf-8"))["abi"])
+            for ev in pc.events.ChannelPaid().get_logs(
+                    from_block=0, argument_filters={"provider": svc["provider"],
+                                                    "client": svc["buyer"]}):
+                paid = max(paid, int(ev["args"]["paidTotal"]))
+        log(f"SERVICES: provider cashed in {paid} of the buyer's credits on chain "
+            f"(3 requests at {svc['price']} served: all cashed in {paid >= 3 * svc['price']}); "
+            f"payment channel {pc_addr}")
+        return paid > 0
+
     async def pay(self, h: Household, value: int, rng) -> None:
         """A direct payment for a service worth ``value`` (6-decimal units),
         in one of the index's tokens at random (Substrate.payForService after
@@ -1619,6 +1735,7 @@ async def amain() -> int:
         await act.author()
         act.add_bounty()
         await act.adopt()
+        await act.services_leg()
         await activity_loop(act, MINUTES)
         log(f"activity done: {json.dumps(act.counts, sort_keys=True)}")
 
@@ -1651,6 +1768,7 @@ async def amain() -> int:
         # close is anchored and claimed.
         await drain(act)
         collected = act.report_mint()
+        services_ok = act.report_services()
         act.report_verdicts()
         await act.report_evidence()
         act.report_batches()
@@ -1662,7 +1780,7 @@ async def amain() -> int:
             log("S0_KEEP=1: leaving everything running; Ctrl+C to stop")
             while True:
                 await asyncio.sleep(3600)
-        return 0 if collected else 1
+        return 0 if collected and services_ok else 1
     except Exception:
         log(traceback.format_exc())
         return 1
