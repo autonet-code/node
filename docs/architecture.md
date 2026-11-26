@@ -215,7 +215,9 @@ Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 anchors, agent registry with owner binding, tool authorship, service
 payments in the value index's tokens with the fee, one pool per token,
 claims that pay the whole basket in one transaction, a token whose
-transfer fails staying owed for a later per-token withdrawal), `AnchorElection.sol`,
+transfer fails staying owed for a later per-token withdrawal, and the REP
+floor stored with each anchor, whose seed a claim adds to the value REP is
+claimed on), `AnchorElection.sol`,
 `ServiceMarket.sol`. Substrate is not a token: money is whatever the
 value index lists (Registry `jurisdiction.parity.<token>`), and Substrate
 holds only the pools and what they owe. Each jurisdiction's Substrate is

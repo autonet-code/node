@@ -1,7 +1,7 @@
 """Claim proofs: the python tree and Substrate's verification.
 
 The anchor commits a claimRoot; ``Substrate.claim`` only accepts an
-(earner, tokens, amounts) leaf that proves into it, whoever sends the
+(earner, tokens, amounts, seed) leaf that proves into it, whoever sends the
 transaction (Decision 2026-10-27: the owner wallet earns, the daemon
 operates). These tests pin:
 
@@ -48,8 +48,10 @@ def _claims(n: int):
 
 
 def _fields(claims, earner):
+    """(tokens, amounts, seed): the leaf's fields after the earner."""
     tokens = sorted(t.lower() for t in claims[earner]["tokens"])
-    return tokens, [claims[earner]["tokens"][t] for t in tokens]
+    return (tokens, [claims[earner]["tokens"][t] for t in tokens],
+            int(claims[earner].get("seed") or 0))
 
 
 # ---------------------------------------------------------------------------
@@ -78,9 +80,11 @@ def test_wrong_amount_fails_verification():
     claims = _claims(2)
     root = claim_merkle_root(claims)
     proof = claim_merkle_proof(claims, ADDRS[0])
-    tokens, amounts = _fields(claims, ADDRS[0])
-    assert not verify_claim_proof(root, ADDRS[0], tokens, [amounts[0] + 1, amounts[1]], proof)
-    assert not verify_claim_proof(root, ADDRS[0], tokens[:1], amounts[:1], proof)
+    tokens, amounts, seed = _fields(claims, ADDRS[0])
+    assert verify_claim_proof(root, ADDRS[0], tokens, amounts, seed, proof)
+    assert not verify_claim_proof(root, ADDRS[0], tokens, [amounts[0] + 1, amounts[1]], seed, proof)
+    assert not verify_claim_proof(root, ADDRS[0], tokens[:1], amounts[:1], seed, proof)
+    assert not verify_claim_proof(root, ADDRS[0], tokens, amounts, seed + 1, proof)
 
 
 def test_non_address_and_zero_amounts_excluded():
@@ -89,10 +93,27 @@ def test_non_address_and_zero_amounts_excluded():
               ADDRS[1]: {"tokens": {T6: 3, T18: 0}, "value": 3}}
     leaves = claim_leaves(claims)
     assert len(leaves) == 1
-    earner, tokens, amounts = leaves[0]
+    earner, tokens, amounts, seed = leaves[0]
     assert earner.lower() == ADDRS[1] and tokens == [to_checksum_address(T6)] and amounts == [3]
+    assert seed == 0
     assert claim_merkle_proof(claims, "alice") is None
     assert claim_merkle_proof(claims, ADDRS[0]) is None
+
+
+def test_a_seed_alone_makes_a_leaf_and_is_in_it():
+    """The REP floor: a household with no tokens but a seed has a leaf, and
+    the seed is committed (a different seed is a different leaf)."""
+    claims = {ADDRS[0]: {"tokens": {}, "value": 0, "seed": 40},
+              ADDRS[1]: {"tokens": {T6: 3}, "value": 3, "seed": 0}}
+    leaves = claim_leaves(claims)
+    assert [(l[0].lower(), l[1], l[2], l[3]) for l in leaves] == [
+        (ADDRS[0], [], [], 40), (ADDRS[1], [to_checksum_address(T6)], [3], 0)]
+    root = claim_merkle_root(claims)
+    proof = claim_merkle_proof(claims, ADDRS[0])
+    assert verify_claim_proof(root, ADDRS[0], [], [], 40, proof)
+    assert not verify_claim_proof(root, ADDRS[0], [], [], 41, proof)
+    bumped = {**claims, ADDRS[0]: {**claims[ADDRS[0]], "seed": 41}}
+    assert claim_merkle_root(bumped) != root
 
 
 def test_empty_claims_yield_empty_root():
@@ -117,19 +138,20 @@ def test_value_is_not_in_the_leaf():
 
 def test_leaf_matches_an_independent_abi_encoding_two_tokens():
     """keccak256(bytes.concat(keccak256(abi.encode(CLAIM_TAG, earner,
-    tokens, amounts)))), tokens ascending."""
+    tokens, amounts, seed)))), tokens ascending."""
     earner = "0x" + "c0" * 20
-    claims = {earner: {"tokens": {T6: 1_234_567, T18: 5 * 10 ** 17}, "value": 1_734_567}}
+    claims = {earner: {"tokens": {T6: 1_234_567, T18: 5 * 10 ** 17}, "value": 1_734_567,
+                       "seed": 265_433}}
     tokens = sorted([T6, T18])                  # lowercase order = numeric order
     amounts = [claims[earner]["tokens"][t] for t in tokens]
     assert tokens == [T18, T6]                  # 0x1b.. < 0xa6..
     expected = keccak(keccak(abi_encode(
-        ["bytes32", "address", "address[]", "uint256[]"],
+        ["bytes32", "address", "address[]", "uint256[]", "uint256"],
         [keccak(text="autonet.claim"), to_checksum_address(earner),
-         [to_checksum_address(t) for t in tokens], amounts])))
+         [to_checksum_address(t) for t in tokens], amounts, 265_433])))
     assert CLAIM_TAG == keccak(text="autonet.claim")
     assert claim_merkle_root(claims) == expected
-    assert claim_leaf(earner, tokens, amounts) == expected
+    assert claim_leaf(earner, tokens, amounts, 265_433) == expected
 
 
 def test_concluded_leaves_share_the_tree():
@@ -181,21 +203,14 @@ def chain():
             "shares": shares}
 
 
-def _new_claim_abi(chain):
-    from tests.substrate_chain_helpers import claim_takes_value
-    if claim_takes_value(chain["abi"]):
-        pytest.skip("the compiled Substrate still takes a value in claim; "
-                    "recompile after the leaf without it lands")
-
-
 def test_leaf_matches_substrate_claim_leaf(chain):
-    _new_claim_abi(chain)
     earner = chain["agent_addrs"][0]
     tokens = sorted(t.address.lower() for t in chain["tokens"])
     amounts = [7, 10 ** 18 + 3]
-    onchain = chain["contract"].functions.claimLeaf(
-        earner, [to_checksum_address(t) for t in tokens], amounts).call()
-    assert bytes(onchain) == claim_leaf(earner, tokens, amounts)
+    for seed in (0, 12_345):
+        onchain = chain["contract"].functions.claimLeaf(
+            earner, [to_checksum_address(t) for t in tokens], amounts, seed).call()
+        assert bytes(onchain) == claim_leaf(earner, tokens, amounts, seed)
 
 
 def _anchor_claims(chain, claims, epoch_id):
@@ -221,17 +236,16 @@ def _two_token_claims(chain, *amounts_per_earner):
 
 def _claim(chain, claims, earner, epoch_id, sender=None, tokens=None, amounts=None):
     from nodes.common.authoritative_submitter import epoch_id_hash
-    t, a = _fields(claims, earner.lower())
+    t, a, seed = _fields(claims, earner.lower())
     proof = claim_merkle_proof(claims, earner)
     tx = chain["contract"].functions.claim(
         earner, epoch_id_hash(epoch_id),
-        [to_checksum_address(x) for x in (tokens or t)], amounts or a, proof,
+        [to_checksum_address(x) for x in (tokens or t)], amounts or a, seed, proof,
     ).transact({"from": sender or chain["deployer"], "gas": 1_500_000})
     return chain["w3"].eth.wait_for_transaction_receipt(tx).status == 1
 
 
 def test_contract_accepts_the_anchored_amounts(chain):
-    _new_claim_abi(chain)
     claims = _two_token_claims(chain, (10, 10 ** 9), (20, 3 * 10 ** 9))
     _anchor_claims(chain, claims, "e_ok")
     c = chain["contract"]
@@ -252,11 +266,10 @@ def _reverts(fn):
 
 
 def test_contract_rejects_inflated_and_foreign_claims(chain):
-    _new_claim_abi(chain)
     claims = _two_token_claims(chain, (10, 10 ** 9), (20, 3 * 10 ** 9))
     _anchor_claims(chain, claims, "e_bad")
     a0, a1 = chain["agent_addrs"][:2]
-    t, amounts = _fields(claims, a0.lower())
+    t, amounts, _seed = _fields(claims, a0.lower())
     assert _reverts(lambda: _claim(chain, claims, a0, "e_bad",
                                    amounts=[amounts[0] * 10, amounts[1]]))
 
@@ -265,18 +278,17 @@ def test_contract_rejects_inflated_and_foreign_claims(chain):
     assert _reverts(lambda: chain["w3"].eth.wait_for_transaction_receipt(
         chain["contract"].functions.claim(
             a1, epoch_id_hash("e_bad"), [to_checksum_address(x) for x in t], amounts,
-            proof).transact({"from": a1, "gas": 1_500_000})).status == 1)
+            0, proof).transact({"from": a1, "gas": 1_500_000})).status == 1)
 
 
 def test_contract_rejects_claims_against_an_empty_root(chain):
-    _new_claim_abi(chain)
     s = _anchor_claims(chain, {"not-an-address": {"tokens": {}, "value": 0}}, "e_rootless")
     assert s.agent_mint_root_hex == "00" * 32
     from nodes.common.authoritative_submitter import epoch_id_hash
     a0 = chain["agent_addrs"][0]
     tok = to_checksum_address(chain["tokens"][0].address)
     assert _reverts(lambda: chain["w3"].eth.wait_for_transaction_receipt(
-        chain["contract"].functions.claim(a0, epoch_id_hash("e_rootless"), [tok], [1], [])
+        chain["contract"].functions.claim(a0, epoch_id_hash("e_rootless"), [tok], [1], 0, [])
         .transact({"from": a0, "gas": 1_500_000})).status == 1)
 
 
@@ -284,7 +296,6 @@ def test_submitter_claims_and_is_paid_each_token(chain):
     """Full path: anchor -> blob -> submitter proves, claims for the
     household, signed by an operator that is not the earner; the claim pays
     each token to the earner, so no withdrawal follows."""
-    _new_claim_abi(chain)
     from nodes.common.authoritative_submitter import (
         AuthoritativeChainSubmitter, AuthoritativeSubmitterConfig)
     from nodes.common.blob_resolver import InMemoryBlobResolver

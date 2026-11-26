@@ -252,8 +252,26 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   value of **tool-pool** earnings (`Substrate.earnedValue`: each claim's
   amounts at the parities Substrate stored when the epoch was anchored,
   computed on chain from amounts the pool cap bounds, so no anchor can
-  grant more REP than the fees collected are worth).
-  Service revenue earns no REP.
+  grant more REP than the fees collected are worth), plus the REP floor's
+  seed (below). Service revenue earns no REP.
+- **The REP floor** (owner decision 2026-11-26): the Registry's
+  `jurisdiction.autonet.rep_floor` (in REP; unset or malformed means no
+  floor), set by the DAO, is the least REP a close in which tools conclude
+  mints. When what the epoch's claims are worth, at the close's pinned
+  parities, falls short of it, the difference is **seeded**: split among
+  the epoch's earners by the same weights as the basket (authors,
+  dependencies, reviewers by accuracy), with the same exclusions (the
+  author side of a malware verdict, sanctioned households, a household's
+  own tools), so the earners take the whole difference between them, in
+  whole value units, the dust lapsing. When the claims are
+  worth the floor or more, nothing is seeded. A close where no tool
+  concludes has no earners: its floor lapses and never carries over. Each
+  anchor stores the floor it was anchored under; each claim leaf carries
+  its seed, which Substrate adds to `earnedValue` (so the REP claim mints
+  it with the rest) and records apart in `seededValue`. No epoch's seeds
+  can total more than its stored floor, so an anchor can mint at most one
+  floor of REP beyond what its fees are worth. The seed is REP only: it
+  pays no money.
 - Weighs reviews (by the reviewer's household REP), votes, elections.
 - **Moves on reviews** (ToolBond): each review risks `degradeBps` (10%) of the
   household REP it weighed, losing that x (1 - accuracy), reassigned to the

@@ -935,5 +935,75 @@
     "encoding": "inplace"
    }
   }
+ },
+ {
+  "label": "_anchorFloor",
+  "slot": "41",
+  "offset": 0,
+  "type": {
+   "label": "mapping(uint256 => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "seedClaimed",
+  "slot": "42",
+  "offset": 0,
+  "type": {
+   "label": "mapping(uint256 => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "seededValue",
+  "slot": "43",
+  "offset": 0,
+  "type": {
+   "label": "mapping(address => uint256)",
+   "bytes": "32",
+   "encoding": "mapping",
+   "key": {
+    "label": "address",
+    "bytes": "20",
+    "encoding": "inplace"
+   },
+   "value": {
+    "label": "uint256",
+    "bytes": "32",
+    "encoding": "inplace"
+   }
+  }
+ },
+ {
+  "label": "totalSeededValue",
+  "slot": "44",
+  "offset": 0,
+  "type": {
+   "label": "uint256",
+   "bytes": "32",
+   "encoding": "inplace"
+  }
  }
 ]

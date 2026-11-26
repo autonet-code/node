@@ -693,6 +693,7 @@ class ChainSubmissionDriver:
                 "tx_hash": r.tx_hash,
                 "tokens": dict(r.tokens),
                 "value": int(r.value),
+                "seed": int(r.seed),
                 "withdrawn": dict(r.withdrawn),
                 "withdraw_errors": dict(r.withdraw_errors),
                 "owed": {t: str(a) for t, a in r.owed.items()},

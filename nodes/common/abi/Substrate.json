@@ -836,6 +836,37 @@
     {
      "indexed": true,
      "internalType": "address",
+     "name": "earner",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "seed",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "seededValueAfter",
+     "type": "uint256"
+    }
+   ],
+   "name": "Seeded",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
      "name": "payer",
      "type": "address"
     },
@@ -1141,6 +1172,19 @@
   },
   {
    "inputs": [],
+   "name": "REP_FLOOR_KEY",
+   "outputs": [
+    {
+     "internalType": "string",
+     "name": "",
+     "type": "string"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
    "name": "UPGRADE_INTERFACE_VERSION",
    "outputs": [
     {
@@ -1303,6 +1347,25 @@
   {
    "inputs": [],
    "name": "anchorCount",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    }
+   ],
+   "name": "anchorFloor",
    "outputs": [
     {
      "internalType": "uint256",
@@ -1545,6 +1608,11 @@
      "type": "uint256[]"
     },
     {
+     "internalType": "uint256",
+     "name": "seed",
+     "type": "uint256"
+    },
+    {
      "internalType": "bytes32[]",
      "name": "proof",
      "type": "bytes32[]"
@@ -1571,6 +1639,11 @@
      "internalType": "uint256[]",
      "name": "amounts",
      "type": "uint256[]"
+    },
+    {
+     "internalType": "uint256",
+     "name": "seed",
+     "type": "uint256"
     }
    ],
    "name": "claimLeaf",
@@ -2515,6 +2588,19 @@
    "type": "function"
   },
   {
+   "inputs": [],
+   "name": "repFloorValue",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
    "inputs": [
     {
      "internalType": "address",
@@ -2593,6 +2679,44 @@
      "internalType": "bool",
      "name": "",
      "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "name": "seedClaimed",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "seededValue",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
     }
    ],
    "stateMutability": "view",
@@ -2833,6 +2957,19 @@
   {
    "inputs": [],
    "name": "totalEarnedValue",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "totalSeededValue",
    "outputs": [
     {
      "internalType": "uint256",

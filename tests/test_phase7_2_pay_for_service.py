@@ -262,7 +262,8 @@ def test_the_readouts_are_per_index_token(chain):
     assert state["total_earned_value"] == "0"
 
     claim = _run(svc.get_claim_status(chain["payer"]))
-    assert claim == {"earner": chain["payer"], "earned_value": "0", "owed": []}
+    assert claim == {"earner": chain["payer"], "earned_value": "0", "seeded_value": "0",
+                     "owed": [], "claimed": []}
 
     fleet = _run(svc.get_fleet_voice(chain["payer"]))
     assert {r["token"]: r["balance"] for r in fleet["fleet_tokens"]} == {

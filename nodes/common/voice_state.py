@@ -69,7 +69,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .federated_reconcile import VOICE_EPSILON
 
-from .mint_params import mint_gate_from_writes, review_params_from_writes
+from .mint_params import (
+    mint_gate_from_writes,
+    rep_floor_from_writes,
+    review_params_from_writes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1582,6 +1586,7 @@ def read_voice_state(
             "charter_text": None,
             "sanctions": {},
             "sanctioned_households": [],
+            "rep_floor": 0,
             "agent_rep": {},
             "robots": [],
             "robot_standards": [],
@@ -1804,6 +1809,10 @@ def read_voice_state(
         # the REP a reviewer needs to be paid.
         "review_params": list(review_params_from_writes(
             _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id)),
+        # The REP floor in value units (Registry jurisdiction.autonet.rep_floor
+        # / 1e12; 0 = none): the least REP value a close with earners pays.
+        "rep_floor": rep_floor_from_writes(
+            _last_writes(reg_records, block) if reg_records else {}),
         # Per-agent REP (raw base units) and the robot policy (docs/robots.md,
         # 2026-10-25): the robot poll rail draws pollers from the REP, takes
         # witnesses from the fleet and checks packs against the cascaded

@@ -130,7 +130,7 @@ def test_three_daemons_produce_byte_identical_maps():
     # Both tool authors earn (their reviews concluded this close).
     assert results[0]["claims"]["alice"]["value"] > 0
     assert results[0]["claims"]["bob"]["value"] > 0
-    assert results[0]["authoritative_payload"]["schema"] == 9
+    assert results[0]["authoritative_payload"]["schema"] == 10
 
 
 def test_serialized_json_is_byte_identical_across_daemons():
@@ -199,7 +199,7 @@ def test_empty_canonical_yields_empty_authoritative_map():
     assert result["authoritative"] is True
     assert set(result["authoritative_payload"]) == {
         "schema", "epoch_root", "claims", "pools", "parity", "total_value",
-        "output_decimals",
+        "rep_floor", "total_seed", "output_decimals",
         "charter_hash", "sanctioned_households", "concluded", "n_batches",
         "n_events"}
 

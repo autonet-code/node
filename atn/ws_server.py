@@ -1692,8 +1692,10 @@ class WebSocketBridge:
             # at once; a token whose transfer failed stays owed until
             # withdrawn), and the basket so far: per token, everything the
             # owner wallet has claimed (ClaimedToken logs, followed
-            # incrementally).
-            claim: dict[str, Any] = {"earned_value": "0", "owed": [], "claimed": []}
+            # incrementally). ``seeded_value`` is the part of earned_value
+            # the REP floor seeded (value units).
+            claim: dict[str, Any] = {"earned_value": "0", "seeded_value": "0",
+                                     "owed": [], "claimed": []}
             if wallet:
                 try:
                     from .on_chain import OnChainService
@@ -1714,6 +1716,7 @@ class WebSocketBridge:
                 "orphan_count": len(orphan_tools),
                 "orphans": orphan_tools[:50],
                 "earned_value": claim.get("earned_value", "0"),
+                "seeded_value": claim.get("seeded_value", "0"),
                 "owed": claim.get("owed", []),
                 "claimed": claim.get("claimed", []),
             }}

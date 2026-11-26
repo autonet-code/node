@@ -59,7 +59,7 @@ def test_split_never_exceeds_any_pool(seed):
     weights = {Account.create().address: rng.randint(1, 10 ** 12) for _ in range(n)}
     leaves = claim_leaves(_claims(split_pools(pools, weights)))
     for t, pool in pools.items():
-        paid = sum(a for _, toks, amts in leaves for tt, a in zip(toks, amts)
+        paid = sum(a for _, toks, amts, _seed in leaves for tt, a in zip(toks, amts)
                    if tt.lower() == t)
         assert pool - n <= paid <= pool
 
@@ -182,13 +182,13 @@ def test_split_close_claims_fully_and_conserves(chain):
     for t in tokens:
         assert c.functions.poolCap(t.address).call() == pools[t.address.lower()]
     eid = epoch_id_hash("e-cons")
-    for earner, toks, amts in claim_leaves(claims):
+    for earner, toks, amts, seed in claim_leaves(claims):
         proof = claim_merkle_proof(claims, earner)
         # claim is permissionless: the deployer (an operator key) sends every
         # claim; the same transaction pays the basket to the leaf's earner.
         by_addr = {t.address.lower(): t for t in tokens}
         before = {tt: by_addr[tt.lower()].functions.balanceOf(earner).call() for tt in toks}
-        tx = c.functions.claim(earner, eid, toks, amts, proof).transact(
+        tx = c.functions.claim(earner, eid, toks, amts, seed, proof).transact(
             {"from": chain["deployer"], "gas": 1_500_000})
         assert w3.eth.wait_for_transaction_receipt(tx).status == 1
         for tt, a in zip(toks, amts):

@@ -189,17 +189,20 @@ def test_amounts_are_decimal_strings_in_the_payload():
          "parity": {t: 10 ** 18}, "total_value": 5},
         epoch_id="e", epoch_root_hex="00" * 32, prev_epoch_root_hex="00" * 32)
     d = json.loads(encoded)
-    assert d["schema"] == 9
-    assert d["claims"] == {"0xab": {"tokens": {t.lower(): str(big)}, "value": "5"}}
+    assert d["schema"] == 10
+    assert d["claims"] == {"0xab": {"tokens": {t.lower(): str(big)}, "value": "5",
+                                    "seed": "0"}}
     assert d["pools"] == {t.lower(): str(big)} and d["parity"] == {t.lower(): str(10 ** 18)}
     assert d["total_value"] == "5"
+    assert d["rep_floor"] == "0" and d["total_seed"] == "0"
 
 
 def test_claims_blob_round_trip():
     """The off-chain blob decodes back to the original claims, exactly."""
     t6, t18 = "0x" + "a6" * 20, "0x" + "1b" * 20
-    claims = {"alice": {"tokens": {t6: 1_234_567, t18: 10 ** 24 + 1}, "value": 1_234_567},
-              "bob": {"tokens": {t6: 5}, "value": 5}}
+    claims = {"alice": {"tokens": {t6: 1_234_567, t18: 10 ** 24 + 1}, "value": 1_234_567,
+                        "seed": 0},
+              "bob": {"tokens": {t6: 5}, "value": 5, "seed": 7}}
     blob = encode_claims_blob(claims)
     assert decode_claims_blob(blob) == claims
     # CID is sha256 hex.

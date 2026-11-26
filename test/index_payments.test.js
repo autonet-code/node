@@ -220,8 +220,10 @@ describe("Value-index payments, pools and claims", function () {
       await anchorEpoch(substrate, "e2", tree.root);
       // The JS leaf matches the contract's.
       const e0 = tree.entries[0];
-      expect(await substrate.claimLeaf(e0.earner, e0.tokens, e0.amounts))
+      expect(await substrate.claimLeaf(e0.earner, e0.tokens, e0.amounts, 0n))
         .to.equal(claimLeaf(e0.earner, e0.tokens, e0.amounts));
+      expect(await substrate.claimLeaf(e0.earner, e0.tokens, e0.amounts, 7n))
+        .to.equal(claimLeaf(e0.earner, e0.tokens, e0.amounts, 7n));
 
       // Anyone submits; the leaf fixes the earner.
       await expect(claimTx(substrate, stranger, tree, 0, "e2"))
@@ -242,19 +244,22 @@ describe("Value-index payments, pools and claims", function () {
 
       // Bad proof: bob's amounts with alice's proof, or inflated amounts.
       const b = tree.entries[1];
-      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, b.amounts, tree.proof(0)))
+      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, b.amounts, 0n, tree.proof(0)))
         .to.be.revertedWithCustomError(substrate, "ClaimProofInvalid");
       await expect(substrate.claim(b.earner, digest("e2"), b.tokens,
-        b.amounts.map((a) => a + 1n), tree.proof(1)))
+        b.amounts.map((a) => a + 1n), 0n, tree.proof(1)))
+        .to.be.revertedWithCustomError(substrate, "ClaimProofInvalid");
+      // A seed the leaf does not carry is refused like any other field.
+      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, b.amounts, 1n, tree.proof(1)))
         .to.be.revertedWithCustomError(substrate, "ClaimProofInvalid");
 
       // Unsorted (or repeated) tokens are refused before the proof.
       await expect(substrate.claim(b.earner, digest("e2"), [...b.tokens].reverse(),
-        [...b.amounts].reverse(), tree.proof(1)))
+        [...b.amounts].reverse(), 0n, tree.proof(1)))
         .to.be.revertedWithCustomError(substrate, "TokensNotSorted");
-      await expect(substrate.claim(b.earner, digest("e2"), [U, U], [1n, 1n], tree.proof(1)))
+      await expect(substrate.claim(b.earner, digest("e2"), [U, U], [1n, 1n], 0n, tree.proof(1)))
         .to.be.revertedWithCustomError(substrate, "TokensNotSorted");
-      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, [1n], tree.proof(1)))
+      await expect(substrate.claim(b.earner, digest("e2"), b.tokens, [1n], 0n, tree.proof(1)))
         .to.be.revertedWithCustomError(substrate, "LengthMismatch");
 
       await claimTx(substrate, bob, tree, 1, "e2");
@@ -267,10 +272,10 @@ describe("Value-index payments, pools and claims", function () {
 
     it("refuses claims on an unanchored epoch or one with no claim root", async function () {
       await fillPools();
-      await expect(substrate.claim(alice.address, digest("nope"), [U], [1n], []))
+      await expect(substrate.claim(alice.address, digest("nope"), [U], [1n], 0n, []))
         .to.be.revertedWithCustomError(substrate, "EpochNotAnchored");
       await anchorEpoch(substrate, "empty");
-      await expect(substrate.claim(alice.address, digest("empty"), [U], [1n], []))
+      await expect(substrate.claim(alice.address, digest("empty"), [U], [1n], 0n, []))
         .to.be.revertedWithCustomError(substrate, "ClaimRootMissing");
     });
 
@@ -321,6 +326,128 @@ describe("Value-index payments, pools and claims", function () {
       expect(await substrate.parityOf(U)).to.equal(0n);
       await anchorEpoch(substrate, "e2");
       expect(await substrate.anchorParity(1, U)).to.equal(0n);
+    });
+  });
+
+  // The REP floor: Registry jurisdiction.autonet.rep_floor (REP base units),
+  // stored with each anchor in value units (/1e12). A leaf's seed is its
+  // part of the floor; the seeds an epoch's claims credit never total more
+  // than its stored floor.
+  describe("the REP floor", function () {
+    const FLOOR_KEY = "jurisdiction.autonet.rep_floor";
+    const REP = 10n ** 12n;    // REP base units per value unit
+    let reg;
+
+    beforeEach(async function () {
+      reg = await ethers.getContractAt("MockRegistry", await substrate.registry());
+    });
+
+    const setFloor = async (v) => (await reg.setValue(FLOOR_KEY, String(v))).wait();
+
+    it("an anchor stores the floor in value units; unset or malformed reads as 0", async function () {
+      expect(await substrate.REP_FLOOR_KEY()).to.equal(FLOOR_KEY);
+      expect(await substrate.repFloorValue()).to.equal(0n);
+      await anchorEpoch(substrate, "f0");
+      expect(await substrate.anchorFloor(0)).to.equal(0n);
+
+      await setFloor(5n * 10n ** 18n + 999n);     // 5 REP and a remainder below a value unit
+      expect(await substrate.repFloorValue()).to.equal(5_000_000n);
+      await anchorEpoch(substrate, "f1");
+      expect(await substrate.anchorFloor(1)).to.equal(5_000_000n);
+
+      // An overflowing number (78 digits) would revert the parse: malformed too.
+      for (const bad of ["not a number", "-5", "1e18", " 5", "9".repeat(78)]) {
+        await setFloor(bad);
+        expect(await substrate.repFloorValue()).to.equal(0n);
+      }
+      await anchorEpoch(substrate, "f2");
+      expect(await substrate.anchorFloor(2)).to.equal(0n);
+      // 77 digits still parse.
+      await setFloor("9".repeat(77));
+      expect(await substrate.repFloorValue()).to.equal(10n ** 65n - 1n);
+      // Less than one value unit of REP is no floor.
+      await setFloor(REP - 1n);
+      expect(await substrate.repFloorValue()).to.equal(0n);
+    });
+
+    it("a claim adds its seed to earnedValue and seededValue, the epoch's seeds capped at its floor", async function () {
+      const { usdPool } = await fillPools();       // anchor 0
+      await setFloor(100n * REP);
+      const tree = claimTree([
+        { earner: alice.address, basket: [[U, 50n]], seed: 70n },
+        { earner: bob.address, tokens: [], amounts: [], seed: 50n },
+        { earner: stranger.address, basket: [[U, 1n]], seed: 5n },
+      ]);
+      await anchorEpoch(substrate, "e2", tree.root);      // anchor 1
+      expect(await substrate.anchorFloor(1)).to.equal(100n);
+      expect(usdPool).to.be.greaterThan(51n);
+
+      // Tokens worth 50, seed 70: both in earnedValue.
+      await expect(claimTx(substrate, stranger, tree, 0, "e2"))
+        .to.emit(substrate, "Seeded").withArgs(alice.address, digest("e2"), 70n, 70n)
+        .and.to.emit(substrate, "Claimed").withArgs(alice.address, digest("e2"), 120n, 120n);
+      expect(await substrate.earnedValue(alice.address)).to.equal(120n);
+      expect(await substrate.seededValue(alice.address)).to.equal(70n);
+      expect(await usd.balanceOf(alice.address)).to.equal(50n);
+
+      // A leaf with only a seed: 30 of the floor is left, so 30 is credited.
+      await expect(claimTx(substrate, bob, tree, 1, "e2"))
+        .to.emit(substrate, "Seeded").withArgs(bob.address, digest("e2"), 30n, 30n)
+        .and.to.emit(substrate, "Claimed").withArgs(bob.address, digest("e2"), 30n, 30n);
+      expect(await substrate.seedClaimed(1)).to.equal(100n);
+
+      // The floor is spent: no seed, and the tokens are paid all the same.
+      await expect(claimTx(substrate, stranger, tree, 2, "e2"))
+        .to.emit(substrate, "Claimed").withArgs(stranger.address, digest("e2"), 1n, 1n)
+        .and.not.to.emit(substrate, "Seeded");
+      expect(await usd.balanceOf(stranger.address)).to.equal(1n);
+      expect(await substrate.seededValue(stranger.address)).to.equal(0n);
+      expect(await substrate.totalSeededValue()).to.equal(100n);
+      expect(await substrate.totalEarnedValue()).to.equal(151n);
+    });
+
+    it("each epoch has its own floor; nothing carries from an epoch's unclaimed seed", async function () {
+      await fillPools();
+      await setFloor(10n * REP);
+      const t2 = claimTree([{ earner: alice.address, tokens: [], amounts: [], seed: 4n }]);
+      await anchorEpoch(substrate, "e2", t2.root);
+      const t3 = claimTree([{ earner: alice.address, tokens: [], amounts: [], seed: 16n }]);
+      await anchorEpoch(substrate, "e3", t3.root);
+      await claimTx(substrate, alice, t2, 0, "e2");
+      // Epoch 2 left 6 of its floor unclaimed; epoch 3 still caps at 10.
+      await expect(claimTx(substrate, alice, t3, 0, "e3"))
+        .to.emit(substrate, "Seeded").withArgs(alice.address, digest("e3"), 10n, 14n);
+      expect(await substrate.earnedValue(alice.address)).to.equal(14n);
+    });
+
+    it("a floor edit after the anchor changes nothing for its claims", async function () {
+      await fillPools();
+      await setFloor(40n * REP);
+      const tree = claimTree([
+        { earner: alice.address, tokens: [], amounts: [], seed: 30n },
+        { earner: bob.address, tokens: [], amounts: [], seed: 30n },
+      ]);
+      await anchorEpoch(substrate, "e2", tree.root);
+      // Lowered to nothing: the stored floor still pays.
+      await setFloor(0);
+      await claimTx(substrate, alice, tree, 0, "e2");
+      expect(await substrate.seededValue(alice.address)).to.equal(30n);
+      // Raised: the stored floor still caps.
+      await setFloor(1000n * REP);
+      await claimTx(substrate, bob, tree, 1, "e2");
+      expect(await substrate.seededValue(bob.address)).to.equal(10n);
+      expect(await substrate.anchorFloor(1)).to.equal(40n);
+    });
+
+    it("without a floor, a leaf's seed credits nothing", async function () {
+      const { usdPool } = await fillPools();
+      const tree = claimTree([{ earner: alice.address, basket: [[U, usdPool]], seed: 1_000n }]);
+      await anchorEpoch(substrate, "e2", tree.root);
+      await expect(claimTx(substrate, alice, tree, 0, "e2"))
+        .to.emit(substrate, "Claimed").withArgs(alice.address, digest("e2"), usdPool, usdPool)
+        .and.not.to.emit(substrate, "Seeded");
+      expect(await substrate.seededValue(alice.address)).to.equal(0n);
+      expect(await usd.balanceOf(alice.address)).to.equal(usdPool);
     });
   });
 

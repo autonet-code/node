@@ -9,44 +9,52 @@ Spec
 
 The authoritative payload is a dict with these fields, in this order:
 
-  1. schema:           int (currently 9)
+  1. schema:           int (currently 10)
   2. epoch_id:         str
   3. epoch_root:       64-char lowercase hex string (sha256 digest)
   4. prev_epoch_root:  64-char lowercase hex string (sha256 digest)
   5. claims:           dict, earner -> {"tokens": {token: amount},
-                       "value": value}. The earner is the household's
-                       lowercase owner wallet, each token a lowercase 0x
-                       address, amounts in the token's base units, the
-                       value in 6-decimal value units at the pinned
-                       parity. One leaf each under the anchor's claimRoot,
-                       over the tokens and amounts only: the value is
-                       informational (Substrate computes REP on chain from
-                       the capped amounts at the parity it stores at the
-                       anchor).
+                       "value": value, "seed": seed}. The earner is the
+                       household's lowercase owner wallet, each token a
+                       lowercase 0x address, amounts in the token's base
+                       units, the value in 6-decimal value units at the
+                       pinned parity, the seed (value units) its part of
+                       the REP floor. One leaf each under the anchor's
+                       claimRoot, over the tokens, amounts and seed: the
+                       value is informational (Substrate computes REP on
+                       chain from the capped amounts at the parity it
+                       stores at the anchor, and adds the seed).
   6. pools:            dict, token -> the epoch's pool of it (the window's
                        tool share plus the carry).
   7. parity:           dict, token -> the parity the close valued it at
                        (the tokens of ``pools``; 0 = out of the index).
   8. total_value:      the claims' values summed.
-  9. output_decimals:  int, the precision weights are turned into
+  9. rep_floor:        the REP floor the close read (Registry
+                       ``jurisdiction.autonet.rep_floor`` / 1e12, value
+                       units; 0 = none).
+  10. total_seed:      the claims' seeds summed: the floor less
+                       ``total_value`` when that is below it and a tool
+                       concluded, less the split's dust; else 0.
+  11. output_decimals: int, the precision weights are turned into
                        integers at before the split.
-  10. n_batches:       int
-  11. n_events:        int
-  12. carry_cid:       str, sha256 cid of the carry-over bundle blob
+  12. n_batches:       int
+  13. n_events:        int
+  14. carry_cid:       str, sha256 cid of the carry-over bundle blob
                        (``encode_carry_bundle``): the tool maps this close
                        produced, i.e. the INPUTS of the next close. A
                        daemon that boots after anchors exist fetches and
                        verifies it instead of trusting a peer.
-  13. charter_hash:    str, sha256 hex of the charter the close ran
+  15. charter_hash:    str, sha256 hex of the charter the close ran
                        against (a charter change is a fork boundary).
-  14. sanctioned_households: list[str], sorted lowercase households under
+  16. sanctioned_households: list[str], sorted lowercase households under
                        a DAO sanction at the snapshot (their share is
                        withheld into the carry).
-  15. concluded:       dict[str, int], each tool that concluded in this
+  17. concluded:       dict[str, int], each tool that concluded in this
                        close (digest hex) -> its malware share in bps; the
                        anchor's claimRoot holds one leaf per entry, from
                        which ToolBond opens the tool's verdict.
-  16. seed:            true, ONLY on a genesis seed anchor
+  18. seed:            true, ONLY on a genesis seed anchor (not the REP
+                       floor's seeds, which live in ``claims``)
                        (docs/multi_jurisdiction.md decision 9): the
                        carry bundle is an adopted snapshot, not the output
                        of an observed epoch. Omitted entirely otherwise.
@@ -81,6 +89,8 @@ import json
 from typing import Any, Dict, Tuple
 
 
+# Schema 10 (the REP floor): each claim carries its ``seed``, in its leaf
+# too, and the payload commits ``rep_floor`` and ``total_seed``.
 # Schema 9 (the value index's tokens replace ATN): ``claims`` (per earner,
 # an amount of each token's pool and the REP value), ``pools``, ``parity``
 # and ``total_value`` replace agent_mint and total_mint; every money number
@@ -91,7 +101,7 @@ from typing import Any, Dict, Tuple
 # Schema 5 (Decision 2026-10-26): the payload commits ``charter_hash`` and
 # ``sanctioned_households``.
 # Schema 4: the payload gains ``carry_cid``.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
@@ -105,6 +115,8 @@ _FIELD_ORDER = [
     "pools",
     "parity",
     "total_value",
+    "rep_floor",
+    "total_seed",
     "output_decimals",
     "n_batches",
     "n_events",
@@ -143,13 +155,14 @@ def _format_amounts(d: Dict[str, Any]) -> Dict[str, str]:
 
 def _format_claims(claims: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """The claims in canonical form: earner (lowercase, sorted) ->
-    {"tokens": {token: "amount"}, "value": "value"}."""
+    {"tokens": {token: "amount"}, "value": "value", "seed": "seed"}."""
     out: Dict[str, Dict[str, Any]] = {}
     for earner in sorted((claims or {}), key=_addr):
         entry = claims[earner] or {}
         out[_addr(earner)] = {
             "tokens": _format_amounts(entry.get("tokens") or {}),
             "value": str(_uint(entry.get("value") or 0)),
+            "seed": str(_uint(entry.get("seed") or 0)),
         }
     return {k: out[k] for k in sorted(out)}
 
@@ -193,6 +206,8 @@ def encode_authoritative_payload(
         "pools": _format_amounts(payload.get("pools") or {}),
         "parity": _format_amounts(payload.get("parity") or {}),
         "total_value": str(_uint(payload.get("total_value") or 0)),
+        "rep_floor": str(_uint(payload.get("rep_floor") or 0)),
+        "total_seed": str(_uint(payload.get("total_seed") or 0)),
         "output_decimals": int(payload.get("output_decimals", DEFAULT_DECIMALS)),
         "n_batches": int(payload.get("n_batches", 0)),
         "n_events": int(payload.get("n_events", 0)),
@@ -224,8 +239,9 @@ def encode_claims_blob(
 
     Format::
 
-      {"schema": 9,
-       "claims": {earner: {"tokens": {token: "amount"}, "value": "value"}},
+      {"schema": 10,
+       "claims": {earner: {"tokens": {token: "amount"}, "value": "value",
+                           "seed": "seed"}},
        "concluded": {digest: share bps}}   (only when any)
 
     ``concluded`` holds the tools whose leaves share the claimRoot tree
@@ -263,8 +279,8 @@ def payload_hash(payload_bytes: bytes) -> bytes:
 
 def decode_claims_blob(blob: bytes) -> Dict[str, Dict[str, Any]]:
     """Reverse of ``encode_claims_blob`` (claims only): earner ->
-    {"tokens": {token: int}, "value": int}. Raises ValueError on a blob of
-    another schema."""
+    {"tokens": {token: int}, "value": int, "seed": int}. Raises ValueError
+    on a blob of another schema."""
     data = json.loads(blob.decode("utf-8"))
     if data.get("schema") != SCHEMA_VERSION:
         raise ValueError(f"unsupported claims blob schema: {data.get('schema')!r}")
@@ -273,6 +289,7 @@ def decode_claims_blob(blob: bytes) -> Dict[str, Dict[str, Any]]:
         out[str(earner)] = {
             "tokens": {str(t): _uint(a) for t, a in (entry.get("tokens") or {}).items()},
             "value": _uint(entry.get("value") or 0),
+            "seed": _uint(entry.get("seed") or 0),
         }
     return out
 

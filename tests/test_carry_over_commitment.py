@@ -236,12 +236,13 @@ def test_payload_encodes_carry_cid_charter_and_sanctions():
     raw = encode_authoritative_payload(
         payload, epoch_id="e1", epoch_root_hex=ROOT_B, prev_epoch_root_hex=ROOT_A)
     decoded = json.loads(raw)
-    assert SCHEMA_VERSION == 9
-    assert decoded["schema"] == 9
+    assert SCHEMA_VERSION == 10
+    assert decoded["schema"] == 10
     assert decoded["carry_cid"] == "cc" * 32
     assert list(decoded) == [
         "schema", "epoch_id", "epoch_root", "prev_epoch_root", "claims",
-        "pools", "parity", "total_value", "output_decimals", "n_batches", "n_events",
+        "pools", "parity", "total_value", "rep_floor", "total_seed",
+        "output_decimals", "n_batches", "n_events",
         "carry_cid", "charter_hash", "sanctioned_households", "concluded"]
     assert decoded["concluded"] == {}
     assert decoded["charter_hash"] == "ab" * 32
@@ -440,7 +441,7 @@ def test_fetch_reports_anchor_and_carry(network):
         network["chain"]["contract"], network["resolver"])
     assert fetch.status == "ok"
     assert fetch.epoch_id == "e3"
-    assert fetch.payload_schema == 9
+    assert fetch.payload_schema == 10
     assert fetch.carry == {
         k: json.loads(json.dumps(v))
         for k, v in network["always_on"].carry_over_maps().items()

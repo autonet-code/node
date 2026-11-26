@@ -1644,6 +1644,7 @@ class AutonetBridge:
                     "epoch_root": str(fed.close_result.get("epoch_root", "")),
                     "carry_cid": getattr(fed, "carry_cid", ""),
                     "total_value": int(fed.close_result.get("total_value") or 0),
+                    "total_seed": int(fed.close_result.get("total_seed") or 0),
                     "claims": fed.close_result.get("claims", {}),
                 }
             except Exception:

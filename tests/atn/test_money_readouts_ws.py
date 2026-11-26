@@ -90,6 +90,7 @@ def test_fleet_voice_and_the_owners_claims(daemon):
     daemon.rt._config.autonet.owner_wallet = daemon.operator
     claim = _ws(daemon, {"type": "owner_claim_status"})["result"]
     assert claim["earned_value"] == "0" and claim["owed"] == []
+    assert claim["seeded_value"] == "0"
     assert claim["claimed"] == []
     assert "claimed_mint_total" not in claim
 

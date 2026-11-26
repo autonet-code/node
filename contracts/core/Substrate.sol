@@ -41,7 +41,11 @@ interface IRegistryRead {
 ///      which the DAO's REP claim reads, and pays the whole basket in the
 ///      same transaction. A token whose transfer fails (paused, frozen)
 ///      stays owed and is withdrawn on its own later, so it blocks nothing
-///      else.
+///      else. When the claims of an epoch are worth less than the REP
+///      floor (Registry `jurisdiction.autonet.rep_floor`, stored with the
+///      anchor), each leaf also carries a seed, its part of the
+///      difference, added to `earnedValue` too; no epoch's seeds total
+///      more than its stored floor.
 ///
 /// Custody. Substrate holds only the pools and what is owed from them
 /// (earners' claims, the treasury's share). Channel deposits stay in
@@ -308,6 +312,8 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
         a.cutoff = cutoff;
         _index(a);
         _storeParities(anchors.length - 1);
+        uint256 floor = repFloorValue();
+        if (floor != 0) _anchorFloor[anchors.length - 1] = floor;
     }
 
     /// @dev Store every pool token's parity as the epoch is anchored: the
@@ -1144,12 +1150,13 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     //
     // One pool per token. Each epoch's close commits one leaf per earner (a
     // household's owner wallet): the amounts it takes of each token's pool
-    // (the same fraction of every pool):
+    // (the same fraction of every pool) and its seed of the REP floor:
     //
     //   keccak256(bytes.concat(keccak256(abi.encode(
-    //       CLAIM_TAG, earner, tokens, amounts))))
+    //       CLAIM_TAG, earner, tokens, amounts, seed))))
     //
-    // tokens strictly ascending, one amount each. A claim credits the
+    // tokens strictly ascending, one amount each (a leaf may have none and
+    // only a seed). A claim credits the
     // amounts as owed to the earner and adds their REP value to
     // earnedValue: each amount at its token's parity stored when the epoch
     // was anchored (anchorParity), so a parity edit after the anchor
@@ -1160,6 +1167,18 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     // owed and leaves later by withdraw, one token at a time, so it blocks
     // nothing else. Claims of a token never total more
     // than its tool share collected up to poolCutoff.
+    //
+    // The REP floor. The DAO Registry's `jurisdiction.autonet.rep_floor`, in
+    // REP base units (18 decimals; unset or malformed = 0 = no floor), is the
+    // least REP an epoch in which tools conclude mints. Each anchor stores it
+    // in value units (divided by 1e12, rounded down: REP is value x 1e12, DAO
+    // side), so a later edit changes nothing for that epoch. When the
+    // epoch's claims are worth less, the close gives the difference to the
+    // same earners in the same proportions: each leaf's seed, in value
+    // units. A claim adds its seed to earnedValue (the DAO's REP claim mints
+    // it with the rest) and to seededValue. An epoch's seeds never total more
+    // than its stored floor: past it, a claim's seed is cut to what is left,
+    // and its tokens are paid all the same.
     // =========================================================================
 
     bytes32 public constant CLAIM_TAG = keccak256("autonet.claim");
@@ -1195,7 +1214,29 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     ///      pulled and every surplus swept, less every withdrawal.
     mapping(address => uint256) public held;
 
+    /// @dev anchor index => the REP floor stored when it landed, in value
+    ///      units (0 = no floor).
+    mapping(uint256 => uint256) private _anchorFloor;
+
+    /// @notice The seed claimed so far of anchor `index`'s floor.
+    mapping(uint256 => uint256) public seedClaimed;
+
+    /// @notice The part of earnedValue that came from the REP floor, per
+    ///         earner (value units).
+    mapping(address => uint256) public seededValue;
+    /// @notice All seed claimed so far.
+    uint256 public totalSeededValue;
+
+    /// @notice The Registry key of the REP floor (REP base units).
+    string public constant REP_FLOOR_KEY = "jurisdiction.autonet.rep_floor";
+    /// @dev REP base units per value unit (REP is value x 1e12, DAO side).
+    uint256 private constant REP_PER_VALUE = 1e12;
+
+    /// @notice `value` is everything the claim added to earnedValue: its
+    ///         tokens' value and its seed.
     event Claimed(address indexed earner, bytes32 indexed epochIdHash, uint256 value, uint256 earnedValueAfter);
+    /// @notice The REP floor's part of a claim (value units), as credited.
+    event Seeded(address indexed earner, bytes32 indexed epochIdHash, uint256 seed, uint256 seededValueAfter);
     event ClaimedToken(address indexed earner, bytes32 indexed epochIdHash, address indexed token, uint256 amount);
     event Withdrawn(address indexed earner, address indexed token, address to, uint256 amount);
     /// @notice A claim's transfer of `token` failed; the amount stays owed.
@@ -1219,18 +1260,39 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
         return c == 0 ? 0 : toolShareUpTo(token, c);
     }
 
+    /// @notice The REP floor in the Registry now, in value units (its REP
+    ///         base units divided by 1e12, rounded down); 0 when unset or
+    ///         malformed, so it can never block an anchor. More than 77
+    ///         digits reads as malformed: the parse reverts on a uint256
+    ///         overflow.
+    function repFloorValue() public view returns (uint256) {
+        string memory v = IRegistryRead(registry).getRegistryValue(REP_FLOOR_KEY);
+        if (bytes(v).length == 0 || bytes(v).length > 77) return 0;
+        (bool ok, uint256 f) = Strings.tryParseUint(v);
+        return ok ? f / REP_PER_VALUE : 0;
+    }
+
+    /// @notice The REP floor stored when anchor `index` landed (value
+    ///         units): the most its claims' seeds can total.
+    function anchorFloor(uint256 index) external view returns (uint256) {
+        return _anchorFloor[index];
+    }
+
     /// @notice Claim an earner's leaf of an anchored epoch, on its behalf.
     ///         Anyone may submit (the household's operator, typically); the
     ///         leaf fixes the earner, so nothing can go elsewhere. Once per
     ///         (earner, epoch). Credits the amounts and pays each token to
     ///         the earner in the same transaction; a token whose transfer
     ///         fails (paused, frozen, the earner blocked) stays owed, for
-    ///         withdraw or withdrawTo later.
+    ///         withdraw or withdrawTo later. `seed` (value units) is the
+    ///         leaf's part of the REP floor, credited up to what is left of
+    ///         the epoch's stored floor.
     function claim(
         address earner,
         bytes32 epochIdHash,
         address[] calldata tokens,
         uint256[] calldata amounts,
+        uint256 seed,
         bytes32[] calldata proof
     ) external nonReentrant {
         string storage epochId = epochIdByHash[epochIdHash];
@@ -1244,12 +1306,13 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
         uint256 index = anchorIndexByEpochId[epochId] - 1;
         bytes32 root = anchors[index].claimRoot;
         if (root == bytes32(0)) revert ClaimRootMissing(epochIdHash);
-        if (!_verifyProof(proof, root, claimLeaf(earner, tokens, amounts))) {
+        if (!_verifyProof(proof, root, claimLeaf(earner, tokens, amounts, seed))) {
             revert ClaimProofInvalid(epochIdHash);
         }
 
         claimedEpoch[earner][epochIdHash] = true;
         uint256 value = _credit(earner, epochIdHash, index, tokens, amounts);
+        if (seed != 0) value += _seed(earner, epochIdHash, index, seed);
         if (value > 0) {
             earnedValue[earner] += value;
             totalEarnedValue += value;
@@ -1280,10 +1343,27 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     function claimLeaf(
         address earner,
         address[] calldata tokens,
-        uint256[] calldata amounts
+        uint256[] calldata amounts,
+        uint256 seed
     ) public pure returns (bytes32) {
         return keccak256(bytes.concat(keccak256(
-            abi.encode(CLAIM_TAG, earner, tokens, amounts))));
+            abi.encode(CLAIM_TAG, earner, tokens, amounts, seed))));
+    }
+
+    /// @dev Credit up to `seed` of what is left of anchor `index`'s floor
+    ///      and return what was credited.
+    function _seed(address earner, bytes32 epochIdHash, uint256 index, uint256 seed)
+        private returns (uint256 s)
+    {
+        uint256 claimed = seedClaimed[index];
+        uint256 floor = _anchorFloor[index];
+        if (claimed >= floor) return 0;
+        s = seed < floor - claimed ? seed : floor - claimed;
+        seedClaimed[index] = claimed + s;
+        uint256 after_ = seededValue[earner] + s;
+        seededValue[earner] = after_;
+        totalSeededValue += s;
+        emit Seeded(earner, epochIdHash, s, after_);
     }
 
     /// @dev Credit the amounts (each capped by its pool) and return their

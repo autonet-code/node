@@ -272,6 +272,8 @@ class FederatedCloseDriver:
         self.mint_gate: Optional[tuple] = None
         # (review_decay, reviewer_min_rep_bps), pinned like mint_gate.
         self.review_params: tuple = (1.0, 0)
+        # The REP floor in value units, pinned like mint_gate (0 = none).
+        self.rep_floor: int = 0
         # Set to the new charter text once a pinned charter differs from
         # the active one: the close must not run on the old axes. The host
         # restarts the daemon onto the new charter (on_charter_change).
@@ -886,6 +888,8 @@ class FederatedCloseDriver:
             if isinstance(state.get("review_params"), (list, tuple)) and len(state["review_params"]) == 2:
                 updates["review_params"] = (float(state["review_params"][0]),
                                             int(state["review_params"][1]))
+            if state.get("rep_floor") is not None:
+                updates["rep_floor"] = max(0, int(state["rep_floor"]))
             houses = state.get("sanctioned_households")
             if isinstance(houses, list):
                 updates["sanctioned_households"] = sorted(
@@ -1064,6 +1068,7 @@ class FederatedCloseDriver:
                 reviewer_min_rep_bps=int(self.review_params[1]),
                 service_reviews=dict(self._service_reviews),
                 service_snapshot=self.service_snapshot,
+                rep_floor=int(self.rep_floor),
             )
         except Exception as e:
             logger.error(
@@ -1073,10 +1078,11 @@ class FederatedCloseDriver:
 
         # CONTRACT SEAM. ``close_result`` carries ``claims``, keyed by
         # household earner (Decision 2026-10-27): each household's amount of
-        # every token's pool, committed one leaf each under the claimRoot.
+        # every token's pool and its seed of the REP floor, committed one
+        # leaf each under the claimRoot.
         # The household submitter (nodes/common/authoritative_submitter.py)
         # reads them from the anchored blob, calls ``claim(earner,
-        # epochIdHash, tokens, amounts, proof)`` with the daemon operator
+        # epochIdHash, tokens, amounts, seed, proof)`` with the daemon operator
         # key and withdraws each token. REP is claimed DAO-side on the value
         # Substrate records. This driver does not itself call the chain.
 

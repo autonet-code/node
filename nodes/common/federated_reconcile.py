@@ -18,7 +18,8 @@ bit-identical:
      ``OUTPUT_DECIMALS`` places (far coarser than ulp-level jitter), and
      every amount after that is integer arithmetic per token
      (``split_pools``): each earner takes the same fraction of every
-     token's pool, floored, and the dust carries over.
+     token's pool, floored, and the dust carries over. The REP floor's
+     seed (``seed_split``) is split the same way, its dust lapsing.
 """
 
 from __future__ import annotations
@@ -957,6 +958,10 @@ def federated_epoch_close(
     # The chain's services, payments and channels pinned to the snapshot
     # block (voice_state.read_service_snapshot); None without a chain.
     service_snapshot: Optional[Dict[str, Any]] = None,
+    # The REP floor pinned to the snapshot, in value units (Registry
+    # jurisdiction.autonet.rep_floor / 1e12, mint_params.rep_floor_from_writes);
+    # 0 = no floor.
+    rep_floor: int = 0,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close over a canonical batch sequence.
 
@@ -977,6 +982,12 @@ def federated_epoch_close(
     unminted rest, the parts a malware verdict leaves unpaid, sanctioned
     households' shares, the floor's dust) is the next carry, token by
     token, so pool = paid + carry exactly.
+
+    The REP floor (``rep_floor``, value units): when the claims are worth
+    less than it and some household earns, the difference is seeded to the
+    earning households in proportion to their weights (``seed_split``):
+    each claim's ``seed``, floored, the dust lapsing. A close where no
+    household earns seeds nothing, and nothing carries to the next.
     """
     all_events: List[Dict[str, Any]] = []
     for batch in canonical.ordered_batches:
@@ -1077,11 +1088,24 @@ def federated_epoch_close(
         tokens = {t: v for t, v in sorted(house_tokens[house].items()) if v > 0}
         value = basket_value(tokens, parity_map)
         if tokens or value:
-            claims[house] = {"tokens": tokens, "value": value}
+            claims[house] = {"tokens": tokens, "value": value, "seed": 0}
+    total_value = sum(claims[h]["value"] for h in sorted(claims))
+
+    # The REP floor: what the claims are worth falls short of it, so the
+    # difference is seeded to the earning households by weight. Also when
+    # the pools are empty: a household with only a seed still gets a leaf.
+    floor = max(0, int(rep_floor or 0))
+    seeds = seed_split(floor - total_value, house_weights) if floor > total_value else {}
+    for house in sorted(seeds):
+        entry = claims.setdefault(house, {"tokens": {}, "value": 0, "seed": 0})
+        entry["seed"] = seeds[house]
+    total_seed = sum(seeds[h] for h in sorted(seeds))
 
     result: Dict[str, Any] = {
         "claims": claims,
-        "total_value": sum(claims[h]["value"] for h in sorted(claims)),
+        "total_value": total_value,
+        "rep_floor": floor,
+        "total_seed": total_seed,
         "output_decimals": output_decimals,
         "household_weights": dict(sorted(house_weights.items())),
         "claims_by_agent": {k: by_agent[k] for k in sorted(by_agent) if by_agent[k]},
@@ -1138,9 +1162,9 @@ def federated_epoch_close(
         result["parity"] = {t: parity_map.get(t, 0) for t in sorted(pools)}
         logger.info(
             "tool pools: %d tool(s) concluded, %d earner(s), value %d paid of "
-            "pools %s, carried %s",
+            "pools %s, carried %s, seeded %d (REP floor %d)",
             len(tool_result["per_digest"]), len(claims), result["total_value"],
-            pools, rounds_next["pool_carry"])
+            pools, rounds_next["pool_carry"], total_seed, floor)
     else:
         result["pools"] = {}
         result["parity"] = {}
@@ -1185,19 +1209,22 @@ def federated_epoch_close(
     from .library.charter_version import charter_hash as _charter_hash
 
     result["authoritative_payload"] = {
-        # schema 9: ``claims`` (per household, an amount of each token's
-        # pool and the REP value), one claimRoot leaf each, with ``pools``,
-        # ``parity`` and ``total_value``; ``concluded`` commits each
+        # schema 10: ``claims`` (per household, an amount of each token's
+        # pool, the REP value and the seed of the REP floor), one claimRoot
+        # leaf each, with ``pools``, ``parity``, ``total_value``,
+        # ``rep_floor`` and ``total_seed``; ``concluded`` commits each
         # concluding tool's malware share (bps), one leaf each. carry_cid
         # (set by FederatedCloseDriver) commits the next close's carry-over
         # bundle; charter_hash and sanctioned_households decide the split,
         # so they are committed too.
-        "schema": 9,
+        "schema": 10,
         "epoch_root": result["epoch_root"],
         "claims": result["claims"],
         "pools": result["pools"],
         "parity": result["parity"],
         "total_value": result["total_value"],
+        "rep_floor": result["rep_floor"],
+        "total_seed": result["total_seed"],
         "output_decimals": output_decimals,
         "charter_hash": _charter_hash(),
         "sanctioned_households": result["sanctioned_households"],
@@ -1269,6 +1296,24 @@ def split_pools(pools: Dict[str, int], weights: Dict[str, int]) -> Dict[str, Dic
         basket = {t: v for t, v in basket.items() if v > 0}
         if basket:
             out[key] = basket
+    return out
+
+
+def seed_split(total: int, weights: Dict[str, int]) -> Dict[str, int]:
+    """The REP floor's seed: each earner takes ``total * w // W`` (value
+    units), W the sum of the earners' weights, so the seeds keep the
+    earners' proportions in the basket. Pure integers; the floor's dust
+    lapses. Zero seeds are dropped; no earner or ``total <= 0`` seeds
+    nothing."""
+    total = int(total)
+    w_sum = sum(int(weights[k]) for k in sorted(weights))
+    if total <= 0 or w_sum <= 0:
+        return {}
+    out: Dict[str, int] = {}
+    for key in sorted(weights):
+        s = total * int(weights[key]) // w_sum
+        if s > 0:
+            out[key] = s
     return out
 
 

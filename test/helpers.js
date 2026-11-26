@@ -207,17 +207,18 @@ async function anchorEpoch(substrate, epochId, claimRoot, sender) {
 // ---------------------------------------------------------------------------
 // Claims: one leaf per earner,
 //   keccak256(bytes.concat(keccak256(abi.encode(
-//       CLAIM_TAG, earner, tokens, amounts))))
-// in a sorted-pair merkle tree.
+//       CLAIM_TAG, earner, tokens, amounts, seed))))
+// in a sorted-pair merkle tree. `seed` is the leaf's part of the REP floor
+// (value units), 0 by default.
 // ---------------------------------------------------------------------------
 
 const CLAIM_TAG = digest("autonet.claim");
 
-function claimLeaf(earner, tokens, amounts) {
+function claimLeaf(earner, tokens, amounts, seed = 0n) {
   const inner = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["bytes32", "address", "address[]", "uint256[]"],
-      [CLAIM_TAG, earner, tokens, amounts]
+      ["bytes32", "address", "address[]", "uint256[]", "uint256"],
+      [CLAIM_TAG, earner, tokens, amounts, seed]
     )
   );
   return ethers.keccak256(inner);
@@ -262,14 +263,15 @@ function merkleTree(leaves) {
 }
 
 // Build an epoch's claim tree. `entries` is [{earner, tokens,
-// amounts}] (tokens already sorted, or give `basket` pairs instead).
+// amounts, seed?}] (tokens already sorted, or give `basket` pairs instead).
 // Returns { root, entries, proof(i) }.
 function claimTree(entries) {
   const norm = entries.map((e) => {
     const b = e.basket ? sortBasket(e.basket) : { tokens: e.tokens, amounts: e.amounts };
-    return { earner: e.earner, tokens: b.tokens, amounts: b.amounts };
+    const seed = e.seed !== undefined ? BigInt(e.seed) : 0n;
+    return { earner: e.earner, tokens: b.tokens, amounts: b.amounts, seed };
   });
-  const t = merkleTree(norm.map((e) => claimLeaf(e.earner, e.tokens, e.amounts)));
+  const t = merkleTree(norm.map((e) => claimLeaf(e.earner, e.tokens, e.amounts, e.seed)));
   return { root: t.root, entries: norm, proof: t.proof };
 }
 
@@ -277,7 +279,7 @@ function claimTree(entries) {
 function claimTx(substrate, sender, tree, i, epochId) {
   const e = tree.entries[i];
   return substrate.connect(sender).claim(
-    e.earner, digest(epochId), e.tokens, e.amounts, tree.proof(i));
+    e.earner, digest(epochId), e.tokens, e.amounts, e.seed, tree.proof(i));
 }
 
 // ---------------------------------------------------------------------------

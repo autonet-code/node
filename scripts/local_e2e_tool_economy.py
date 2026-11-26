@@ -44,11 +44,18 @@ the operator. The DAEMON code paths drive every step:
      withdrawn once unpaused;
   7. the same driver step claims each household's REP 1:1 on the value of
      its pool earnings (``AutonetRepClaim.claim``, ``earnedValue``);
-  8. B opens credits with C in T18 and buys C's T18 service twice on them
+  8. the REP floor: the DAO sets ``jurisdiction.autonet.rep_floor``; A
+     publishes a second tool, B and C review it, and it concludes in an
+     epoch that collected no fees (its pool is only what the first close
+     carried). The close seeds the difference between the floor and what
+     the claims are worth to the same earners by weight, the anchor stores
+     the floor, each claim adds its seed to ``earnedValue``, and
+     AutonetRepClaim mints the floor in REP across the three households;
+  9. B opens credits with C in T18 and buys C's T18 service twice on them
      (vouchers pay ahead); C's sweep settles what it served without
      closing; B closes, C settles inside the window, and B's refund sweep
      withdraws the rest;
-  9. teardown.
+  10. teardown.
 
 The jurisdiction contracts are NOT vendored: they are copied at run time
 from a trustless-contracts checkout (env TRUSTLESS_CONTRACTS_DIR, default
@@ -124,6 +131,8 @@ SERVICE_FEE_BPS = 250  # Substrate default
 FEE_TREASURY_BPS = 5000
 CHANNEL_WINDOW = 60    # PaymentChannel challenge window, seconds
 CHARTER_KEY = "jurisdiction.autonet.charter"
+REP_FLOOR_KEY = "jurisdiction.autonet.rep_floor"
+REP_FLOOR = 10 * E18     # the REP floor of stage 8: 10 REP (10 value units)
 # One request of each of C's services: 400 USD6 (10 fee, 5 to the pool),
 # 80 T18 = 100 units (2 T18 fee, 1 T18 to the pool).
 ASK = {"usd6": 400 * U6, "t18": 80 * E18}
@@ -170,6 +179,11 @@ WORDS_CODE = (
     "args = json.load(sys.stdin)\n"
     "print(json.dumps({'words': len(str(args.get('text', '')).split())}))\n"
 )
+LOWER_CODE = (
+    "import sys, json\n"
+    "args = json.load(sys.stdin)\n"
+    "print(json.dumps({'lower': str(args.get('x', '')).lower()}))\n"
+)
 UPPER_SCHEMA = {"type": "object", "properties": {"x": {"type": "string"}}}
 WORDS_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}}}
 
@@ -181,8 +195,9 @@ STAGES = [
     (5, "service fees collected in both tokens (B buys C's two services)"),
     (6, "close: baskets of both pools; anchor; claims that pay the basket; a paused token deferred"),
     (7, "REP claimed 1:1 on the value of the pool earnings (AutonetRepClaim)"),
-    (8, "credits in T18: vouchers pay ahead, the provider settles, the buyer closes and withdraws"),
-    (9, "teardown"),
+    (8, "the REP floor: a tool concludes in an epoch with no fees; the floor is minted in REP"),
+    (9, "credits in T18: vouchers pay ahead, the provider settles, the buyer closes and withdraws"),
+    (10, "teardown"),
 ]
 
 
@@ -577,7 +592,7 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         failed = True
 
     async def finish() -> int:
-        teardown = S[9]
+        teardown = S[10]
         try:
             if ws_c is not None:
                 await ws_c.stop()
@@ -1251,7 +1266,153 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
 
     # ------------------------------------------------------------------
     s8 = S[8]
-    log("Stage 8: payment channel")
+    log("Stage 8: the REP floor")
+    try:
+        # The DAO sets the REP floor (the timelock owns the Registry).
+        send(w3, registry.functions.editRegistry(REP_FLOOR_KEY, str(REP_FLOOR)),
+             HH_TIMELOCK_PK)
+        floor_v = REP_FLOOR // 10 ** 12
+        check(substrate.functions.repFloorValue().call() == floor_v,
+              f"Substrate reads the floor: {REP_FLOOR // E18} REP = {floor_v / U6:g} value units")
+        # A publishes a second tool; B and C adopt it, use it and review it.
+        reg2 = await execute_tool("register_tool", {
+            "name": "lower_case", "description": "Lower-cases a string.",
+            "input_schema": UPPER_SCHEMA, "code": LOWER_CODE,
+            "novelty": {"statement": "Lower-cases a string; the library only upper-cases.",
+                        "prior_art": [digest]}}, rt_a, caller_id=AGENT["A"])
+        if "error" in reg2:
+            raise RuntimeError(f"register_tool (lower_case): {reg2}")
+        n_announced = len(announced)
+        pub2 = await execute_tool("publish_tool", {"digest": reg2["digest"]}, rt_a,
+                                  caller_id=AGENT["A"])
+        if "error" in pub2:
+            raise RuntimeError(f"publish_tool (lower_case): {pub2}")
+        digest2 = pub2["digest"]
+        b32_2 = bytes.fromhex(digest2)
+        check(bond.functions.isBonded(b32_2).call() and len(announced) == n_announced + 1,
+              "A publishes lower_case, bonded and announced")
+        epoch_r = int(bond.functions.currentEpoch().call())
+        for h, word in (("B", "Floor Epoch"), ("C", "No Fees")):
+            ad = await execute_tool("adopt_tool", {"digest": digest2, "reason": "titles"},
+                                    rts[h], caller_id=AGENT[h])
+            check("error" not in ad, f"{h} adopts lower_case")
+            out = await execute_tool("use_tool", {"name": "lower_case",
+                                                  "arguments": {"x": word}},
+                                     rts[h], caller_id=AGENT[h])
+            check(word.lower() in json.dumps(out), f"{h} uses it")
+            att = await execute_tool("attest_tools", {
+                "judgments": [{"tool": digest2, "ok": True, **REVIEWS[h]}],
+                "context": "lower-casing a title"}, rts[h], caller_id=AGENT[h])
+            rv = att.get("reviews") or {}
+            check(rv.get("queued") == 1 and rv.get("epoch") == epoch_r,
+                  f"{h}: review queued for epoch {epoch_r} ({rv})")
+        for d in drivers:
+            d.on_local_close()
+        got = await tick_all(drivers)
+        check(got.get("committed") == 2, f"both batches committed ({got})")
+        anchor_epoch(w3, substrate, "e4", op_key["A"])
+        got = await tick_all(drivers)
+        check(got.get("revealed") == 2, f"anchor e4: both batches revealed ({got})")
+        advance(w3, PARAMS["revealWindow"] + 1)
+        got = await tick_all(drivers, ticks=2)
+        check(bond.functions.getRound(b32_2, epoch_r).call()[0] == 3,
+              f"after the reveal window: lower_case's round finalized ({got})")
+
+        # An epoch that collected no fees: the snapshot at e5 has an empty
+        # window, so the pool is only what the first close carried.
+        anchor_epoch(w3, substrate, "e5", op_key["A"])
+        advance(w3, 5)
+        state2 = read_voice_state(substrate.address, RPC_URL, rep_token_address=rep.address,
+                                  tool_bond_address=bond.address,
+                                  dao_registry_address=registry.address, web3=w3)
+        check(state2["tool_share_window"] == {},
+              "no fees collected between e4 and e5: the window is empty")
+        check(state2["rep_floor"] == floor_v, "the close reads the floor pinned to e5")
+        manifest2, author2 = announced[-1]
+        kp2 = Keypair.generate()
+        batch2 = EventBatch(rpb_address="rpb_e2e_economy", sender_pubkey=kp2.public_key,
+                            batch_seq=1, events=[registration_event(
+                                manifest2, digest2, agent_id=author2)],
+                            prev_batch_hash=b"", timestamp=1_700_000_100.0)
+        close2 = federated_epoch_close(
+            canonical_order([batch2]), tool_share_window=state2["tool_share_window"],
+            parity=state2["parity"], agent_owner_map=state2["owner_map"],
+            rep_shares=state2["rep_shares"], review_snapshot=state2["review_snapshot"],
+            mint_gate=tuple(state2["mint_gate"]),
+            tool_registrations=close["tool_registrations"],
+            tool_rounds=close["tool_rounds"], rep_floor=state2["rep_floor"])
+        check(close2["concluded"] == {digest2: 0}, "lower_case concludes")
+        claims2 = close2["claims"]
+        v2, s2_seed = close2["total_value"], close2["total_seed"]
+        check(set(claims2) == set(hk.values()),
+              "the three households earn (A the author side, B and C the reviewers')")
+        check(close2["rep_floor"] == floor_v and s2_seed > 0
+              and floor_v - len(claims2) <= v2 + s2_seed <= floor_v,
+              f"the carry pays {v2 / U6:.6f} units, the floor seeds {s2_seed / U6:.6f}: "
+              f"together the floor, {floor_v / U6:g}")
+        weight = close2["household_weights"]
+        w_sum = sum(weight.values())
+        for h in HOUSES:
+            want = (floor_v - v2) * weight[hk[h]] // w_sum
+            check(claims2[hk[h]]["seed"] == want,
+                  f"{h}: seed {want / U6:.6f} units, its weight's share of the difference")
+        carry2 = close2["tool_rounds"]["pool_carry"]
+        for k in tok:
+            paid = sum(c["tokens"].get(T[k], 0) for c in claims2.values())
+            check(paid + int(carry2.get(T[k], 0)) == int(close2["pools"].get(T[k], 0)),
+                  f"{k}: the carry is paid or carried again, never more")
+
+        fed2 = FederatedCloseResult(
+            epoch_id="e6", close_result={**close2, "epoch_id": "e6"},
+            senders=[kp2.public_key], winner=kp2.public_key, is_winner=True, n_batches=1,
+            snapshot_anchor_count=int(substrate.functions.anchorCount().call()))
+        earned0 = {h: substrate.functions.earnedValue(owner[h]).call() for h in HOUSES}
+        rep0 = {h: rep_of(owner[h]) for h in HOUSES}
+        outs2: Dict[str, Dict[str, Any]] = {}
+        outs2["A"] = await asyncio.to_thread(csd["A"].handle_federated_close, fed2)
+        check(outs2["A"].get("anchored"),
+              f"daemon A's driver anchors e6 ({outs2['A'].get('anchor_error', 'direct')})")
+        idx6 = int(substrate.functions.anchorCount().call()) - 1
+        check(substrate.functions.anchorFloor(idx6).call() == floor_v,
+              "the anchor stored the floor in value units")
+        for h in ("B", "C"):
+            outs2[h] = await asyncio.to_thread(
+                csd[h].handle_federated_close, dataclasses.replace(fed2, is_winner=False))
+        minted = 0
+        for h in HOUSES:
+            seed = claims2[hk[h]]["seed"]
+            row = next((r for r in outs2[h]["agent_submissions"]
+                        if r["claimant"].lower() == hk[h]), {})
+            check(row.get("success") and row.get("seed") == seed,
+                  f"{h}: operator claims its owner's leaf with its seed ({seed})")
+            basket = sum(claims2[hk[h]]["tokens"].get(T[k], 0) * PARITY[k] // PARITY_SCALE
+                         for k in tok)
+            earned = substrate.functions.earnedValue(owner[h]).call() - earned0[h]
+            check(earned == basket + seed
+                  and substrate.functions.seededValue(owner[h]).call() == seed,
+                  f"{h}: earnedValue +{earned / U6:.6f} (basket {basket / U6:.6f} + seed "
+                  f"{seed / U6:.6f}); seededValue {seed / U6:.6f}")
+            got_rep = rep_of(owner[h]) - rep0[h]
+            check(got_rep == earned * 10 ** 12,
+                  f"{h}: AutonetRepClaim mints {got_rep / E18:.6f} REP (1:1, the seed included)")
+            minted += got_rep
+        check(substrate.functions.seedClaimed(idx6).call() == s2_seed
+              and substrate.functions.totalSeededValue().call() == s2_seed,
+              "the seeds claimed are the close's, within the stored floor")
+        check(REP_FLOOR - len(claims2) * 10 ** 12 <= minted <= REP_FLOOR,
+              f"the epoch minted the floor: {minted / E18:.6f} REP")
+        s8.note("floor_rep", REP_FLOOR // E18)
+        s8.note("paid_value", v2)
+        s8.note("seeded_value", s2_seed)
+        s8.note("rep_minted", round(minted / E18, 6))
+        s8.status = "PASS"
+    except Exception as e:
+        fail(s8, e)
+        return await finish()
+
+    # ------------------------------------------------------------------
+    s9 = S[9]
+    log("Stage 9: payment channel")
     try:
         from atn.on_chain import ServiceMarketClient
         from atn.service_channels import sweep_refunds
@@ -1311,12 +1472,12 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         check(bal(k, op["B"]) - (before["b"] - 3 * price) == price
               and rt_b.channel_book.closing() == {},
               f"B got {price / E18:g} T18 back, fee-free; its book is clear")
-        s8.note("channel", cid)
-        s8.note("settled", f"{2 * price / E18:g} T18")
-        s8.note("refunded", f"{price / E18:g} T18")
-        s8.status = "PASS"
+        s9.note("channel", cid)
+        s9.note("settled", f"{2 * price / E18:g} T18")
+        s9.note("refunded", f"{price / E18:g} T18")
+        s9.status = "PASS"
     except Exception as e:
-        fail(s8, e)
+        fail(s9, e)
 
     return await finish()
 

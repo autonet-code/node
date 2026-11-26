@@ -337,3 +337,50 @@ async def test_claim_status_lists_the_basket_and_withdraw_owed_pays_it():
     assert not res["success"] and "nothing is owed" in res["error"]
     res = await svc.withdraw_owed(key, earner, dai.address)
     assert not res["success"] and "nothing is owed" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_the_rep_floor_seed_is_claimed_into_earned_value(chain):
+    """The REP floor: a close whose pools are empty but whose tools conclude
+    seeds the floor to its earners by weight; each household's submitter
+    claims a leaf with no tokens and its seed, and Substrate adds the seed
+    to earnedValue and seededValue, never more than the floor it stored
+    with the anchor."""
+    from tests.substrate_chain_helpers import index_registry
+    from nodes.common.mint_params import REP_FLOOR_KEY
+    fx = chain
+    floor = 3_000_000                       # value units: 3 REP
+    reg = index_registry(fx["contract"])
+    fx["w3"].eth.wait_for_transaction_receipt(reg.functions.setValue(
+        REP_FLOOR_KEY, str(floor * 10 ** 12)).transact({"from": fx["deployer"]}))
+    canonical = canonical_order([_registration("rpb_floor", a) for a in fx["agent_addrs"]])
+    regs = federated_epoch_close(canonical)["tool_registrations"]
+    result = federated_epoch_close(
+        canonical, rep_shares={REVIEWER: 0.5},
+        review_snapshot=review_snapshot(list(regs), REVIEWER),
+        tool_share_window={}, parity={}, rep_floor=floor)
+    assert result["total_value"] == 0 and result["claims"]
+    assert floor - len(result["claims"]) <= result["total_seed"] <= floor
+    result["epoch_id"] = "e_floor"
+    a = EpochAnchorer(config=EpochAnchorerConfig(epoch_anchor_address=fx["addr"]),
+                      web3=fx["w3"], contract_abi=fx["abi"]).anchor_close_result(
+        result, from_address=fx["deployer"])
+    assert a.success, a.error
+    c = fx["contract"]
+    index = c.functions.anchorCount().call() - 1
+    assert c.functions.anchorFloor(index).call() == floor
+    resolver = InMemoryBlobResolver()
+    resolver.put(a.agent_mint_blob)
+    svc = _service(fx)
+    for earner_l, entry in sorted(result["claims"].items()):
+        earner = fx["w3"].to_checksum_address(earner_l)
+        r = _submitter(fx, earner, resolver).submit_for_epoch("e_floor")
+        assert r.success and r.tx_hash, r.error
+        assert r.tokens == {} and r.seed == entry["seed"] > 0
+        assert c.functions.earnedValue(earner).call() == entry["seed"]
+        assert c.functions.seededValue(earner).call() == entry["seed"]
+        status = await svc.get_claim_status(earner)
+        assert status["seeded_value"] == str(entry["seed"])
+        assert status["earned_value"] == str(entry["seed"])
+    assert c.functions.totalSeededValue().call() == result["total_seed"]
+    assert c.functions.seedClaimed(index).call() == result["total_seed"]

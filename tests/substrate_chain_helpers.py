@@ -47,15 +47,6 @@ def artifact(rel: str) -> dict:
     return json.loads((_ART / f"{rel}.json").read_text(encoding="utf-8"))
 
 
-def claim_takes_value(abi: list) -> bool:
-    """True while the compiled Substrate's ``claim`` still takes a REP value
-    (the leaf without it is the current spec)."""
-    for e in abi:
-        if e.get("type") == "function" and e.get("name") == "claim":
-            return len(e.get("inputs") or []) == 6
-    return False
-
-
 def account_key(w3: Web3, address: str) -> str:
     """Private key (0x hex) of an eth_tester managed account."""
     backend = w3.provider.ethereum_tester.backend

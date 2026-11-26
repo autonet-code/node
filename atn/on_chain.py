@@ -200,6 +200,14 @@ SUBSTRATE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # The part of earnedValue the REP floor seeded (value units).
+    {
+        "inputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "name": "seededValue",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # The value index (Registry jurisdiction.parity.<token>) as Substrate
     # reads it, and the pools' tokens.
     {
@@ -263,17 +271,20 @@ SUBSTRATE_ABI = [
     },
     # Household claims (Decision 2026-10-27). The leaf is
     # keccak256(bytes.concat(keccak256(abi.encode(CLAIM_TAG, earner, tokens,
-    # amounts)))) under the anchor's claimRoot (nodes/common/mint_merkle.py).
-    # Permissionless: anyone submits; the claim pays ``earner`` (the
-    # household's owner wallet) the whole basket in the same transaction. A
-    # token whose transfer fails stays owed (PayDeferred) and leaves later by
-    # withdraw, one token at a time. Substrate records the REP value on chain.
+    # amounts, seed)))) under the anchor's claimRoot
+    # (nodes/common/mint_merkle.py). Permissionless: anyone submits; the
+    # claim pays ``earner`` (the household's owner wallet) the whole basket
+    # in the same transaction. A token whose transfer fails stays owed
+    # (PayDeferred) and leaves later by withdraw, one token at a time.
+    # Substrate records the REP value on chain, the seed (the REP floor's
+    # part, value units) included.
     {
         "inputs": [
             {"internalType": "address",   "name": "earner",      "type": "address"},
             {"internalType": "bytes32",   "name": "epochIdHash", "type": "bytes32"},
             {"internalType": "address[]", "name": "tokens",      "type": "address[]"},
             {"internalType": "uint256[]", "name": "amounts",     "type": "uint256[]"},
+            {"internalType": "uint256",   "name": "seed",        "type": "uint256"},
             {"internalType": "bytes32[]", "name": "proof",       "type": "bytes32[]"},
         ],
         "name": "claim",
@@ -1398,9 +1409,11 @@ class OnChainService:
         tokens: list[str],
         amounts: list[int],
         proof: list[str | bytes],
+        seed: int = 0,
     ) -> dict[str, Any]:
         """Sign and submit ``claim(earner, epochIdHash, tokens, amounts,
-        proof)``, which pays the whole basket in the same transaction, then
+        seed, proof)`` (``seed``: the leaf's part of the REP floor, value
+        units), which pays the whole basket in the same transaction, then
         ``withdraw(earner, token)`` only for a token still owed after it (one
         whose transfer the claim deferred: paused, frozen, or deferred by an
         earlier claim). Normally that is one transaction.
@@ -1408,7 +1421,7 @@ class OnChainService:
         Decision 2026-10-27: the household's owner wallet is the earner and
         anyone may submit; ``private_key`` only signs and pays gas. The
         leaf under the anchor's claimRoot commits (earner, tokens,
-        amounts), tokens strictly ascending, so ``proof`` must be built
+        amounts, seed), tokens strictly ascending, so ``proof`` must be built
         over the same leaf (nodes/common/mint_merkle.py claim_merkle_proof).
         Once per (earner, epoch) on chain (``claimedEpoch``); the epoch
         must be anchored. A token whose withdrawal fails is reported in
@@ -1430,7 +1443,8 @@ class OnChainService:
             out: dict[str, Any] = {"success": True}
             if not contract.functions.claimedEpoch(who, eid).call():
                 out = self._send_signed(w3, account, contract.functions.claim(
-                    who, eid, token_list, [int(a) for a in amounts], proof_bytes),
+                    who, eid, token_list, [int(a) for a in amounts], int(seed),
+                    proof_bytes),
                     gas_floor=500_000)
                 if not out.get("success"):
                     return out
@@ -1636,7 +1650,8 @@ class OnChainService:
 
     async def get_claim_status(self, earner: str) -> dict[str, Any] | None:
         """What a household's earner (its owner wallet) has from the pools:
-        ``earned_value`` (claimed, as value) and ``owed`` per pool token
+        ``earned_value`` (claimed, as value), ``seeded_value`` (the part of
+        it the REP floor seeded; "0" when unread) and ``owed`` per pool token
         (claimed and not yet paid: a claim pays its basket at once, so this
         is what a failed transfer deferred, a paused or frozen token, until
         it is withdrawn: ``{token, symbol, decimals, amount}``, only tokens
@@ -1655,7 +1670,12 @@ class OnChainService:
             out: dict[str, Any] = {
                 "earner": who,
                 "earned_value": str(int(contract.functions.earnedValue(who).call())),
+                "seeded_value": "0",
                 "owed": owed}
+            try:
+                out["seeded_value"] = str(int(contract.functions.seededValue(who).call()))
+            except Exception as e:  # noqa: BLE001 (a read; the rest stands)
+                log.debug("seededValue for %s unread: %s", earner, e)
             # The basket so far: every token's total claimed by the earner
             # (ClaimedToken logs), a read failure leaving it out.
             try:

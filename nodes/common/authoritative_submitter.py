@@ -6,12 +6,13 @@ For an anchored epoch:
   2. Fetch the claims blob the anchor's ``claimCid`` names from a
      ``BlobResolver`` and check its sha256 against the cid: otherwise the
      resolver lied or the blob was tampered with.
-  3. Read the earner's leaf (its amount of each token's pool) and build its
-     proof from the whole blob (claims and concluded tools share the tree),
-     then check the proof against the anchor's ``claimRoot`` before
-     spending gas.
-  4. Call ``Substrate.claim(earner, epochIdHash, tokens, amounts, proof)``,
-     which pays the earner the whole basket in the same transaction; a
+  3. Read the earner's leaf (its amount of each token's pool and its seed
+     of the REP floor) and build its proof from the whole blob (claims and
+     concluded tools share the tree), then check the proof against the
+     anchor's ``claimRoot`` before spending gas.
+  4. Call ``Substrate.claim(earner, epochIdHash, tokens, amounts, seed,
+     proof)``, which pays the earner the whole basket in the same
+     transaction and adds the seed to its earned value; a
      token whose transfer fails (paused, frozen) stays owed (PayDeferred).
      The earner is the household's owner wallet (Decision 2026-10-27); the
      transaction is signed by whoever submits (the daemon operator key),
@@ -73,10 +74,12 @@ class AuthoritativeSubmissionResult:
     tx_hash: str = ""
     epoch_id: str = ""
     epoch_id_hash_hex: str = ""
-    # The leaf claimed: lowercase token -> amount (base units), and its
-    # informational value (6-decimal value units, from the blob).
+    # The leaf claimed: lowercase token -> amount (base units), its
+    # informational value (6-decimal value units, from the blob) and its
+    # seed of the REP floor (value units).
     tokens: Dict[str, int] = field(default_factory=dict)
     value: int = 0
+    seed: int = 0
     cid_verified: bool = False
     cid: str = ""
     # Withdrawals made in this pass: token -> tx hash; and the tokens whose
@@ -227,10 +230,10 @@ class AuthoritativeChainSubmitter:
             return AuthoritativeSubmissionResult(
                 success=False, epoch_id=epoch_id, cid=cid, cid_verified=True,
                 error=f"no claim leaf for {self.claimant_address}")
-        _earner, tokens, amounts = leaf
+        _earner, tokens, amounts, seed = leaf
         tokens_map = {t.lower(): a for t, a in zip(tokens, amounts)}
         base = dict(epoch_id=epoch_id, cid=cid, cid_verified=True,
-                    tokens=tokens_map, value=value)
+                    tokens=tokens_map, value=value, seed=seed)
 
         proof = claim_merkle_proof(claims, self.claimant_address, concluded=concluded) or []
         eid_hash = epoch_id_hash(epoch_id)
@@ -239,7 +242,7 @@ class AuthoritativeChainSubmitter:
         # if the anchor committed a root over different claims than the
         # blob it published: fail loud instead of burning gas.
         if not verify_claim_proof(bytes(anchor[_ANCHOR_CLAIM_ROOT]),
-                                  self.claimant_address, tokens, amounts, proof):
+                                  self.claimant_address, tokens, amounts, seed, proof):
             return AuthoritativeSubmissionResult(
                 success=False, epoch_id_hash_hex=eid_hash.hex(),
                 error=("pre-flight claim proof failed against the on-chain "
@@ -254,7 +257,7 @@ class AuthoritativeChainSubmitter:
         try:
             tx_hash = self._send(contract.functions.claim(
                 self._w3.to_checksum_address(self.claimant_address), eid_hash,
-                list(tokens), [int(a) for a in amounts], proof))
+                list(tokens), [int(a) for a in amounts], int(seed), proof))
         except Exception as e:
             if self._already_claimed(eid_hash):
                 # Lost a race with another submitter for the same household.
@@ -267,8 +270,8 @@ class AuthoritativeChainSubmitter:
                 error=f"claim failed: {e}", **base)
 
         self._submitted_epochs.add(epoch_id)
-        logger.info("claim: earner=%s, epoch=%s, tokens=%s, value=%d, tx=%s",
-                    self.claimant_id, epoch_id, tokens_map, value, tx_hash)
+        logger.info("claim: earner=%s, epoch=%s, tokens=%s, value=%d, seed=%d, tx=%s",
+                    self.claimant_id, epoch_id, tokens_map, value, seed, tx_hash)
         return AuthoritativeSubmissionResult(
             success=True, tx_hash=tx_hash, epoch_id_hash_hex=eid_hash.hex(), **base)
 
