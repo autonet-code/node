@@ -983,11 +983,13 @@ def federated_epoch_close(
     households' shares, the floor's dust) is the next carry, token by
     token, so pool = paid + carry exactly.
 
-    The REP floor (``rep_floor``, value units): when the claims are worth
-    less than it and some household earns, the difference is seeded to the
-    earning households in proportion to their weights (``seed_split``):
-    each claim's ``seed``, floored, the dust lapsing. A close where no
-    household earns seeds nothing, and nothing carries to the next.
+    The REP floor (``rep_floor``, value units): when the pool this close
+    splits (window plus carry, valued at ``parity``) is worth less than
+    it, the difference is split over all the weights exactly like the pool
+    (``seed_split``): each earning household's claim takes its ``seed``,
+    and the seed of the parts that go unpaid lapses, as does the dust. A
+    close where no tool concludes seeds nothing, and nothing carries to
+    the next.
     """
     all_events: List[Dict[str, Any]] = []
     for batch in canonical.ordered_batches:
@@ -1042,6 +1044,19 @@ def federated_epoch_close(
         pools = {t: v for t, v in pools.items() if v > 0}
     shares = split_pools(pools or {}, weights)
 
+    # The REP floor (owner decision 2026-11-26): it is measured against what
+    # the service market produced, the value of the pool this close splits
+    # (the new tool share plus the carry, at the pinned parities). When that
+    # falls short, the difference is split over ALL the weights exactly like
+    # the pool, the parts that go unpaid included, so the seed behaves as if
+    # the market had produced the floor in fees. The seed of an unpaid part
+    # (unminted, a malware verdict's, a sanctioned household's) lapses: it
+    # never carries over and never goes to anyone else.
+    floor = max(0, int(rep_floor or 0))
+    pool_value = basket_value(pools or {}, parity_map)
+    seed_total = floor - pool_value if floor > pool_value else 0
+    key_seeds = seed_split(seed_total, weights)
+
     owners = {str(k).lower(): str(v).lower()
               for k, v in (agent_owner_map or {}).items()}
     house_set = set(sanctioned)
@@ -1049,6 +1064,8 @@ def federated_epoch_close(
     withheld: Dict[str, Dict[str, int]] = {}
     unpaid_now: Dict[str, Dict[str, Dict[str, int]]] = {}
     house_weights: Dict[str, int] = {}
+    house_seeds: Dict[str, int] = {}
+    seed_lapsed = 0
     for key in sorted(weights):
         basket = shares.get(key, {})
         parsed = parse_unpaid_key(key)
@@ -1057,8 +1074,10 @@ def federated_epoch_close(
             # unpaid (carried) and recorded for a clearing proposal.
             digest, who = parsed
             unpaid_now.setdefault(digest, {})[who] = basket
+            seed_lapsed += key_seeds.get(key, 0)
             continue
         if key == UNMINTED:
+            seed_lapsed += key_seeds.get(key, 0)
             continue
         a = str(key).lower()
         if owners.get(a, a) in house_set or a in house_set:
@@ -1067,10 +1086,13 @@ def federated_epoch_close(
             # never pays the households that voted for it.
             if basket:
                 withheld[key] = basket
+            seed_lapsed += key_seeds.get(key, 0)
             continue
         by_agent[key] = basket
         house = owners.get(a, a)
         house_weights[house] = house_weights.get(house, 0) + weights[key]
+        if key_seeds.get(key):
+            house_seeds[house] = house_seeds.get(house, 0) + key_seeds[key]
 
     # The owner wallet claims (Decision 2026-10-27): each agent's amounts go
     # to its pinned owner, added per household as integers. An agent with
@@ -1091,21 +1113,24 @@ def federated_epoch_close(
             claims[house] = {"tokens": tokens, "value": value, "seed": 0}
     total_value = sum(claims[h]["value"] for h in sorted(claims))
 
-    # The REP floor: what the claims are worth falls short of it, so the
-    # difference is seeded to the earning households by weight. Also when
-    # the pools are empty: a household with only a seed still gets a leaf.
-    floor = max(0, int(rep_floor or 0))
-    seeds = seed_split(floor - total_value, house_weights) if floor > total_value else {}
-    for house in sorted(seeds):
+    # Each earning household's seed joins its claim; one with only a seed
+    # (the pools empty) still gets a leaf.
+    for house in sorted(house_seeds):
         entry = claims.setdefault(house, {"tokens": {}, "value": 0, "seed": 0})
-        entry["seed"] = seeds[house]
-    total_seed = sum(seeds[h] for h in sorted(seeds))
+        entry["seed"] = house_seeds[house]
+    total_seed = sum(house_seeds[h] for h in sorted(house_seeds))
 
     result: Dict[str, Any] = {
         "claims": claims,
         "total_value": total_value,
         "rep_floor": floor,
         "total_seed": total_seed,
+        # Informational (not committed): the pool's value the floor is
+        # measured against, the seed's unpaid parts that lapsed, and the
+        # weights' sum (each key's fraction of the pool and the seed).
+        "pool_value": pool_value,
+        "seed_lapsed": seed_lapsed,
+        "total_weight": total_weight,
         "output_decimals": output_decimals,
         "household_weights": dict(sorted(house_weights.items())),
         "claims_by_agent": {k: by_agent[k] for k in sorted(by_agent) if by_agent[k]},
@@ -1162,9 +1187,9 @@ def federated_epoch_close(
         result["parity"] = {t: parity_map.get(t, 0) for t in sorted(pools)}
         logger.info(
             "tool pools: %d tool(s) concluded, %d earner(s), value %d paid of "
-            "pools %s, carried %s, seeded %d (REP floor %d)",
+            "pools %s (value %d), carried %s, seeded %d and lapsed %d (REP floor %d)",
             len(tool_result["per_digest"]), len(claims), result["total_value"],
-            pools, rounds_next["pool_carry"], total_seed, floor)
+            pools, pool_value, rounds_next["pool_carry"], total_seed, seed_lapsed, floor)
     else:
         result["pools"] = {}
         result["parity"] = {}
@@ -1300,11 +1325,10 @@ def split_pools(pools: Dict[str, int], weights: Dict[str, int]) -> Dict[str, Dic
 
 
 def seed_split(total: int, weights: Dict[str, int]) -> Dict[str, int]:
-    """The REP floor's seed: each earner takes ``total * w // W`` (value
-    units), W the sum of the earners' weights, so the seeds keep the
-    earners' proportions in the basket. Pure integers; the floor's dust
-    lapses. Zero seeds are dropped; no earner or ``total <= 0`` seeds
-    nothing."""
+    """The REP floor's seed: each key takes ``total * w // W`` (value
+    units), W the sum of all the weights, the same fraction as it takes of
+    every pool (``split_pools``). Pure integers; the dust lapses. Zero
+    seeds are dropped; no weight or ``total <= 0`` seeds nothing."""
     total = int(total)
     w_sum = sum(int(weights[k]) for k in sorted(weights))
     if total <= 0 or w_sum <= 0:

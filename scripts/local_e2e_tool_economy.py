@@ -47,11 +47,13 @@ the operator. The DAEMON code paths drive every step:
   8. the REP floor: the DAO sets ``jurisdiction.autonet.rep_floor``; A
      publishes a second tool, B and C review it, and it concludes in an
      epoch that collected no fees (its pool is only what the first close
-     carried). The close seeds the difference between the floor and what
-     the claims are worth to the same earners by weight. Each anchor
-     stores the floor for the epoch after it, whose close reads it and
-     whose seeds it caps. Each claim adds its seed to ``earnedValue``, and
-     AutonetRepClaim mints the floor in REP across the three households;
+     carried). The close splits the difference between the floor and the
+     pool's value exactly like the pool: each household's seed is its
+     fraction of it, and the seed of the parts nobody is paid lapses. Each
+     anchor stores the floor for the epoch after it, whose close reads it
+     and whose seeds it caps. Each claim adds its seed to ``earnedValue``,
+     and AutonetRepClaim mints each household REP as if the market had
+     produced the floor in fees;
   9. B opens credits with C in T18 and buys C's T18 service twice on them
      (vouchers pay ahead); C's sweep settles what it served without
      closing; B closes, C settles inside the window, and B's refund sweep
@@ -196,7 +198,7 @@ STAGES = [
     (5, "service fees collected in both tokens (B buys C's two services)"),
     (6, "close: baskets of both pools; anchor; claims that pay the basket; a paused token deferred"),
     (7, "REP claimed 1:1 on the value of the pool earnings (AutonetRepClaim)"),
-    (8, "the REP floor: a tool concludes in an epoch with no fees; the floor is minted in REP"),
+    (8, "the REP floor: a tool concludes in an epoch with no fees; REP as if the pool were the floor"),
     (9, "credits in T18: vouchers pay ahead, the provider settles, the buyer closes and withdraws"),
     (10, "teardown"),
 ]
@@ -1345,18 +1347,25 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         check(close2["concluded"] == {digest2: 0}, "lower_case concludes")
         claims2 = close2["claims"]
         v2, s2_seed = close2["total_value"], close2["total_seed"]
+        pool_v, lapsed = close2["pool_value"], close2["seed_lapsed"]
+        check(pool_v == sum(int(close2["pools"].get(T[k], 0)) * PARITY[k] // PARITY_SCALE
+                            for k in tok) and 0 < pool_v < floor_v,
+              f"the pool (only the first close's carry) is worth {pool_v / U6:.6f} units, "
+              "below the floor")
         check(set(claims2) == set(hk.values()),
               "the three households earn (A the author side, B and C the reviewers')")
-        check(close2["rep_floor"] == floor_v and s2_seed > 0
-              and floor_v - len(claims2) <= v2 + s2_seed <= floor_v,
-              f"the carry pays {v2 / U6:.6f} units, the floor seeds {s2_seed / U6:.6f}: "
-              f"together the floor, {floor_v / U6:g}")
-        weight = close2["household_weights"]
-        w_sum = sum(weight.values())
+        s_total = floor_v - pool_v
+        check(close2["rep_floor"] == floor_v and s2_seed > 0 and lapsed > 0
+              and s_total - 4 <= s2_seed + lapsed <= s_total,
+              f"the floor less the pool, {s_total / U6:.6f}, is split like the pool: "
+              f"{s2_seed / U6:.6f} seeded to the earners, {lapsed / U6:.6f} (the parts "
+              "nobody is paid) lapsed")
+        weight, w_all = close2["household_weights"], close2["total_weight"]
         for h in HOUSES:
-            want = (floor_v - v2) * weight[hk[h]] // w_sum
+            want = s_total * weight[hk[h]] // w_all
             check(claims2[hk[h]]["seed"] == want,
-                  f"{h}: seed {want / U6:.6f} units, its weight's share of the difference")
+                  f"{h}: seed {want / U6:.6f} units, the same fraction of the seed as of "
+                  "the pool")
         carry2 = close2["tool_rounds"]["pool_carry"]
         for k in tok:
             paid = sum(c["tokens"].get(T[k], 0) for c in claims2.values())
@@ -1397,15 +1406,22 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
             got_rep = rep_of(owner[h]) - rep0[h]
             check(got_rep == earned * 10 ** 12,
                   f"{h}: AutonetRepClaim mints {got_rep / E18:.6f} REP (1:1, the seed included)")
+            as_if = floor_v * weight[hk[h]] // w_all
+            check(abs(earned - as_if) <= 4,
+                  f"{h}: as if the market had produced the floor in fees: its fraction of "
+                  f"{floor_v / U6:g} units is {as_if / U6:.6f}")
             minted += got_rep
         check(substrate.functions.seedClaimed(idx6).call() == s2_seed
               and substrate.functions.totalSeededValue().call() == s2_seed,
               "the seeds claimed are the close's, within the stored floor")
-        check(REP_FLOOR - len(claims2) * 10 ** 12 <= minted <= REP_FLOOR,
-              f"the epoch minted the floor: {minted / E18:.6f} REP")
+        check(minted < REP_FLOOR and minted == (v2 + s2_seed) * 10 ** 12,
+              f"the epoch minted {minted / E18:.6f} REP: the floor less the parts of the "
+              "pool nobody is paid")
         s8.note("floor_rep", REP_FLOOR // E18)
+        s8.note("pool_value", pool_v)
         s8.note("paid_value", v2)
         s8.note("seeded_value", s2_seed)
+        s8.note("seed_lapsed", lapsed)
         s8.note("rep_minted", round(minted / E18, 6))
         s8.status = "PASS"
     except Exception as e:

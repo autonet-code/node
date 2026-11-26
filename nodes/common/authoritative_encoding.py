@@ -32,9 +32,10 @@ The authoritative payload is a dict with these fields, in this order:
   9. rep_floor:        the REP floor the close read (Registry
                        ``jurisdiction.autonet.rep_floor`` / 1e12, value
                        units; 0 = none).
-  10. total_seed:      the claims' seeds summed: the floor less
-                       ``total_value`` when that is below it and a tool
-                       concluded, less the split's dust; else 0.
+  10. total_seed:      the claims' seeds summed: the earners' parts of the
+                       floor less the value of ``pools`` (when that is
+                       below it), split like the pools; the parts that go
+                       unpaid, and the dust, lapse.
   11. output_decimals: int, the precision weights are turned into
                        integers at before the split.
   12. n_batches:       int

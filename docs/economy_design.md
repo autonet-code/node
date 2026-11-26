@@ -256,16 +256,22 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   seed (below). Service revenue earns no REP.
 - **The REP floor** (owner decision 2026-11-26): the Registry's
   `jurisdiction.autonet.rep_floor` (in REP; unset or malformed means no
-  floor), set by the DAO, is the least REP a close in which tools conclude
-  mints. When what the epoch's claims are worth, at the close's pinned
-  parities, falls short of it, the difference is **seeded**: split among
-  the epoch's earners by the same weights as the basket (authors,
-  dependencies, reviewers by accuracy), with the same exclusions (the
-  author side of a malware verdict, sanctioned households, a household's
-  own tools), so the earners take the whole difference between them, in
-  whole value units, the dust lapsing. When the claims are
-  worth the floor or more, nothing is seeded. A close where no tool
-  concludes has no earners: its floor lapses and never carries over. Each
+  floor), set by the DAO, is measured against what the service market
+  produced: the value of the pool a close splits (the new tool share plus
+  the carry-over, at the close's pinned parities), not what its earners
+  end up claiming. When a close in which tools conclude splits a pool
+  worth less than the floor, the difference is **seeded**: split over all
+  the weights exactly like the pool, with the same fractions, so REP is
+  minted as if the market had produced the floor in fees. Each earner
+  (authors, dependencies, reviewers by accuracy) takes the same fraction
+  of the seed as of every token's pool. The seed of every part that goes
+  unpaid (a low rating's or a malware verdict's author side, a sanctioned
+  household's share, a forfeited dependency's, the 1 - N of a tool without
+  dependencies) lapses: it is never carried over and never goes to anyone
+  else, so no flag, rating or sanction raises another earner's seed. The
+  seed is in whole value units, the dust lapsing. When the pool is worth
+  the floor or more, nothing is seeded. A close where no tool concludes
+  splits nothing: its floor lapses and never carries over. Each
   anchor stores the floor for the epoch after it, whose close reads the
   floor pinned to that anchor; each claim leaf carries its seed, which
   Substrate adds to `earnedValue` (so the REP claim mints it with the

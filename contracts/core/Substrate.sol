@@ -41,11 +41,12 @@ interface IRegistryRead {
 ///      which the DAO's REP claim reads, and pays the whole basket in the
 ///      same transaction. A token whose transfer fails (paused, frozen)
 ///      stays owed and is withdrawn on its own later, so it blocks nothing
-///      else. When the claims of an epoch are worth less than the REP
-///      floor (Registry `jurisdiction.autonet.rep_floor`, stored at each
-///      anchor for the epoch after it), each leaf also carries a seed, its
-///      part of the difference, added to `earnedValue` too; no epoch's
-///      seeds total more than the floor stored at the anchor before it.
+///      else. When the pool an epoch's close splits is worth less than the
+///      REP floor (Registry `jurisdiction.autonet.rep_floor`, stored at
+///      each anchor for the epoch after it), each leaf also carries a
+///      seed, its part of the difference, added to `earnedValue` too; no
+///      epoch's seeds total more than the floor stored at the anchor
+///      before it.
 ///
 /// Custody. Substrate holds only the pools and what is owed from them
 /// (earners' claims, the treasury's share). Channel deposits stay in
@@ -1178,17 +1179,19 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     //
     // The REP floor. The DAO Registry's `jurisdiction.autonet.rep_floor`, in
     // REP base units (18 decimals; unset or malformed = 0 = no floor), is the
-    // least REP an epoch in which tools conclude mints. Each anchor stores it
+    // value an epoch in which tools conclude pays REP on, as if its fees had
+    // filled the pool to it. Each anchor stores it
     // in value units (divided by 1e12, rounded down: REP is value x 1e12, DAO
     // side) for the epoch after it, whose close reads the floor pinned to
     // that anchor: an epoch's seeds are capped at the floor stored at the
     // anchor before it (seedCap; 0 for the first epoch), so the close and
     // the cap read the same number and an edit after that anchor changes
-    // nothing for the epoch. When the epoch's claims are worth less, the
-    // close gives the difference to the same earners in the same
-    // proportions: each leaf's seed, in value units. A claim adds its seed
-    // to earnedValue (the DAO's REP claim mints it with the rest) and to
-    // seededValue. Should a leaf's seed ever reach past what is left of the
+    // nothing for the epoch. When the pool the close splits is worth less,
+    // the close splits the difference exactly like the pool (the seed of
+    // the parts nobody is paid lapses): each leaf's seed, in value units.
+    // A claim adds its seed to earnedValue (the DAO's REP claim mints it
+    // with the rest) and to seededValue. Should a leaf's seed ever reach
+    // past what is left of the
     // cap (a bad anchor), the seed is cut to it and the claim's tokens are
     // paid all the same.
     // =========================================================================

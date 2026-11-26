@@ -1,12 +1,15 @@
 """The REP floor (owner decision 2026-11-26).
 
 Registry ``jurisdiction.autonet.rep_floor`` (REP base units, read as value
-units: / 1e12) is the least REP value a close in which tools conclude pays.
-When the claims are worth less, the difference is seeded to the earning
-households in proportion to their weights: each claim's ``seed``, in its
-leaf. A close where no household earns seeds nothing, and nothing carries
-over. These tests pin the close's side; the contract's side (the stored
-floor, the per-epoch cap, earnedValue) is in test/index_payments.test.js.
+units: / 1e12) is measured against what the service market produced: the
+value of the pool the close splits (new tool share plus carry, at the
+pinned parities). When that falls short, the difference is split over all
+the weights exactly like the pool, as if the market had produced the floor
+in fees: each earning household's claim carries its ``seed``, in its leaf,
+and the seed of every part that goes unpaid lapses (never carried, never
+given to anyone else). A close where no tool concludes seeds nothing.
+These tests pin the close's side; the contract's side (the stored floor,
+the per-epoch cap, earnedValue) is in test/index_payments.test.js.
 """
 
 from __future__ import annotations
@@ -66,26 +69,39 @@ def _seeds(out):
 
 
 class TestTheFloor:
-    def test_fees_below_the_floor_seed_the_difference_by_weight(self):
+    def test_a_pool_below_the_floor_seeds_the_difference_like_the_pool(self):
         out = _close(floor=5_000_000, window={TOKEN: 1_000_000})
+        assert out["pool_value"] == 1_000_000
         v = out["total_value"]
         assert 999_997 <= v <= 1_000_000
         seeds = _seeds(out)
         assert set(seeds) == set(FRACTIONS)
         for h, f in FRACTIONS.items():
-            assert abs(seeds[h] - (5_000_000 - v) * f) <= 1
-        # The floor is met, less the split's dust.
-        assert 0 <= 5_000_000 - (v + out["total_seed"]) <= len(seeds)
+            # The same fraction of the seed as of the pool.
+            assert abs(seeds[h] - 4_000_000 * f) <= 1
+            assert abs(seeds[h] * 1_000_000 - out["claims"][h]["tokens"][TOKEN] * 4_000_000) \
+                <= 4_000_000
+        # Nothing unpaid here, so the floor is met, less the split's dust.
+        assert out["seed_lapsed"] == 0
+        assert 0 <= 5_000_000 - (v + out["total_seed"]) <= 2 * len(seeds)
         assert out["total_seed"] == sum(seeds.values())
         assert out["rep_floor"] == 5_000_000
         # Each household's tokens and seed sit in one claim.
         assert out["claims"][AUTHOR]["tokens"][TOKEN] > 0
 
-    def test_fees_at_or_above_the_floor_seed_nothing(self):
-        out = _close(floor=500_000, window={TOKEN: 1_000_000})
-        assert out["total_value"] > 500_000
-        assert _seeds(out) == {} and out["total_seed"] == 0
-        assert all(c["seed"] == 0 for c in out["claims"].values())
+    def test_a_pool_at_or_above_the_floor_seeds_nothing(self):
+        for floor in (500_000, 1_000_000):
+            out = _close(floor=floor, window={TOKEN: 1_000_000})
+            assert _seeds(out) == {} and out["total_seed"] == 0
+            assert all(c["seed"] == 0 for c in out["claims"].values())
+
+    def test_the_floor_is_measured_against_the_pool_not_the_claims(self):
+        # Correctness 0 leaves the author side (60% of the pool) unpaid: the
+        # claims are worth 40% of the pool, but the pool is what the market
+        # produced, so a floor at the pool's value seeds nothing.
+        out = _close(floor=1_000_000, window={TOKEN: 1_000_000}, snap=_snap(correctness=0.0))
+        assert out["total_value"] <= 400_000
+        assert out["total_seed"] == 0 and out["seed_lapsed"] == 0
 
     def test_no_floor_seeds_nothing(self):
         out = _close(floor=0, window={})
@@ -114,25 +130,53 @@ class TestTheFloor:
         nxt = _close(floor=1_000_000, window={}, state=quiet["tool_rounds"])
         assert 1_000_000 - len(FRACTIONS) <= nxt["total_seed"] <= 1_000_000
 
-    def test_excluded_earners_take_no_seed(self):
-        # R2 sanctioned: withheld, and its seed with it. A malware verdict
-        # leaves the author side unpaid: no seed for the author either. The
-        # difference goes to the earners that remain (R1).
-        out = _close(floor=1_000_000, window={}, sanctioned_households=[R2])
-        assert R2 not in _seeds(out)
-        mal = _close(floor=1_000_000, window={}, snap=_snap(malware=0.6))
-        assert AUTHOR not in _seeds(mal)
-        assert set(_seeds(mal)) == {R1, R2}
+    def test_a_withheld_part_lapses_and_no_other_seed_grows(self):
+        """The seed of every part that goes unpaid lapses; the others keep
+        exactly what they would have had (no redistribution)."""
+        base = _seeds(_close(floor=1_000_000, window={}))
+        assert base == {R1: 200_000, R2: 200_000, AUTHOR: 600_000}
+        cases = {
+            # A sanctioned author household: withheld after the split.
+            "sanctioned author": (dict(sanctioned_households=[AUTHOR]), {AUTHOR: 0}),
+            # A malware verdict: the author side is unpaid.
+            "malware": (dict(snap=_snap(malware=0.6)), {AUTHOR: 0}),
+            # Correctness 0: the author side is unminted.
+            "low ratings": (dict(snap=_snap(correctness=0.0)), {AUTHOR: 0}),
+            # Novelty 0.5 without dependencies: the author keeps half its
+            # side; the other half (1 - N) pays nobody.
+            "1 - N without dependencies": (dict(snap=_snap(novelty=0.5)), {AUTHOR: 300_000}),
+        }
+        for name, (kw, changed) in cases.items():
+            out = _close(floor=1_000_000, window={}, **kw)
+            seeds = _seeds(out)
+            want = {h: s for h, s in {**base, **changed}.items() if s}
+            assert seeds == want, name
+            lost = sum(base.values()) - sum(seeds.values())
+            assert out["seed_lapsed"] == lost and lost > 0, name
+            assert out["tool_rounds"]["pool_carry"] == {}, name
 
-    def test_unpaid_weight_is_not_an_earner(self):
-        # Correctness 0: the author side is unpaid (unminted), so only the
-        # reviewers earn, and they take the whole difference by weight.
-        out = _close(floor=1_000_000, window={TOKEN: 1_000_000}, snap=_snap(correctness=0.0))
-        assert AUTHOR not in out["claims"]
+    def test_a_sanctioned_reviewers_seed_lapses(self):
+        # R2's reviews weigh nothing and its accuracy cut of the reviewer
+        # share goes unpaid: R1 and the author keep the fractions they had.
+        base = _seeds(_close(floor=1_000_000, window={}))
+        out = _close(floor=1_000_000, window={}, sanctioned_households=[R2])
         seeds = _seeds(out)
-        assert set(seeds) == {R1, R2}
-        assert abs(seeds[R1] - seeds[R2]) <= 1
-        assert 0 <= 1_000_000 - out["total_value"] - out["total_seed"] <= 2
+        assert R2 not in seeds
+        for h in (R1, AUTHOR):
+            assert abs(seeds[h] - base[h]) <= 1
+        assert abs(out["seed_lapsed"] - base[R2]) <= 1
+
+    def test_a_dependency_that_cannot_be_paid_forfeits_its_seed(self):
+        # The author keeps N = 0.5 of its side; its one dependency is not
+        # registered, so its 0.5 is forfeited, and so is its seed.
+        dep = "cc" * 32
+        regs = {DIGEST: {"trust_class": "pinned", "author": AUTHOR, "deps": dep}}
+        canonical = canonical_order(_batches([_registration_event(1)], Keypair.generate()))
+        out = federated_epoch_close(
+            canonical, tool_share_window={}, parity=PARITY, tool_registrations=regs,
+            rep_shares=SHARES, review_snapshot=_snap(novelty=0.5), rep_floor=1_000_000)
+        assert _seeds(out) == {R1: 200_000, R2: 200_000, AUTHOR: 300_000}
+        assert out["seed_lapsed"] == 300_000
 
     def test_deterministic(self):
         a = _close(floor=3_333_333, window={TOKEN: 777_777})
