@@ -10,16 +10,20 @@ For an anchored epoch:
      proof from the whole blob (claims and concluded tools share the tree),
      then check the proof against the anchor's ``claimRoot`` before
      spending gas.
-  4. Call ``Substrate.claim(earner, epochIdHash, tokens, amounts, proof)``.
+  4. Call ``Substrate.claim(earner, epochIdHash, tokens, amounts, proof)``,
+     which pays the earner the whole basket in the same transaction; a
+     token whose transfer fails (paused, frozen) stays owed (PayDeferred).
      The earner is the household's owner wallet (Decision 2026-10-27); the
      transaction is signed by whoever submits (the daemon operator key),
      since the leaf already fixes the earner. The contract is idempotent
      per (earner, epoch): ``claimedEpoch`` is checked first, so retries and
      restarts never double-claim.
-  5. ``withdraw(earner, token)`` for each token the earner is owed
-     (``owed(earner, token) > 0``). A token whose withdrawal fails (paused,
-     blocked) is logged and retried at the next pass; it never blocks the
-     others.
+  5. ``withdraw(earner, token)`` only for a token still owed after the
+     claim (``owed(earner, token) > 0``), so normally the claim is the only
+     transaction. A withdrawal is dry-run first; one that would fail
+     (still paused, blocked) is not sent, is reported in ``owed`` and
+     ``withdraw_errors`` and is retried at the next pass. It never blocks
+     the others.
 
 Amounts are integers in each token's base units from end to end: the blob
 carries them as decimal strings and the leaf commits them as they are.
@@ -78,6 +82,9 @@ class AuthoritativeSubmissionResult:
     # withdrawal failed (retried at the next pass): token -> error.
     withdrawn: Dict[str, str] = field(default_factory=dict)
     withdraw_errors: Dict[str, str] = field(default_factory=dict)
+    # What the earner is still owed after this pass (the claim's deferred
+    # tokens not yet withdrawn): token -> amount.
+    owed: Dict[str, int] = field(default_factory=dict)
     error: str = ""
 
 
@@ -159,8 +166,9 @@ class AuthoritativeChainSubmitter:
     # ------------------------------------------------------------------
 
     def submit_for_epoch(self, epoch_id: str) -> AuthoritativeSubmissionResult:
-        """Claim this household's leaf of an anchored epoch, then withdraw
-        every token it is owed (this epoch's and any earlier failures)."""
+        """Claim this household's leaf of an anchored epoch (the claim pays
+        the basket), then withdraw any token still owed (one the claim
+        deferred, or an earlier failure)."""
         with self._lock:
             r = self._claim(epoch_id)
             if r.success:
@@ -265,18 +273,24 @@ class AuthoritativeChainSubmitter:
         earner = self._w3.to_checksum_address(self.claimant_address)
         for token in sorted(set(tokens) | self._pending_withdrawals):
             t = self._w3.to_checksum_address(token)
+            owed = 0
             try:
                 owed = int(contract.functions.owed(earner, t).call())
                 if owed <= 0:
                     self._pending_withdrawals.discard(token)
                     continue
-                r.withdrawn[token] = self._send(contract.functions.withdraw(earner, t))
+                call = contract.functions.withdraw(earner, t)
+                # Dry run: a token still paused would only burn gas.
+                call.call({"from": self._w3.to_checksum_address(self.sender_address)})
+                r.withdrawn[token] = self._send(call)
                 self._pending_withdrawals.discard(token)
                 logger.info("withdrawn: earner=%s, token=%s, amount=%d",
                             self.claimant_id, token, owed)
             except Exception as e:  # noqa: BLE001 (one token never blocks the rest)
                 self._pending_withdrawals.add(token)
                 r.withdraw_errors[token] = str(e)
+                if owed > 0:
+                    r.owed[token] = owed
                 logger.warning("withdrawal of %s for %s failed (retried next pass): %s",
                                token, self.claimant_id, e)
 

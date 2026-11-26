@@ -60,12 +60,13 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   before the latest one (`Substrate.poolCap`). Zero volume, zero pay.
   Amounts are whole base units of each token; the dust carries over. The
   parity never moves money: it prices only REP and bond sizes.
-- **Claimed, then withdrawn per token.** A claim credits each token's
-  amount as owed to the household and adds its value to `earnedValue`, the
-  base of its REP. The money then leaves by `withdraw`, one token at a
-  time, so a token whose issuer freezes or pauses it blocks nothing else;
-  a household may withdraw to another address it names. The treasury's
-  share is withdrawn the same way. Tokens sent to Substrate outside a
+- **Claimed and paid in one transaction.** A claim adds the basket's
+  value to `earnedValue`, the base of the household's REP, and pays every
+  token of the basket in the same transaction. A token whose transfer
+  fails (its issuer froze or paused it) stays owed and is withdrawn later
+  by `withdraw`, one token at a time, so it blocks nothing else; a
+  household may withdraw to another address it names. The treasury's
+  share is withdrawn per token. Tokens sent to Substrate outside a
   payment belong to the treasury (`sweep`): the pools take only fees.
 - **Custody stays split.** Substrate holds only the pools and what is owed
   from them; channel deposits stay in PaymentChannel and bonds in ToolBond.
@@ -230,7 +231,8 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   the bond's token
   (`addBounty`). As each round finalizes, every settled review takes
   bounty x (its REP / the REP a tool needs to conclude) x its accuracy,
-  paid to its household; a household whose REP alone covers the
+  paid to its household in the review's claim (a failed transfer stays
+  owed for `payOut`); a household whose REP alone covers the
   requirement can take it all. Never by the scores given, also when the
   tool is disqualified or malicious. Sanctioned households get none. It is
   money from outside the pools, so it earns no REP and REP may weigh it.

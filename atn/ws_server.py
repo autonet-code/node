@@ -1688,7 +1688,9 @@ class WebSocketBridge:
 
             # What the owner wallet has claimed from the pools, as value
             # (6-decimal value units: what its REP is claimed on), and what
-            # is claimed but not yet withdrawn, per token.
+            # is claimed but not yet paid, per token (a claim pays its basket
+            # at once; a token whose transfer failed stays owed until
+            # withdrawn).
             claim: dict[str, Any] = {"earned_value": "0", "owed": []}
             if wallet:
                 try:

@@ -745,6 +745,13 @@ async def test_bounty_payout_uses_the_rounds_token(monkeypatch):
     assert out["success"] and out["amount"] == 42 and out["token"] == token
     assert sent == [("payOut", house, token)]
 
+    # The claim normally pays the part itself: nothing owed, no payOut
+    # (it would revert NothingToClaim).
+    monkeypatch.setattr(Bond.functions, "owed", staticmethod(lambda h, t: Fn(0)))
+    sent.clear()
+    out = await client.pay_out_bounty("0x" + "11" * 32, "ab" * 32, 1, "0x" + "cd" * 20)
+    assert out == {"success": True, "amount": 0} and sent == []
+
 
 def test_bond_amount_covers_the_minimum_value():
     """The fewest base units whose value (amount x parity / 1e30) reaches

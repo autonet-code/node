@@ -108,6 +108,8 @@ async function deployIndexToken(substrate, opts = {}) {
     t = await (await ethers.getContractFactory("CutToken")).deploy(opts.cutBps || 100);
   } else if (opts.kind === "pausable") {
     t = await (await ethers.getContractFactory("PausableToken")).deploy();
+  } else if (opts.kind === "false") {
+    t = await (await ethers.getContractFactory("FalseToken")).deploy();
   } else if (opts.kind === "noreturn") {
     t = await (await ethers.getContractFactory("NoReturnToken")).deploy();
   } else {
@@ -115,7 +117,7 @@ async function deployIndexToken(substrate, opts = {}) {
       .deploy(opts.name || "Index USD", opts.symbol || "IUSD", decimals);
   }
   await t.waitForDeployment();
-  // The cut, pausable and no-return mocks all have 6 decimals.
+  // The cut, pausable, false and no-return mocks all have 6 decimals.
   const d = opts.kind ? 6 : decimals;
   const parity = opts.parity !== undefined ? BigInt(opts.parity) : unitParity(d);
   if (substrate && parity !== 0n) await setParity(substrate, t, parity);

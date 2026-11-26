@@ -129,7 +129,7 @@ def _balances(fx, who):
     return {t.address.lower(): t.functions.balanceOf(who).call() for t in fx["tokens"]}
 
 
-def test_household_claims_its_leaf_and_withdraws_every_token(chain):
+def test_household_claims_its_leaf_and_is_paid_every_token(chain):
     result, resolver = _close_and_anchor(chain, chain["agent_addrs"], "e_5_6")
     earner = chain["agent_addrs"][0]
     expected = result["claims"][earner.lower()]["tokens"]
@@ -142,7 +142,8 @@ def test_household_claims_its_leaf_and_withdraws_every_token(chain):
     assert r.success, r.error
     assert r.cid_verified and r.tokens == expected
     assert r.value == result["claims"][earner.lower()]["value"]
-    assert sorted(r.withdrawn) == sorted(expected) and not r.withdraw_errors
+    # The claim paid the basket: no withdrawal followed.
+    assert r.tx_hash and not r.withdrawn and not r.withdraw_errors and not r.owed
     assert chain["contract"].functions.claimedEpoch(earner, eid).call()
     # Substrate values the claim at the parity it stored at the anchor; with
     # the index unchanged since the snapshot it is the close's value.
@@ -211,7 +212,7 @@ def test_unanchored_epoch_fails_cleanly(chain):
     assert not r.success and r.error
 
 
-def test_a_paused_token_blocks_nothing_and_is_retried():
+def test_a_paused_token_is_deferred_and_retried():
     w3 = Web3(EthereumTesterProvider())
     deployer = w3.eth.accounts[0]
     reg = _deploy(w3, artifact("test/IndexTokenMocks.sol/MockRegistry"), deployer)
@@ -241,8 +242,11 @@ def test_a_paused_token_blocks_nothing_and_is_retried():
     sub = _submitter(fx, earner, resolver)
     r = sub.submit_for_epoch("e_pause")
     assert r.success, r.error                       # the claim itself landed
-    assert list(r.withdrawn) == [dai.address.lower()]
+    # The claim paid dai and deferred the paused token; its withdrawal is
+    # dry-run, not sent, and reported as still owed.
+    assert not r.withdrawn
     assert list(r.withdraw_errors) == [paused.address.lower()]
+    assert r.owed == {paused.address.lower(): owed[paused.address.lower()]}
     assert dai.functions.balanceOf(earner).call() == owed[dai.address.lower()]
     assert contract.functions.owed(earner, paused.address).call() == owed[paused.address.lower()]
 

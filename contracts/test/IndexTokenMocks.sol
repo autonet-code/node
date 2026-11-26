@@ -64,6 +64,23 @@ contract PausableToken is MockIndexToken {
     }
 }
 
+/// @dev While `failing`, `transfer` moves nothing and returns false instead
+///      of reverting, as some older tokens do.
+contract FalseToken is MockIndexToken {
+    bool public failing;
+
+    constructor() MockIndexToken("False", "FALSE", 6) {}
+
+    function setFailing(bool f) external {
+        failing = f;
+    }
+
+    function transfer(address to, uint256 value) public override returns (bool) {
+        if (failing) return false;
+        return super.transfer(to, value);
+    }
+}
+
 /// @dev Transfers and approvals return nothing, as USDT's do on Ethereum.
 ///      Callers must go through SafeERC20; a plain IERC20 call reverts on the
 ///      empty return data.

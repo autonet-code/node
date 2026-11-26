@@ -211,7 +211,8 @@ Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 **Chain.** In this repo (`contracts/core/`): `Substrate.sol` (epoch
 anchors, agent registry with owner binding, tool authorship, service
 payments in the value index's tokens with the fee, one pool per token,
-claims and per-token withdrawals), `AnchorElection.sol`,
+claims that pay the whole basket in one transaction, a token whose
+transfer fails staying owed for a later per-token withdrawal), `AnchorElection.sol`,
 `ServiceMarket.sol`. Substrate is not a token: money is whatever the
 value index lists (Registry `jurisdiction.parity.<token>`), and Substrate
 holds only the pools and what they owe. Each jurisdiction's Substrate is

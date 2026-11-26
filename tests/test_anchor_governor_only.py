@@ -185,11 +185,14 @@ def test_split_close_claims_fully_and_conserves(chain):
     for earner, toks, amts in claim_leaves(claims):
         proof = claim_merkle_proof(claims, earner)
         # claim is permissionless: the deployer (an operator key) sends every
-        # claim; the amounts are owed to the leaf's earner.
+        # claim; the same transaction pays the basket to the leaf's earner.
+        by_addr = {t.address.lower(): t for t in tokens}
+        before = {tt: by_addr[tt.lower()].functions.balanceOf(earner).call() for tt in toks}
         tx = c.functions.claim(earner, eid, toks, amts, proof).transact(
             {"from": chain["deployer"], "gas": 1_500_000})
         assert w3.eth.wait_for_transaction_receipt(tx).status == 1
         for tt, a in zip(toks, amts):
-            assert c.functions.owed(earner, tt).call() == a
+            assert c.functions.owed(earner, tt).call() == 0
+            assert by_addr[tt.lower()].functions.balanceOf(earner).call() - before[tt] == a
     for t in tokens:
         assert c.functions.claimedTotal(t.address).call() <= pools[t.address.lower()]

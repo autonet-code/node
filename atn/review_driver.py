@@ -394,8 +394,8 @@ class ReviewDriver:
                 batch.rounds[digest] = "claimed"
                 claimed += 1 if res.get("success") else 0
                 if res.get("success") and hasattr(client, "pay_out_bounty"):
-                    # The claim's bounty part is owed, not sent: pay it out
-                    # (a frozen token leaves it owed and blocks nothing).
+                    # The claim paid its bounty part; payOut runs only for a
+                    # part it deferred (owed > 0: a paused or frozen token).
                     paid = await client.pay_out_bounty(key, digest, batch.epoch, batch.agent)
                     if not paid.get("success"):
                         batch.last_error = (f"bounty payOut {digest[:12]}: "

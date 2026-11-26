@@ -237,8 +237,10 @@ def test_contract_accepts_the_anchored_amounts(chain):
     c = chain["contract"]
     for earner in chain["agent_addrs"][:2]:
         assert _claim(chain, claims, earner, "e_ok")
+        # The claim pays the basket in the same transaction.
         for t in chain["tokens"]:
-            assert c.functions.owed(earner, t.address).call() == \
+            assert c.functions.owed(earner, t.address).call() == 0
+            assert t.functions.balanceOf(earner).call() == \
                 claims[earner.lower()]["tokens"][t.address.lower()]
 
 
@@ -278,10 +280,10 @@ def test_contract_rejects_claims_against_an_empty_root(chain):
         .transact({"from": a0, "gas": 1_500_000})).status == 1)
 
 
-def test_submitter_claims_and_withdraws_each_token(chain):
+def test_submitter_claims_and_is_paid_each_token(chain):
     """Full path: anchor -> blob -> submitter proves, claims for the
-    household, signed by an operator that is not the earner, then withdraws
-    each token to the earner."""
+    household, signed by an operator that is not the earner; the claim pays
+    each token to the earner, so no withdrawal follows."""
     _new_claim_abi(chain)
     from nodes.common.authoritative_submitter import (
         AuthoritativeChainSubmitter, AuthoritativeSubmitterConfig)
@@ -298,7 +300,7 @@ def test_submitter_claims_and_withdraws_each_token(chain):
     r = sub.submit_for_epoch("e_sub")
     assert r.success, r.error
     assert r.tokens == claims[earner.lower()]["tokens"]
-    assert sorted(r.withdrawn) == sorted(r.tokens) and not r.withdraw_errors
+    assert r.tx_hash and not r.withdrawn and not r.withdraw_errors and not r.owed
     for t in chain["tokens"]:
         assert t.functions.balanceOf(earner).call() == r.tokens[t.address.lower()]
         assert chain["contract"].functions.owed(earner, t.address).call() == 0

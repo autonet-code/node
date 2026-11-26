@@ -23,8 +23,9 @@ const {
 // Services are paid in the tokens of the jurisdiction's value index. Each
 // payment's fee is split: the treasury's share is owed to it, the rest
 // fills that token's pool. Each epoch's close commits one claim leaf per
-// earner (a basket over the pools plus its REP value); a claim credits what
-// is owed, and each token is withdrawn on its own.
+// earner (a basket over the pools plus its REP value); a claim credits it
+// and pays every token in the same transaction. A token whose transfer
+// fails stays owed and is withdrawn on its own later.
 
 describe("Value-index payments, pools and claims", function () {
   let signers, deployer, payer, recipient, alice, bob, stranger, gov;
@@ -226,9 +227,14 @@ describe("Value-index payments, pools and claims", function () {
       await expect(claimTx(substrate, stranger, tree, 0, "e2"))
         .to.emit(substrate, "Claimed").withArgs(alice.address, digest("e2"), 12_500n, 12_500n)
         .and.to.emit(substrate, "ClaimedToken").withArgs(alice.address, digest("e2"), U, usdPool / 2n)
-        .and.to.emit(substrate, "ClaimedToken").withArgs(alice.address, digest("e2"), D, daiPool / 2n);
-      expect(await substrate.owed(alice.address, U)).to.equal(usdPool / 2n);
-      expect(await substrate.owed(alice.address, D)).to.equal(daiPool / 2n);
+        .and.to.emit(substrate, "ClaimedToken").withArgs(alice.address, digest("e2"), D, daiPool / 2n)
+        .and.to.emit(substrate, "Withdrawn").withArgs(alice.address, U, alice.address, usdPool / 2n)
+        .and.to.emit(substrate, "Withdrawn").withArgs(alice.address, D, alice.address, daiPool / 2n);
+      // The same transaction paid the whole basket.
+      expect(await usd.balanceOf(alice.address)).to.equal(usdPool / 2n);
+      expect(await dai.balanceOf(alice.address)).to.equal(daiPool / 2n);
+      expect(await substrate.owed(alice.address, U)).to.equal(0n);
+      expect(await substrate.owed(alice.address, D)).to.equal(0n);
       expect(await substrate.claimedEpoch(alice.address, digest("e2"))).to.equal(true);
 
       await expect(claimTx(substrate, alice, tree, 0, "e2"))
@@ -253,7 +259,7 @@ describe("Value-index payments, pools and claims", function () {
 
       await claimTx(substrate, bob, tree, 1, "e2");
       await claimTx(substrate, bob, tree, 2, "e2");
-      expect(await substrate.owed(bob.address, D)).to.equal(daiPool / 4n);
+      expect(await dai.balanceOf(bob.address)).to.equal(daiPool / 4n);
       expect(await substrate.claimedTotal(U)).to.equal(usdPool / 2n + usdPool / 4n + 1n);
       // 12_500 (alice) + 6_250 (bob) + 1 (stranger), valued on chain.
       expect(await substrate.totalEarnedValue()).to.equal(18_751n);
@@ -288,7 +294,7 @@ describe("Value-index payments, pools and claims", function () {
       expect(await substrate.earnedValue(alice.address)).to.equal(150n);
       expect(await substrate.earnedValue(bob.address)).to.equal(2n);
       expect(await substrate.totalEarnedValue()).to.equal(152n);
-      expect(await substrate.owed(alice.address, U)).to.equal(150n);
+      expect(await usd.balanceOf(alice.address)).to.equal(150n);
     });
 
     it("no leaf can grant more REP value than the capped amounts are worth", async function () {
@@ -299,7 +305,7 @@ describe("Value-index payments, pools and claims", function () {
       const t = claimTree([{ earner: alice.address, tokens: [U], amounts: [usdPool] }]);
       await anchorEpoch(substrate, "e2", t.root);
       await claimTx(substrate, alice, t, 0, "e2");
-      expect(await substrate.owed(alice.address, U)).to.equal(usdPool);
+      expect(await usd.balanceOf(alice.address)).to.equal(usdPool);
       expect(await substrate.earnedValue(alice.address)).to.equal(0n);
       // A leaf with no amounts is worth nothing.
       const t3 = claimTree([{ earner: bob.address, tokens: [], amounts: [] }]);
@@ -318,40 +324,77 @@ describe("Value-index payments, pools and claims", function () {
     });
   });
 
-  describe("withdrawals", function () {
-    let usdPool, daiPool;
+  describe("payouts and withdrawals", function () {
+    let usdPool, p, P, tree;
+    // A basket over two plain tokens and a pausable one.
     beforeEach(async function () {
-      ({ usdPool, daiPool } = await fillPools());
-      const tree = claimTree([
-        { earner: alice.address, basket: [[U, 1_000n], [D, 10n ** 12n]], value: 1n },
+      ({ usdPool } = await fillPools());
+      p = await deployIndexToken(substrate, { kind: "pausable" });
+      P = await p.getAddress();
+      await payFees(substrate, p, 1_000_000n);
+      await anchorEpoch(substrate, "p-fill");
+      tree = claimTree([
+        { earner: alice.address, basket: [[U, 1_000n], [D, 10n ** 12n], [P, 500n]], value: 1n },
       ]);
       await anchorEpoch(substrate, "e2", tree.root);
-      await claimTx(substrate, alice, tree, 0, "e2");
     });
 
-    it("withdraw pays the earner whoever triggers it, once", async function () {
-      await expect(substrate.connect(stranger).withdraw(alice.address, U))
-        .to.emit(substrate, "Withdrawn").withArgs(alice.address, U, alice.address, 1_000n);
+    it("a claim pays every token of the basket in one transaction", async function () {
+      await expect(claimTx(substrate, stranger, tree, 0, "e2"))
+        .to.emit(substrate, "Withdrawn").withArgs(alice.address, U, alice.address, 1_000n)
+        .and.to.emit(substrate, "Withdrawn").withArgs(alice.address, D, alice.address, 10n ** 12n)
+        .and.to.emit(substrate, "Withdrawn").withArgs(alice.address, P, alice.address, 500n)
+        .and.not.to.emit(substrate, "PayDeferred");
       expect(await usd.balanceOf(alice.address)).to.equal(1_000n);
+      expect(await dai.balanceOf(alice.address)).to.equal(10n ** 12n);
+      expect(await p.balanceOf(alice.address)).to.equal(500n);
       expect(await usd.balanceOf(stranger.address)).to.equal(0n);
-      expect(await substrate.owed(alice.address, U)).to.equal(0n);
+      for (const t of [U, D, P]) expect(await substrate.owed(alice.address, t)).to.equal(0n);
       await expect(substrate.withdraw(alice.address, U))
         .to.be.revertedWithCustomError(substrate, "NothingOwed");
-      // The other token is still owed.
-      expect(await substrate.owed(alice.address, D)).to.equal(10n ** 12n);
     });
 
-    it("withdrawTo sends the caller's own money elsewhere", async function () {
-      await expect(substrate.connect(alice).withdrawTo(D, ZERO))
-        .to.be.revertedWithCustomError(substrate, "ZeroAddress");
-      await expect(substrate.connect(stranger).withdrawTo(D, stranger.address))
+    it("a paused token is deferred while the others pay; withdraw pays it after unpause", async function () {
+      await p.setPaused(true);
+      await expect(claimTx(substrate, stranger, tree, 0, "e2"))
+        .to.emit(substrate, "PayDeferred").withArgs(alice.address, P, 500n)
+        .and.to.emit(substrate, "Withdrawn").withArgs(alice.address, U, alice.address, 1_000n)
+        .and.to.emit(substrate, "Withdrawn").withArgs(alice.address, D, alice.address, 10n ** 12n);
+      expect(await usd.balanceOf(alice.address)).to.equal(1_000n);
+      expect(await dai.balanceOf(alice.address)).to.equal(10n ** 12n);
+      // The paused token stays owed, and the books still match.
+      expect(await substrate.owed(alice.address, P)).to.equal(500n);
+      expect(await substrate.held(P)).to.equal(await p.balanceOf(S));
+      await expect(substrate.withdraw(alice.address, P)).to.be.revertedWithCustomError(p, "TokenPaused");
+      expect(await substrate.owed(alice.address, P)).to.equal(500n);
+      // Payments in the other tokens still go through.
+      await fund(usd, payer, substrate, 1_000n);
+      await substrate.connect(payer).payForService(U, recipient.address, 1_000n, digest("still"));
+      // Unpaused, anyone's withdraw pays it to the earner.
+      await p.setPaused(false);
+      await expect(substrate.connect(stranger).withdraw(alice.address, P))
+        .to.emit(substrate, "Withdrawn").withArgs(alice.address, P, alice.address, 500n);
+      expect(await p.balanceOf(alice.address)).to.equal(500n);
+      expect(await substrate.owed(alice.address, P)).to.equal(0n);
+      await expect(substrate.withdraw(alice.address, P))
         .to.be.revertedWithCustomError(substrate, "NothingOwed");
-      await expect(substrate.connect(alice).withdrawTo(D, bob.address))
-        .to.emit(substrate, "Withdrawn").withArgs(alice.address, D, bob.address, 10n ** 12n);
-      expect(await dai.balanceOf(bob.address)).to.equal(10n ** 12n);
+    });
+
+    it("withdrawTo sends the caller's own deferred money elsewhere", async function () {
+      await p.setPaused(true);
+      await claimTx(substrate, alice, tree, 0, "e2");
+      await p.setPaused(false);
+      await expect(substrate.connect(alice).withdrawTo(P, ZERO))
+        .to.be.revertedWithCustomError(substrate, "ZeroAddress");
+      await expect(substrate.connect(stranger).withdrawTo(P, stranger.address))
+        .to.be.revertedWithCustomError(substrate, "NothingOwed");
+      await expect(substrate.connect(alice).withdrawTo(P, bob.address))
+        .to.emit(substrate, "Withdrawn").withArgs(alice.address, P, bob.address, 500n);
+      expect(await p.balanceOf(bob.address)).to.equal(500n);
     });
 
     it("withdrawTreasury pays the treasury its share, once", async function () {
+      await claimTx(substrate, alice, tree, 0, "e2");
       const owed = await substrate.treasuryOwed(U);
       expect(owed).to.equal(12_500n);
       await expect(substrate.connect(stranger).withdrawTreasury(U))
@@ -359,9 +402,9 @@ describe("Value-index payments, pools and claims", function () {
       expect(await usd.balanceOf(deployer.address)).to.equal(owed);
       await expect(substrate.withdrawTreasury(U))
         .to.be.revertedWithCustomError(substrate, "NothingOwed");
-      // The books still cover what earners are owed.
+      // The books still match what Substrate holds: the pool less the payout.
       expect(await substrate.held(U)).to.equal(await usd.balanceOf(S));
-      expect(await substrate.held(U)).to.equal(usdPool);
+      expect(await substrate.held(U)).to.equal(usdPool - 1_000n);
     });
 
     it("sweep moves a stray transfer to the treasury's share", async function () {
@@ -378,36 +421,42 @@ describe("Value-index payments, pools and claims", function () {
       await usd.mint(await s0.getAddress(), 5n);
       await expect(s0.sweep(U)).to.be.revertedWithCustomError(s0, "ZeroAddress");
     });
+  });
 
-    it("a paused token blocks only its own withdrawal; the other token still pays", async function () {
-      const p = await deployIndexToken(substrate, { kind: "pausable" });
-      const P = await p.getAddress();
-      // Two earners' fees in the pausable token, then two anchors.
-      await payFees(substrate, p, 1_000_000n);
-      await anchorEpoch(substrate, "p-fill");
-      const tree = claimTree([{ earner: bob.address, basket: [[P, 500n], [U, 500n]], value: 1n }]);
-      await anchorEpoch(substrate, "p-claim", tree.root);
-      await claimTx(substrate, bob, tree, 0, "p-claim");
+  describe("a token whose transfer returns false", function () {
+    it("is deferred at the claim, the books restored, and paid by withdraw later", async function () {
+      const f = await deployIndexToken(substrate, { kind: "false" });
+      const F = await f.getAddress();
+      await payFees(substrate, f, 1_000_000n);
+      await payFees(substrate, usd, 1_000_000n);
+      await anchorEpoch(substrate, "f1");
+      const tree = claimTree([{ earner: bob.address, basket: [[F, 700n], [U, 300n]], value: 1n }]);
+      await anchorEpoch(substrate, "f2", tree.root);
+      const heldBefore = await substrate.held(F);
 
-      await p.setPaused(true);
-      await expect(substrate.withdraw(bob.address, P)).to.be.revertedWithCustomError(p, "TokenPaused");
-      // Nothing changed for the paused token's books.
-      expect(await substrate.owed(bob.address, P)).to.equal(500n);
-      // The other token pays, and payments in it still go through.
-      await substrate.withdraw(bob.address, U);
-      expect(await usd.balanceOf(bob.address)).to.equal(500n);
-      await substrate.withdraw(alice.address, D);
-      await fund(usd, payer, substrate, 1_000n);
-      await substrate.connect(payer).payForService(U, recipient.address, 1_000n, digest("still"));
-      // Unpaused, it pays out.
-      await p.setPaused(false);
-      await substrate.withdraw(bob.address, P);
-      expect(await p.balanceOf(bob.address)).to.equal(500n);
+      await f.setFailing(true);
+      await expect(claimTx(substrate, bob, tree, 0, "f2"))
+        .to.emit(substrate, "PayDeferred").withArgs(bob.address, F, 700n)
+        .and.to.emit(substrate, "Withdrawn").withArgs(bob.address, U, bob.address, 300n);
+      expect(await usd.balanceOf(bob.address)).to.equal(300n);
+      expect(await f.balanceOf(bob.address)).to.equal(0n);
+      expect(await substrate.owed(bob.address, F)).to.equal(700n);
+      expect(await substrate.held(F)).to.equal(heldBefore);
+      expect(await substrate.held(F)).to.equal(await f.balanceOf(S));
+      // withdraw uses safeTransfer: a false return reverts and changes nothing.
+      await expect(substrate.withdraw(bob.address, F)).to.be.reverted;
+      expect(await substrate.owed(bob.address, F)).to.equal(700n);
+
+      await f.setFailing(false);
+      await expect(substrate.withdraw(bob.address, F))
+        .to.emit(substrate, "Withdrawn").withArgs(bob.address, F, bob.address, 700n);
+      expect(await f.balanceOf(bob.address)).to.equal(700n);
+      expect(await substrate.held(F)).to.equal(await f.balanceOf(S));
     });
   });
 
   describe("a USDT-style token (no return values)", function () {
-    it("works through payment, channel, claim and withdraw", async function () {
+    it("works through payment, channel and a claim that pays it", async function () {
       const nr = await deployIndexToken(substrate, { kind: "noreturn" });
       const N = await nr.getAddress();
       const provider = signers[7];
@@ -435,13 +484,15 @@ describe("Value-index payments, pools and claims", function () {
       expect(await nr.balanceOf(S)).to.equal(25_150n);
       expect(await substrate.held(N)).to.equal(25_150n);
 
-      // Claim and withdraw.
+      // The claim pays it in the same transaction (empty return data is success).
       await anchorEpoch(substrate, "n1");
       const tree = claimTree([{ earner: bob.address, tokens: [N], amounts: [1_234n], value: 1n }]);
       await anchorEpoch(substrate, "n2", tree.root);
-      await claimTx(substrate, bob, tree, 0, "n2");
-      await substrate.withdraw(bob.address, N);
+      await expect(claimTx(substrate, bob, tree, 0, "n2"))
+        .to.emit(substrate, "Withdrawn").withArgs(bob.address, N, bob.address, 1_234n)
+        .and.not.to.emit(substrate, "PayDeferred");
       expect(await nr.balanceOf(bob.address)).to.equal(1_234n);
+      expect(await substrate.owed(bob.address, N)).to.equal(0n);
       // Treasury share: 12_500 + 50 + 25 from the payment and the two payouts.
       expect(await substrate.treasuryOwed(N)).to.equal(12_575n);
       await substrate.withdrawTreasury(N);

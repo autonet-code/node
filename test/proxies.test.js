@@ -102,13 +102,16 @@ describe("Substrate behind a proxy", function () {
 
   it("only the governor upgrades; pools, claims, agents and settings survive", async function () {
     await registerAgent(substrate, alice, "alice");
-    const usd = await deployIndexToken(substrate);
+    // A pausable token, paused at the claim, so the claim leaves it owed.
+    const usd = await deployIndexToken(substrate, { kind: "pausable" });
     const U = await usd.getAddress();
     await payFees(substrate, usd, 1_000_000n);      // 12_500 tool share, 12_500 treasury
     await anchorEpoch(substrate, "e1");
     const tree = claimTree([{ earner: alice.address, tokens: [U], amounts: [777n] }]);
     await anchorEpoch(substrate, "e2", tree.root);
+    await usd.setPaused(true);
     await claimTx(substrate, alice, tree, 0, "e2");
+    await usd.setPaused(false);
     await substrate.connect(gov).setServiceFeeBps(300);
     const deployedAt = await substrate.deployedAt();
 

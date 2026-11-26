@@ -264,9 +264,10 @@ SUBSTRATE_ABI = [
     # Household claims (Decision 2026-10-27). The leaf is
     # keccak256(bytes.concat(keccak256(abi.encode(CLAIM_TAG, earner, tokens,
     # amounts)))) under the anchor's claimRoot (nodes/common/mint_merkle.py).
-    # Permissionless: anyone submits, the amounts are owed to ``earner``
-    # (the household's owner wallet) and leave by withdraw, one token at a
-    # time. Substrate records the REP value on chain.
+    # Permissionless: anyone submits; the claim pays ``earner`` (the
+    # household's owner wallet) the whole basket in the same transaction. A
+    # token whose transfer fails stays owed (PayDeferred) and leaves later by
+    # withdraw, one token at a time. Substrate records the REP value on chain.
     {
         "inputs": [
             {"internalType": "address",   "name": "earner",      "type": "address"},
@@ -1382,8 +1383,10 @@ class OnChainService:
         proof: list[str | bytes],
     ) -> dict[str, Any]:
         """Sign and submit ``claim(earner, epochIdHash, tokens, amounts,
-        proof)``, then ``withdraw(earner, token)`` for every token the
-        earner is owed.
+        proof)``, which pays the whole basket in the same transaction, then
+        ``withdraw(earner, token)`` only for a token still owed after it (one
+        whose transfer the claim deferred: paused, frozen, or deferred by an
+        earlier claim). Normally that is one transaction.
 
         Decision 2026-10-27: the household's owner wallet is the earner and
         anyone may submit; ``private_key`` only signs and pays gas. The
@@ -1392,7 +1395,9 @@ class OnChainService:
         over the same leaf (nodes/common/mint_merkle.py claim_merkle_proof).
         Once per (earner, epoch) on chain (``claimedEpoch``); the epoch
         must be anchored. A token whose withdrawal fails is reported in
-        ``withdraw_errors`` and blocks none of the others.
+        ``withdraw_errors`` and blocks none of the others; it stays owed
+        on chain, so a later call (or ``withdraw``) retries it. ``owed``
+        lists every token still owed after this call (``{token: amount}``).
         """
         try:
             from eth_account import Account
@@ -1412,7 +1417,9 @@ class OnChainService:
                     gas_floor=500_000)
                 if not out.get("success"):
                     return out
-            out["withdrawn"], out["withdraw_errors"] = {}, {}
+            # The claim paid every token it could; only what is still owed
+            # (deferred by this claim or an earlier one) needs a withdraw.
+            out["withdrawn"], out["withdraw_errors"], out["owed"] = {}, {}, {}
             for t in token_list:
                 try:
                     if int(contract.functions.owed(who, t).call()) <= 0:
@@ -1425,6 +1432,12 @@ class OnChainService:
                         out["withdraw_errors"][t.lower()] = r.get("error", "reverted")
                 except Exception as e:  # noqa: BLE001 (one token never blocks the rest)
                     out["withdraw_errors"][t.lower()] = str(e)
+                try:
+                    left = int(contract.functions.owed(who, t).call())
+                    if left > 0:
+                        out["owed"][t.lower()] = left
+                except Exception:  # noqa: BLE001 (a read; the claim already landed)
+                    pass
             return out
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
@@ -1607,8 +1620,10 @@ class OnChainService:
     async def get_claim_status(self, earner: str) -> dict[str, Any] | None:
         """What a household's earner (its owner wallet) has from the pools:
         ``earned_value`` (claimed, as value) and ``owed`` per pool token
-        (claimed and not yet withdrawn: ``{token, symbol, decimals,
-        amount}``, only tokens with something owed)."""
+        (claimed and not yet paid: a claim pays its basket at once, so this
+        is what a failed transfer deferred, a paused or frozen token, until
+        it is withdrawn: ``{token, symbol, decimals, amount}``, only tokens
+        with something owed)."""
         try:
             w3 = self._get_web3()
             contract = self._get_contract(w3)

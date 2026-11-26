@@ -24,9 +24,9 @@ the operator. The DAEMON code paths drive every step:
      registerTool, approve, bond); B puts a bounty on it in the bond's token;
   4. households B and C adopt it, use it and review it (``attest_tools``
      with the four fields); each daemon's ``ReviewDriver`` commits, reveals
-     after the anchor, finalizes, claims on ToolBond and pays out the
-     bounty parts its households are owed (``payOut``); the reviewing
-     households clear the conclusion gate;
+     after the anchor, finalizes and claims on ToolBond, which pays the
+     bounty parts in the same transaction (``payOut`` only for a deferred
+     part); the reviewing households clear the conclusion gate;
   5. B buys two services C sells, one priced in each token
      (``request_service`` with no credits: one direct payment each): each
      payment's fee is collected, half to the treasury and half to that
@@ -37,10 +37,11 @@ the operator. The DAEMON code paths drive every step:
      V x C x S kept by N), each earner taking the same fraction of both
      pools. Each daemon's ``ChainSubmissionDriver`` takes the close: A's
      anchors it (operator A is Substrate's governor on this dev network),
-     then every operator claims its owner wallet's basket and withdraws it
-     token by token, and shows ToolBond the conclusion. USD6's issuer pauses
-     it before C's daemon takes the close: C's claim and its T18 withdrawal
-     go through, its USD6 stays owed and is withdrawn once unpaused;
+     then every operator claims its owner wallet's basket, which the claim
+     pays in the same transaction, and shows ToolBond the conclusion. USD6's
+     issuer pauses it before C's daemon takes the close: C's claim pays its
+     T18 and defers its USD6 (PayDeferred), which stays owed and is
+     withdrawn once unpaused;
   7. the same driver step claims each household's REP 1:1 on the value of
      its pool earnings (``AutonetRepClaim.claim``, ``earnedValue``);
   8. B opens credits with C in T18 and buys C's T18 service twice on them
@@ -178,7 +179,7 @@ STAGES = [
     (3, "household A's agent publishes a tool bonded in an index token; B adds a bounty"),
     (4, "B and C adopt, use and review it (four fields, commit-reveal, bounty paid out)"),
     (5, "service fees collected in both tokens (B buys C's two services)"),
-    (6, "close: baskets of both pools; anchor; claims and per-token withdrawals; a paused token"),
+    (6, "close: baskets of both pools; anchor; claims that pay the basket; a paused token deferred"),
     (7, "REP claimed 1:1 on the value of the pool earnings (AutonetRepClaim)"),
     (8, "credits in T18: vouchers pay ahead, the provider settles, the buyer closes and withdraws"),
     (9, "teardown"),
@@ -912,8 +913,8 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         credit = rep.functions.slashedCredit(bond.address).call()
         check(rep.functions.totalSupply().call() + (credit - credit0) == supply0,
               "REP conserved by the review settlement")
-        # The bounty: each review's part owed to its household, then paid
-        # out by the reviewer's daemon (payOut), in the bond's token.
+        # The bounty: each review's part paid to its household by the
+        # review's claim, in the bond's token (payOut only if deferred).
         paid = {str(e["args"]["household"]): int(e["args"]["amount"]) for e in
                 bond.events.BountyPaid().get_logs(from_block=0, to_block="latest")}
         check(set(paid) == {owner["B"], owner["C"]}
@@ -923,7 +924,7 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         for h in ("B", "C"):
             check(bond.functions.owed(owner[h], tok["usd6"].address).call() == 0
                   and bal("usd6", owner[h]) - owner_usd0[h] == paid[owner[h]],
-                  f"{h}: its daemon paid it out to the owner wallet (payOut)")
+                  f"{h}: its claim paid it to the owner wallet")
         corr_sum, corr_mass = bond.functions.toolRating(b32, (0).to_bytes(32, "big")).call()
         want_c = hundredths_mean([(300, 0.9), (200, 0.5)])
         check(corr_mass == 500 * E18 and close_to(corr_sum / corr_mass / 100, want_c),
@@ -1120,8 +1121,8 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
                   f"{h}: its basket is worth {claims[hk[h]]['value'] / U6:.6f} units")
 
         # The daemons take the close: A's driver anchors it (its operator is
-        # Substrate's governor), every driver claims for its household and
-        # withdraws token by token.
+        # Substrate's governor), every driver claims for its household; the
+        # claim pays the basket in the same transaction.
         close["epoch_id"] = "e3"
         fed = FederatedCloseResult(
             epoch_id="e3", close_result=close, senders=[kp.public_key],
@@ -1168,14 +1169,20 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
             for k in tok:
                 got = bal(k, owner[h]) - held0[h][k][0]
                 if h == "C" and k == "usd6":
+                    deferred = [e for e in substrate.events.PayDeferred().get_logs(
+                        from_block=0, to_block="latest")
+                        if str(e["args"]["earner"]).lower() == owner[h].lower()]
                     check(got == 0 and substrate.functions.owed(owner[h], tok[k].address).call()
-                          == want[T[k]] and T[k] in {str(t).lower() for t in
-                                                     row.get("withdraw_errors", {})},
-                          "C: USD6 is paused, so its USD6 stays owed (the withdrawal failed)")
+                          == want[T[k]] and len(deferred) == 1
+                          and int(deferred[0]["args"]["amount"]) == want[T[k]]
+                          and {str(t).lower(): int(v) for t, v in row.get("owed", {}).items()}
+                          == {T[k]: want[T[k]]},
+                          "C: USD6 is paused, so the claim deferred it (PayDeferred); it stays owed")
                 else:
                     check(got == want.get(T[k], 0)
-                          and substrate.functions.owed(owner[h], tok[k].address).call() == 0,
-                          f"{h}: {k} withdrawn to the owner wallet (+{got})")
+                          and substrate.functions.owed(owner[h], tok[k].address).call() == 0
+                          and not row.get("withdrawn"),
+                          f"{h}: {k} paid to the owner wallet by the claim itself (+{got})")
                 check(bal(k, op[h]) == held0[h][k][1],
                       f"{h}: the operator received no {k} (it paid the gas)")
         send(w3, tok["usd6"].functions.setPaused(False), HH_DEPLOYER_PK)

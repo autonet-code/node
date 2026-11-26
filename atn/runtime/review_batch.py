@@ -132,8 +132,9 @@ TOOL_BOND_REVIEW_ABI = [
     _fn("forfeit", [("epoch", "uint256"), ("agent", "address")]),
     _fn("finalize", [("digest", "bytes32"), ("epoch", "uint256"), ("maxReviews", "uint256")]),
     _fn("claim", [("digest", "bytes32"), ("epoch", "uint256"), ("reviewer", "address")]),
-    # A claim's bounty part is owed to the reviewer's household in the
-    # bond's token, paid by payOut (one token per call).
+    # A claim pays its bounty part to the reviewer's household in the same
+    # transaction (PaidOut); a failed transfer stays owed (PayDeferred) and
+    # is paid later by payOut (one token per call).
     # The round's parts are owed in the token its bounty was in when it
     # started finalizing (roundBounty's token), not the bond's token now.
     _fn("householdOf", [("epoch", "uint256"), ("agent", "address")], [("", "address")], "view"),
@@ -511,10 +512,12 @@ class ReviewBondClient:
 
     async def pay_out_bounty(self, private_key: str, digest: str, epoch: int,
                              reviewer: str) -> dict[str, Any]:
-        """Pay the reviewer's household what ToolBond owes it in the round's
-        bounty token (its bounty parts): ``payOut(household, token)`` when
-        anything is owed. ``{"success": True, "amount": 0}`` when nothing
-        is."""
+        """Pay the reviewer's household what ToolBond still owes it in the
+        round's bounty token: ``payOut(household, token)`` only when
+        something is owed. The claim normally pays the bounty part itself,
+        so this sends a transaction only for a part the claim deferred (a
+        paused or frozen token); payOut would revert NothingToClaim
+        otherwise. ``{"success": True, "amount": 0}`` when nothing is."""
         def fn(b, s):
             from web3 import Web3
             house = b.functions.householdOf(int(epoch), Web3.to_checksum_address(reviewer)).call()

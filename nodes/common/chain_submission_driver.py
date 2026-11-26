@@ -15,8 +15,9 @@ responsibilities:
     keyed by owner wallet. For each household this daemon serves (the
     configured owner wallet and the on-chain owners of its registered
     agents) an ``AuthoritativeChainSubmitter`` reads the anchor, fetches
-    the blob, reads the household's leaf, calls ``claim`` and then
-    ``withdraw`` per token, signed by the daemon operator key
+    the blob, reads the household's leaf and calls ``claim``, which pays
+    the whole basket in one transaction (``withdraw`` only for a token
+    whose transfer the claim deferred), signed by the daemon operator key
     (``daemon_private_key``), which pays the gas. The tokens go to the
     owner whoever submits.
 
@@ -694,6 +695,7 @@ class ChainSubmissionDriver:
                 "value": int(r.value),
                 "withdrawn": dict(r.withdrawn),
                 "withdraw_errors": dict(r.withdraw_errors),
+                "owed": {t: str(a) for t, a in r.owed.items()},
                 "error": r.error,
             })
         self._claim_rep([r["claimant"] for r in results], op)

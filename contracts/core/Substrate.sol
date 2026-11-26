@@ -36,11 +36,12 @@ interface IRegistryRead {
 ///      minted: Substrate is not a token.
 ///   4. **Claims from the pools.** Each epoch's close commits, per earner,
 ///      an amount of every token's pool (the same fraction of each, the
-///      basket). A claim credits the amounts as owed and adds their value,
-///      at the parities stored when the epoch was anchored, to
-///      `earnedValue`, which the DAO's REP claim reads.
-///      Each token is then withdrawn on its own, so a token that freezes
-///      blocks nothing else.
+///      basket). A claim credits the amounts, adds their value, at the
+///      parities stored when the epoch was anchored, to `earnedValue`,
+///      which the DAO's REP claim reads, and pays the whole basket in the
+///      same transaction. A token whose transfer fails (paused, frozen)
+///      stays owed and is withdrawn on its own later, so it blocks nothing
+///      else.
 ///
 /// Custody. Substrate holds only the pools and what is owed from them
 /// (earners' claims, the treasury's share). Channel deposits stay in
@@ -1155,8 +1156,10 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     // was anchored (anchorParity), so a parity edit after the anchor
     // changes nothing. The value is computed here from amounts the pool cap
     // already bounds, never taken from the leaf, so no anchor can grant
-    // more REP than the fees collected are worth. The money then leaves by
-    // withdraw, one token at a time. Claims of a token never total more
+    // more REP than the fees collected are worth. The claim then pays every
+    // token of the basket to the earner; a token whose transfer fails stays
+    // owed and leaves later by withdraw, one token at a time, so it blocks
+    // nothing else. Claims of a token never total more
     // than its tool share collected up to poolCutoff.
     // =========================================================================
 
@@ -1196,6 +1199,8 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     event Claimed(address indexed earner, bytes32 indexed epochIdHash, uint256 value, uint256 earnedValueAfter);
     event ClaimedToken(address indexed earner, bytes32 indexed epochIdHash, address indexed token, uint256 amount);
     event Withdrawn(address indexed earner, address indexed token, address to, uint256 amount);
+    /// @notice A claim's transfer of `token` failed; the amount stays owed.
+    event PayDeferred(address indexed earner, address indexed token, uint256 amount);
     event TreasuryWithdrawn(address indexed token, uint256 amount);
     event Swept(address indexed token, uint256 amount);
 
@@ -1218,14 +1223,17 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
     /// @notice Claim an earner's leaf of an anchored epoch, on its behalf.
     ///         Anyone may submit (the household's operator, typically); the
     ///         leaf fixes the earner, so nothing can go elsewhere. Once per
-    ///         (earner, epoch). Credits the amounts as owed; withdraw pays.
+    ///         (earner, epoch). Credits the amounts and pays each token to
+    ///         the earner in the same transaction; a token whose transfer
+    ///         fails (paused, frozen, the earner blocked) stays owed, for
+    ///         withdraw or withdrawTo later.
     function claim(
         address earner,
         bytes32 epochIdHash,
         address[] calldata tokens,
         uint256[] calldata amounts,
         bytes32[] calldata proof
-    ) external {
+    ) external nonReentrant {
         string storage epochId = epochIdByHash[epochIdHash];
         if (bytes(epochId).length == 0) revert EpochNotAnchored(epochIdHash);
         if (claimedEpoch[earner][epochIdHash]) revert AlreadyClaimed(epochIdHash);
@@ -1248,6 +1256,25 @@ contract Substrate is EIP712, Initializable, UUPSUpgradeable, ReentrancyGuardTra
             totalEarnedValue += value;
         }
         emit Claimed(earner, epochIdHash, value, earnedValue[earner]);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (amounts[i] != 0) _tryPay(earner, tokens[i]);
+        }
+    }
+
+    /// @dev Pay what `earner` is owed in `token` if the transfer succeeds;
+    ///      otherwise leave it owed. Books first, restored on failure.
+    function _tryPay(address earner, address token) private {
+        uint256 a = owed[earner][token];
+        if (a == 0) return;
+        owed[earner][token] = 0;
+        held[token] -= a;
+        if (IERC20(token).trySafeTransfer(earner, a)) {
+            emit Withdrawn(earner, token, earner, a);
+        } else {
+            owed[earner][token] = a;
+            held[token] += a;
+            emit PayDeferred(earner, token, a);
+        }
     }
 
     /// @notice The leaf a claim proves (exposed for the close and tests).
