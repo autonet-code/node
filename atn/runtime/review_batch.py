@@ -538,9 +538,11 @@ class ReviewBondClient:
 
     async def deferred_payouts(self, agents: list[str]) -> Optional[list[dict[str, Any]]]:
         """What ToolBond still owes the households of ``agents`` (each
-        agent's bound owner now, else itself): ``{household, token,
-        amount}`` for every value index or pool token with ``owed > 0``,
-        a bounty part a claim deferred. None when the chain is unreadable."""
+        agent's bound owner now) and the agents themselves: ``{household,
+        token, amount}`` for every value index or pool token with
+        ``owed > 0``. A household is owed a bounty part a claim deferred; an
+        author agent a stake whose withdraw deferred it. None when the chain
+        is unreadable."""
         def fn(b, s):
             from web3 import Web3
             from ..on_chain import OnChainService
@@ -550,9 +552,9 @@ class ReviewBondClient:
             for agent in agents:
                 a = Web3.to_checksum_address(agent)
                 owner = sub.functions.getAgentOwner(a).call()
-                h = a if int(owner, 16) == 0 else Web3.to_checksum_address(owner)
-                if h not in houses:
-                    houses.append(h)
+                for h in (a,) if int(owner, 16) == 0 else (Web3.to_checksum_address(owner), a):
+                    if h not in houses:
+                        houses.append(h)
             tokens = OnChainService(self._base._cfg())._index_candidates(w3, s)
             out = []
             for h in houses:
