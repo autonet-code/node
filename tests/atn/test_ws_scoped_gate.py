@@ -66,12 +66,29 @@ async def test_scoped_session_is_refused_owner_surfaces(tmp_path, msg_type):
     assert "scoped session" in out["error"] or "localhost-only" in out["error"]
 
 
+def test_no_tool_an_external_agent_can_hold_is_shadowed_by_an_owner_handler():
+    """Every agent tool an external agent is granted by default, or can be
+    granted (the services bundle), reaches its tool through the agent API:
+    an inline handler of the same name either admits scoped sessions or
+    hands them to the tool (SCOPED_AS_AGENT_TOOL)."""
+    from atn import agent_tools as at
+    from atn.ws_server import SCOPED_AS_AGENT_TOOL
+    granted = set()
+    for bundle in list(at.EXTERNAL_DEFAULT_TOOLS) + ["services"]:
+        granted |= set(at._TOOL_CATEGORIES.get(bundle, ()))
+    shadowed = ((granted & WebSocketBridge._inline_message_types())
+                - SCOPED_INLINE_ALLOWED - SCOPED_AS_AGENT_TOOL)
+    assert not shadowed, sorted(shadowed)
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("msg_type", ["register_service", "set_service_prices"])
-async def test_selling_reaches_the_agent_tool_and_its_grant(tmp_path, msg_type):
-    """An external agent sells through the agent tool of the same name, not
-    the owner's inline publish: without the owner's "services" grant it is
-    refused there."""
+@pytest.mark.parametrize("msg_type", ["register_service", "set_service_prices",
+                                      "open_credits", "top_up_credits",
+                                      "close_credits", "list_credits"])
+async def test_services_reach_the_agent_tool_and_its_grant(tmp_path, msg_type):
+    """An external agent sells and holds credits through the agent tools of
+    the same names, not the owner's inline handlers: the tool's grant and
+    caller checks decide (here the caller is no real agent)."""
     from atn.ws_server import SCOPED_AS_AGENT_TOOL
     assert msg_type in SCOPED_AS_AGENT_TOOL
     assert msg_type in WebSocketBridge._inline_message_types()

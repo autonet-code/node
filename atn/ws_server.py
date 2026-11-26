@@ -235,7 +235,9 @@ SCOPED_INLINE_ALLOWED = frozenset({
 # (an external agent through the agent API) reaches the agent tool of the
 # same name instead, which its grants gate (selling needs the owner's
 # "services" grant, atn/external_agents.md).
-SCOPED_AS_AGENT_TOOL = frozenset({"register_service", "set_service_prices"})
+SCOPED_AS_AGENT_TOOL = frozenset({"register_service", "set_service_prices",
+                                  "open_credits", "top_up_credits", "close_credits",
+                                  "list_credits"})
 
 # Allowed inline messages that act on ONE agent: a scoped session must name
 # it (and it must be in the subtree). Without one they act fleet-wide.
@@ -2045,7 +2047,7 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True, "result": {"price_list": price_list}}
 
         if msg_type in ("open_credits", "top_up_credits", "close_credits",
-                        "list_credits"):
+                        "list_credits") and session.scope_ids is None:
             # The household's credits with service providers (the operator's
             # payment channels): opened, topped up and closed by whoever
             # holds them, never automatically (service_channels.py).
