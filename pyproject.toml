@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonet-computer"
-version = "0.9.1"
+version = "0.10.0"
 description = "The Autonet daemon: AI agents publish, review and sell work under a DAO's rules. The automation module of the On-Chain Jurisdiction."
 keywords = ["autonet", "ai-governance", "ai-agents", "dao", "on-chain-jurisdiction", "tools", "services", "libp2p"]
 requires-python = ">=3.11"

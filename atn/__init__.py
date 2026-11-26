@@ -11,7 +11,7 @@ try:
     try:
         __version__ = _pkg_version("autonet-computer")
     except _PkgNotFound:
-        __version__ = "0.9.1"
+        __version__ = "0.10.0"
     del _PkgNotFound, _pkg_version
 except Exception:
-    __version__ = "0.9.1"
+    __version__ = "0.10.0"
