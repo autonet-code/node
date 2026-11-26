@@ -63,7 +63,7 @@ def wait_for_jurisdiction(w3, factory: str, from_block: int) -> dict:
             c = doc["jurisdictions"]["autonet"]["contracts"]
             return {"dao": {"governor": ev.args.governor, "registry": ev.args.registry,
                             "timelock": ev.args.timelock, "repToken": ev.args.token},
-                    "autonet": {"substrate": c["substrate"], "vault": c.get("vault", "")},
+                    "autonet": {"substrate": c["substrate"]},
                     "contracts": c}
         time.sleep(3)
 
@@ -84,10 +84,15 @@ async def amain(args) -> int:
                     cwd=REPO, env=s0.base_env(), log_path=run / "relay.log")
 
         deployer, scripted = accts[0], accts[1:1 + SCRIPTED]
-        usdc = w3.eth.contract(address=w3.to_checksum_address(args.stablecoin),
-                               abi=s0.artifact("test/TestToken6.sol/TestToken6.json")["abi"])
-        for o in scripted:
-            s0.send(w3, deployer, usdc.functions.transfer(o.address, s0.USDC_PER_OWNER))
+        # The index tokens the jurisdiction lists (key=address, as s0.INDEX names them).
+        tokens = {}
+        for pair in args.tokens.split(","):
+            k, addr = pair.split("=", 1)
+            tokens[k.strip()] = w3.eth.contract(address=w3.to_checksum_address(addr.strip()),
+                                                abi=s0.ERC20_ABI)
+            for o in scripted:
+                s0.send(w3, deployer, tokens[k.strip()].functions.transfer(
+                    o.address, s0.INDEX[k.strip()]["per_owner"]))
 
         hs = [s0.Household(i, run, o) for i, o in enumerate(scripted)]
         mine = OwnerHousehold(run, None)
@@ -103,12 +108,12 @@ async def amain(args) -> int:
                 raise
             s0.log(f"{h.name} up on :{h.ws_port}")
         for h in hs:
-            await s0.onboard(h, j, w3, usdc)
+            await s0.onboard(h, j, w3, tokens)
         s0.log(f"READY: your daemon on :{mine.ws_port}, log {mine.home / 'daemon.log'}")
 
         stop = asyncio.Event()
-        asyncio.create_task(s0.collector(run, hs, j, w3, stop))
-        act = s0.Activity(run, hs, j, w3)
+        act = s0.Activity(run, hs, j, w3, tokens)
+        asyncio.create_task(s0.collector(run, hs, j, w3, stop, act))
         await act.author()
         await act.adopt()
         s0.PHASES = [(1.0, EPOCH_SECS)]
@@ -124,7 +129,8 @@ async def amain(args) -> int:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--factory", required=True, help="JurisdictionFactory address")
-    p.add_argument("--stablecoin", required=True, help="the vault's test stablecoin")
+    p.add_argument("--tokens", required=True,
+                   help="the value index's tokens, key=address comma list (tt6=0x..,tt18=0x..)")
     p.add_argument("--relay-dir", required=True, help="relay data dir (keeps its peer id)")
     p.add_argument("--run-dir", default=time.strftime("D:/autonet_manual/join-%Y%m%d-%H%M%S"))
     p.add_argument("--from-block", type=int, default=0)

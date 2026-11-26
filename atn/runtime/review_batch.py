@@ -132,6 +132,16 @@ TOOL_BOND_REVIEW_ABI = [
     _fn("forfeit", [("epoch", "uint256"), ("agent", "address")]),
     _fn("finalize", [("digest", "bytes32"), ("epoch", "uint256"), ("maxReviews", "uint256")]),
     _fn("claim", [("digest", "bytes32"), ("epoch", "uint256"), ("reviewer", "address")]),
+    # A claim's bounty part is owed to the reviewer's household in the
+    # bond's token, paid by payOut (one token per call).
+    # The round's parts are owed in the token its bounty was in when it
+    # started finalizing (roundBounty's token), not the bond's token now.
+    _fn("householdOf", [("epoch", "uint256"), ("agent", "address")], [("", "address")], "view"),
+    _fn("roundBounty", [("digest", "bytes32"), ("epoch", "uint256")],
+        [("base", "uint256"), ("need", "uint256"), ("win", "uint256"), ("pool", "uint256"),
+         ("token", "address")], "view"),
+    _fn("owed", [("", "address"), ("", "address")], [("", "uint256")], "view"),
+    _fn("payOut", [("account", "address"), ("token", "address")]),
     _fn("toolRating", [("digest", "bytes32"), ("key", "bytes32")],
         [("sum", "int256"), ("mass", "uint256")], "view"),
     # Decision 2026-11-10: malware 0 none, 1 by the reviewers, 2 by the DAO;
@@ -498,6 +508,30 @@ class ReviewBondClient:
                     reviewer: str) -> dict[str, Any]:
         return await self._write(private_key, lambda b, s, a: b.functions.claim(
             _b32(digest), int(epoch), reviewer))
+
+    async def pay_out_bounty(self, private_key: str, digest: str, epoch: int,
+                             reviewer: str) -> dict[str, Any]:
+        """Pay the reviewer's household what ToolBond owes it in the round's
+        bounty token (its bounty parts): ``payOut(household, token)`` when
+        anything is owed. ``{"success": True, "amount": 0}`` when nothing
+        is."""
+        def fn(b, s):
+            from web3 import Web3
+            house = b.functions.householdOf(int(epoch), Web3.to_checksum_address(reviewer)).call()
+            token = b.functions.roundBounty(_b32(digest), int(epoch)).call()[4]
+            owed = 0
+            if int(house, 16) and int(token, 16):
+                owed = int(b.functions.owed(house, token).call())
+            return house, token, owed
+        got = await self._read(fn)
+        if got is None:
+            return {"success": False, "error": "chain unreachable"}
+        house, token, owed = got
+        if owed == 0:
+            return {"success": True, "amount": 0}
+        res = await self._write(private_key, lambda b, s, a: b.functions.payOut(house, token))
+        return {**res, "amount": owed, "household": str(house).lower(),
+                "token": str(token).lower()}
 
     async def verdict_of(self, digest: str) -> Optional[dict[str, Any]]:
         """The tool's malware verdict on ToolBond (Decision 2026-11-10):

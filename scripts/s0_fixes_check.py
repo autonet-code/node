@@ -55,7 +55,8 @@ import s0_local_run as s0  # noqa: E402
 log = s0.log
 RELAY2_PORT = s0.RELAY_PORT + 1
 SEED_REFRESH_SECS = 15
-SERVICE_ASK = 1_000_000           # 1 ATN (6 decimals) per request
+SERVICE_TOKEN = "tt6"             # the service is priced in tt6 (an index token)
+SERVICE_ASK = 1_000_000           # 1 tt6 (6 decimals) per request
 EPOCH_SECS = 120                  # payments aimed at floor-length epochs
 
 
@@ -228,7 +229,7 @@ async def volume_loop(act: s0.Activity, stop: asyncio.Event) -> None:
             threshold = act.epoch_threshold()
         except Exception:  # noqa: BLE001
             threshold = 0
-        per_tick = threshold / s0.BURN_SHARE * s0.TICK_SECS / EPOCH_SECS if threshold else 0
+        per_tick = threshold / s0.FEE_SHARE * s0.TICK_SECS / EPOCH_SECS if threshold else 0
         per_agent = int(per_tick / max(1, len(live)))
         try:
             await asyncio.gather(*(act.work(h, rng) for h in live))
@@ -263,7 +264,8 @@ async def proposal_status(h: Household, digest: str) -> Dict[str, Any]:
     return next((p for p in r.get("proposals") or [] if p.get("digest") == digest), {})
 
 
-async def check_adoption(hs: List[Household], procs: s0.Procs, rep: Report) -> None:
+async def check_adoption(hs: List[Household], procs: s0.Procs, rep: Report,
+                         token: str = "") -> None:
     """#46: approve while the only code holder is down; complete once it is up."""
     author, adopter = hs[0], hs[1]
     ev: Dict[str, Any] = {}
@@ -275,7 +277,9 @@ async def check_adoption(hs: List[Household], procs: s0.Procs, rep: Report) -> N
                                 "novelty": {"statement": "ROT13 a text. Nothing comparable "
                                             "is in the library yet.", "prior_art": []}})
     digest = r.get("digest") or (r.get("tool") or {}).get("digest")
-    await author.client.ok({"type": "publish_tool", "caller_id": author.agent_id, "digest": digest})
+    # The operator holds both index tokens: the bond names one.
+    await author.client.ok({"type": "publish_tool", "caller_id": author.agent_id, "digest": digest,
+                            "token": token})
     ev["digest"] = digest
     prop = await adopter.client.ok({"type": "adopt_tool", "caller_id": adopter.agent_id,
                                     "digest": digest, "reason": "s0 fixes check"})
@@ -331,6 +335,7 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
                                     "mode": "request", "name": "slugify",
                                     "description": "Turn a text into a url slug.",
                                     "backing_tool": backing, "price": SERVICE_ASK,
+                                    "token": act.tokens[SERVICE_TOKEN].address,
                                     "voucher": SERVICE_ASK})
     spec_digest = reg.get("digest")
     ev["register"] = {"digest": spec_digest, "on_chain": reg.get("on_chain"),
@@ -360,6 +365,7 @@ async def check_services(act: s0.Activity, hs: List[Household], procs: s0.Procs,
 
     opened = await buyer.client.call({"type": "open_credits", "caller_id": buyer.agent_id,
                                       "provider_address": provider.agent_address,
+                                      "token": act.tokens[SERVICE_TOKEN].address,
                                       "deposit": 10 * SERVICE_ASK}, timeout=240)
     ev["open_credits"] = opened
     replies = []
@@ -555,19 +561,16 @@ async def amain() -> int:
     stop = asyncio.Event()
     bg: List[asyncio.Task] = []
     try:
+        s0.dao_workdir()   # trustless-contracts is read only: a working copy
         procs.start("hardhat", ["npx.cmd" if os.name == "nt" else "npx", "hardhat", "node",
-                                "--port", str(s0.RPC_PORT)], cwd=s0.DAO_DIR, env=s0.base_env(),
+                                "--port", str(s0.RPC_PORT)], cwd=s0.DAO_WORK, env=s0.base_env(),
                     log_path=run / "hardhat.log")
         w3, accts = s0.w3_and_accounts()
         s0.wait_for(lambda: w3.is_connected() and w3.eth.chain_id == s0.CHAIN_ID, 120, "hardhat")
         w3.provider.make_request("evm_setAutomine", [False])
         w3.provider.make_request("evm_setIntervalMining", [1000])
         deployer, owners = accts[0], accts[1:1 + s0.HOUSEHOLDS]
-        usdc_addr = s0.deploy_test_usdc(w3, deployer)
-        usdc = w3.eth.contract(address=usdc_addr,
-                               abi=s0.artifact("test/TestToken6.sol/TestToken6.json")["abi"])
-        for o in owners:
-            s0.send(w3, deployer, usdc.functions.transfer(o.address, s0.USDC_PER_OWNER))
+        tokens = s0.deploy_index_tokens(w3, deployer, owners)
 
         relay_dir = run / "relay"
         relay_dir.mkdir()
@@ -576,7 +579,7 @@ async def amain() -> int:
                             env=s0.base_env(), log_path=run / "relay_probe.log")
         peer = relay_peer(run / "relay_probe.log")
         kill(probe)
-        j = s0.deploy_jurisdiction(run, usdc_addr, [o.address for o in owners], s0.seed_addr(peer))
+        j = s0.deploy_jurisdiction(run, tokens, [o.address for o in owners], s0.seed_addr(peer))
         jkey = f"{s0.CHAIN_ID}:{j['dao']['governor'].lower()}"
         relay1_args = rargs + ["--jurisdiction", jkey]
         relay1 = procs.start("seed-relay-a", relay1_args, cwd=s0.REPO, env=s0.base_env(),
@@ -591,19 +594,19 @@ async def amain() -> int:
             h.client = s0.DaemonClient(h.client_url(), h.name)
             await h.client.connect()
         for h in hs:
-            await s0.onboard(h, j, w3, usdc)
+            await s0.onboard(h, j, w3, tokens)
         log("all households onboarded")
 
         # #46 first: before any other daemon could hold the probe tool's code.
         try:
-            await check_adoption(hs, procs, rep)
+            await check_adoption(hs, procs, rep, tokens[SERVICE_TOKEN].address)
         except Exception:
             rep.set("#46 adoption", False, crash=traceback.format_exc()[-1500:])
 
-        act = s0.Activity(run, hs, j, w3)
+        act = s0.Activity(run, hs, j, w3, tokens)
         await act.author()
         await act.adopt()
-        bg.append(asyncio.create_task(s0.collector(run, hs, j, w3, stop)))
+        bg.append(asyncio.create_task(s0.collector(run, hs, j, w3, stop, act)))
         bg.append(asyncio.create_task(volume_loop(act, stop)))
         # Let a couple of epochs anchor with everyone up.
         sub = w3.eth.contract(address=w3.to_checksum_address(j["autonet"]["substrate"]),

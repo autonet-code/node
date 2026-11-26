@@ -3,7 +3,7 @@
 
 Three views, appended every interval under <run dir>:
   anchors.jsonl  the chain (public RPC): each new anchor, its epoch length,
-                 burned fees, ATN supply, tools registered on Substrate
+                 the fees collected per token, tools registered on Substrate
   daemons.jsonl  the hub's telemetry ingest: newest report per daemon
                  (peers, epoch, errors, log lines)
   relay.jsonl    the relay's log since the last poll (connections, errors)
@@ -76,10 +76,11 @@ def main() -> int:
                     an = sub.functions.getAnchor(seen).call()
                     cutoff = _anchor_cutoff(an)
                     row = {"index": seen, "epoch_id": an[0], "length": cutoff - prev_cutoff,
-                           "burned": int(sub.functions.burnedBetween(prev_cutoff, cutoff).call()),
-                           "supply": int(sub.functions.atnTotalSupply().call())}
+                           "fees": {str(t).lower(): int(sub.functions.feesBetween(
+                               t, prev_cutoff, cutoff).call())
+                               for t in sub.functions.poolTokens().call()}}
                     fh.write(json.dumps(row) + "\n")
-                    print(f"ANCHOR {seen + 1}: {an[0]} length {row['length']}s burned {row['burned']}",
+                    print(f"ANCHOR {seen + 1}: {an[0]} length {row['length']}s fees {row['fees']}",
                           flush=True)
                     prev_cutoff, seen = cutoff, seen + 1
             latest = obs_latest(token)

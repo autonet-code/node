@@ -497,3 +497,31 @@ def test_tool_bond_event_abi_matches_contract():
 
     for spec in _TOOL_BOND_EVENTS_ABI:
         assert shape(spec) == shape(events[spec["name"]]), spec["name"]
+
+
+def test_tool_bond_client_function_abi_matches_contract():
+    """The daemon's ToolBond calls (bond in an index token, the bounty,
+    owed and payOut) have the contract's inputs and outputs."""
+    import json
+    from pathlib import Path
+
+    from atn.runtime.review_batch import TOOL_BOND_REVIEW_ABI
+    from atn.runtime.tool_bond import TOOL_BOND_CLIENT_ABI
+
+    art = Path("C:/code/dao/trustless-contracts/artifacts/contracts/"
+               "ToolBond.sol/ToolBond.json")
+    if not art.exists():
+        pytest.skip("trustless-contracts ToolBond artifact not built")
+    fns = {e["name"]: e for e in json.loads(art.read_text())["abi"]
+           if e["type"] == "function"}
+    if "payOut" not in fns:
+        pytest.skip("trustless-contracts ToolBond artifact predates the index tokens")
+
+    def types(items):
+        return [i["type"] for i in items]
+    for spec in TOOL_BOND_CLIENT_ABI + [f for f in TOOL_BOND_REVIEW_ABI
+                                        if f["name"] in ("householdOf", "roundBounty", "owed",
+                                                         "payOut", "claim")]:
+        got = fns[spec["name"]]
+        assert types(spec["inputs"]) == types(got["inputs"]), spec["name"]
+        assert types(spec["outputs"]) == types(got["outputs"]), spec["name"]

@@ -29,6 +29,7 @@ SCHEMA = {"type": "object", "properties": {"x": {"type": "string"}}}
 ECHO = "import json,sys\nprint(json.dumps({'echo': json.load(sys.stdin).get('x')}))\n"
 NOVEL = {"statement": "No comparable tool exists: echoes x.", "prior_art": []}
 D1, D2, D3 = "a1" * 32, "b2" * 32, "c3" * 32
+TOKEN, TOKEN18 = "0x" + "c6" * 20, "0x" + "d8" * 20   # index tokens, 6 and 18 decimals
 
 
 @pytest.fixture(autouse=True)
@@ -77,18 +78,21 @@ class FakeClient:
         self._available = available
         self.ok = ok
         self.bonds: list[tuple[str, str]] = []
+        self.bond_args: list[dict] = []
         self.status_calls: list[str] = []
 
     def available(self):
         return self._available
 
-    async def register_and_bond(self, key, digest, amount=None):
+    async def register_and_bond(self, key, digest, amount=None, token=None):
         self.bonds.append((key, digest))
+        self.bond_args.append({"amount": amount, "token": token})
         if not self.ok:
             return {"success": False, "error": "would revert: NotAuthor",
                     "step": "bond", "txs": ["0xreg"]}
         return {"success": True, "tx_hash": "0xbond",
-                "txs": ["0xreg", "0xapprove", "0xbond"], "amount": 100}
+                "txs": ["0xreg", "0xapprove", "0xbond"], "amount": amount or 100,
+                "token": token or TOKEN, "value": 100}
 
     async def status(self, digest):
         self.status_calls.append(digest)
@@ -293,23 +297,48 @@ class TestPublish:
         assert "at bond" in out["error"] and out["txs"] == ["0xreg"]
         assert not rt.tool_store.get(res["digest"]).published
 
-    async def test_the_bond_waits_for_the_index_token_tool_bond(self, tmp_path):
-        """Until ToolBond takes its stake in an index token, the bond step
-        refuses with a clear reason and the tool stays private."""
+    async def test_the_bond_is_in_the_named_index_token(self, tmp_path):
+        """publish_tool passes the token and amount to the bond, and the
+        stake reports the token and the value posted."""
+        rt = _make_runtime(tmp_path)
+        await _agent(rt, "a")
+        rt.tool_bond_client = client = FakeClient()
+        res = await _register(rt, "a", novelty=NOVEL)
+        out = await execute_tool("publish_tool", {"digest": res["digest"], "token": TOKEN,
+                                                  "amount": "250000000"}, rt, caller_id="a")
+        assert out["published"] is True, out
+        assert client.bond_args == [{"amount": 250_000_000, "token": TOKEN}]
+        assert out["stake"]["token"] == TOKEN and out["stake"]["value"] == 100
+
+    async def test_bad_amount_refused_before_chain(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _agent(rt, "a")
+        rt.tool_bond_client = client = FakeClient()
+        res = await _register(rt, "a", novelty=NOVEL)
+        for bad in ("-5", "0", "ten"):
+            out = await execute_tool("publish_tool", {"digest": res["digest"],
+                                                      "amount": bad}, rt, caller_id="a")
+            assert "amount" in out["error"], out
+        assert client.bonds == [] and not rt.tool_store.get(res["digest"]).published
+
+    async def test_no_token_to_choose_names_the_index(self, tmp_path):
+        """Several (or no) index tokens held and none named: the bond is
+        refused with the index listed, and the tool stays private."""
         rt = _make_runtime(tmp_path)
         await _agent(rt, "a")
         client = FakeClient()
 
-        async def pending(key, digest, amount=None):
-            from atn.runtime.tool_bond import BOND_PENDING
-            raise NotImplementedError(BOND_PENDING)
-        client.register_and_bond = pending
+        async def choose(key, digest, amount=None, token=None):
+            return {"success": False, "step": "bond", "txs": ["0xreg"],
+                    "error": "name the index token to bond in (`token`): you hold several",
+                    "index_tokens": [TOKEN, TOKEN18]}
+        client.register_and_bond = choose
         rt.tool_bond_client = client
         res = await _register(rt, "a", novelty=NOVEL)
         out = await execute_tool("publish_tool", {"digest": res["digest"]}, rt,
                                  caller_id="a")
-        assert "ToolBond stake not made" in out["error"]
-        assert "index-token version" in out["error"]
+        assert "name the index token" in out["error"]
+        assert out["index_tokens"] == [TOKEN, TOKEN18]
         assert not rt.tool_store.get(res["digest"]).published
 
     async def test_owner_authored_refused(self, tmp_path):
@@ -593,28 +622,137 @@ async def test_publish_after_registration_reauthors_without_a_redo(tmp_path):
     assert client.bonds and client.bonds[-1][1] == out["digest"]
 
 
-async def test_register_and_bond_registers_then_refuses_the_bond(monkeypatch):
-    """The real client: registerTool goes out when the digest is unclaimed,
-    then the bond raises NotImplementedError (Substrate is no longer a token
-    to approve, and ToolBond's index-token version is not written yet);
-    nothing is approved or bonded."""
-    from atn.runtime.tool_bond import BOND_PENDING, ToolBondClient
+def _real_client(monkeypatch, plan, *, author="0x" + "00" * 20):
+    """The real client with the chain stubbed: ``plan`` is what _plan_bond
+    answers; every write is recorded by its step."""
+    from atn.runtime.tool_bond import ToolBondClient
     client = ToolBondClient(None)
-    writes = []
+    steps = []
 
     async def tool_author(digest):
-        return "0x" + "00" * 20
-
-    async def min_stake():
-        return 100
+        return author
 
     async def write(key, build, gas_floor=300_000):
-        writes.append(build)
-        return {"success": True, "tx_hash": "0xreg"}
+        steps.append("write")
+        return {"success": True, "tx_hash": f"0x{len(steps)}"}
+
+    async def approve(key, token, amount):
+        steps.append(("approve", token, amount))
+        return {"success": True, "tx_hash": "0xapprove"}
     monkeypatch.setattr(client, "tool_author", tool_author)
-    monkeypatch.setattr(client, "min_stake", min_stake)
     monkeypatch.setattr(client, "_write", write)
-    with pytest.raises(NotImplementedError, match="index-token version"):
-        await client.register_and_bond("0x" + "11" * 32, "ab" * 32)
-    assert len(writes) == 1          # registerTool only
-    assert "ToolBond" in BOND_PENDING
+    monkeypatch.setattr(client, "_approve", approve)
+    monkeypatch.setattr(client, "_plan_bond", lambda me, d, t, a: dict(plan))
+    return client, steps
+
+
+async def test_register_and_bond_registers_approves_then_bonds(monkeypatch):
+    """The real client: registerTool when the digest is unclaimed, the
+    token's approve when the allowance falls short, then the bond."""
+    client, steps = _real_client(monkeypatch, {
+        "token": TOKEN, "amount": 100_000_000, "value": 100_000_000, "approve": True})
+    out = await client.register_and_bond("0x" + "11" * 32, "ab" * 32)
+    assert out["success"] and out["token"] == TOKEN and out["amount"] == 100_000_000
+    assert steps == ["write", ("approve", TOKEN, 100_000_000), "write"]
+    assert out["txs"] == ["0x1", "0xapprove", out["tx_hash"]]
+
+
+async def test_register_and_bond_skips_what_is_done(monkeypatch):
+    from eth_account import Account
+    key = "0x" + "11" * 32
+    me = Account.from_key(key).address
+    # Already registered to the signer, allowance enough: the bond only.
+    client, steps = _real_client(monkeypatch, {
+        "token": TOKEN18, "amount": 5 * 10 ** 17, "value": 100, "approve": False},
+        author=me)
+    out = await client.register_and_bond(key, "ab" * 32, token=TOKEN18)
+    assert out["success"] and steps == ["write"]
+    # Already bonded: nothing at all.
+    client, steps = _real_client(monkeypatch, {
+        "already_bonded": True, "token": TOKEN, "amount": 0, "value": 100}, author=me)
+    out = await client.register_and_bond(key, "ab" * 32)
+    assert out["success"] and out["note"] == "already bonded" and steps == []
+
+
+async def test_register_and_bond_refuses_a_plan_error(monkeypatch):
+    client, steps = _real_client(monkeypatch, {
+        "error": "name the index token to bond in (`token`): you hold several",
+        "index_tokens": [TOKEN, TOKEN18]})
+    out = await client.register_and_bond("0x" + "11" * 32, "ab" * 32)
+    assert not out["success"] and out["step"] == "bond"
+    assert out["index_tokens"] == [TOKEN, TOKEN18] and steps == ["write"]
+
+
+def test_bond_reverts_read_as_reasons():
+    """ToolBond f297209: DustAmount for a deposit worth under one value base
+    unit, NotInIndex only for a token outside the index; by name or by the
+    custom error's selector, as web3 reports it."""
+    from eth_utils import keccak
+
+    from atn.runtime.tool_bond import bond_error
+    assert "DustAmount" in bond_error("DustAmount") and "bond more" in bond_error("DustAmount")
+    sel = "0x" + keccak(text="DustAmount()")[:4].hex()
+    assert "bond more" in bond_error(f"would revert: ('{sel}', '{sel}')")
+    sel = "0x" + keccak(text="NotInIndex()")[:4].hex()
+    assert "not in the value index" in bond_error(f"execution reverted {sel}")
+    assert bond_error("out of gas") == "out of gas"
+
+
+async def test_bounty_payout_uses_the_rounds_token(monkeypatch):
+    """A round's bounty parts are owed in roundBounty's token (the bond's
+    token when the round started finalizing), and paid by payOut."""
+    from atn.runtime.review_batch import ReviewBondClient
+    house, token = "0x" + "ab" * 20, "0x" + "c6" * 20
+
+    class Fn:
+        def __init__(self, value):
+            self.value = value
+
+        def call(self):
+            return self.value
+
+    class Bond:
+        class functions:
+            @staticmethod
+            def householdOf(epoch, agent):
+                return Fn(house)
+
+            @staticmethod
+            def roundBounty(digest, epoch):
+                return Fn((5, 6, 7, 8, token))
+
+            @staticmethod
+            def owed(h, t):
+                assert (h, t) == (house, token)
+                return Fn(42)
+
+            @staticmethod
+            def payOut(h, t):
+                return ("payOut", h, t)
+
+    client = ReviewBondClient(None)
+    sent = []
+
+    async def read(fn):
+        return fn(Bond, None)
+
+    async def write(key, build, gas_floor=300_000):
+        sent.append(build(Bond, None, None))
+        return {"success": True, "tx_hash": "0xpay"}
+    monkeypatch.setattr(client, "_read", read)
+    monkeypatch.setattr(client, "_write", write)
+    out = await client.pay_out_bounty("0x" + "11" * 32, "ab" * 32, 1, "0x" + "cd" * 20)
+    assert out["success"] and out["amount"] == 42 and out["token"] == token
+    assert sent == [("payOut", house, token)]
+
+
+def test_bond_amount_covers_the_minimum_value():
+    """The fewest base units whose value (amount x parity / 1e30) reaches
+    a target: 100 value units in a 6-decimal token at 1e30 is 100 base
+    units; in an 18-decimal token at parity 2e18, just enough and no more."""
+    from atn.runtime.tool_bond import _amount_for_value
+    assert _amount_for_value(100_000_000, 10 ** 30) == 100_000_000
+    a = _amount_for_value(100_000_000, 2 * 10 ** 18)
+    assert a * 2 * 10 ** 18 // 10 ** 30 >= 100_000_000
+    assert (a - 1) * 2 * 10 ** 18 // 10 ** 30 < 100_000_000
+    assert _amount_for_value(7, 3 * 10 ** 29) == 24   # ceil(70 / 3)

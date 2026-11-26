@@ -8,8 +8,8 @@ the owner connects a wallet in the app and does the rest (bind, register,
 delegate, publish, adopt, claim, buy a service).
 
 The owner's wallet is a hardhat account (``MANUAL_OWNER_INDEX``, default #5;
-its key is printed, local chain only). It holds genesis REP, test
-stablecoin and test ETH. Add the chain to the wallet: RPC
+its key is printed, local chain only). It holds genesis REP, both test
+index tokens and test ETH. Add the chain to the wallet: RPC
 http://127.0.0.1:8545, chain id 31337.
 
 Run:
@@ -74,8 +74,9 @@ async def amain() -> int:
     s0.log(f"run dir {run}")
     procs = s0.Procs()
     try:
+        s0.dao_workdir()   # trustless-contracts is read only: a working copy
         procs.start("hardhat", ["npx.cmd" if os.name == "nt" else "npx", "hardhat", "node",
-                                "--port", str(s0.RPC_PORT)], cwd=s0.DAO_DIR, env=s0.base_env(),
+                                "--port", str(s0.RPC_PORT)], cwd=s0.DAO_WORK, env=s0.base_env(),
                     log_path=run / "hardhat.log")
         w3, accts = s0.w3_and_accounts()
         s0.wait_for(lambda: w3.is_connected() and w3.eth.chain_id == s0.CHAIN_ID, 120, "hardhat")
@@ -83,11 +84,7 @@ async def amain() -> int:
         w3.provider.make_request("evm_setIntervalMining", [1000])
         deployer, scripted = accts[0], accts[1:1 + SCRIPTED]
         me = accts[OWNER_INDEX]
-        usdc_addr = s0.deploy_test_usdc(w3, deployer)
-        usdc = w3.eth.contract(address=usdc_addr,
-                               abi=s0.artifact("test/TestToken6.sol/TestToken6.json")["abi"])
-        for o in scripted + [me]:
-            s0.send(w3, deployer, usdc.functions.transfer(o.address, s0.USDC_PER_OWNER))
+        tokens = s0.deploy_index_tokens(w3, deployer, scripted + [me])
 
         relay_dir = run / "relay"
         relay_dir.mkdir()
@@ -103,7 +100,7 @@ async def amain() -> int:
         procs.stop("relay-probe")
         bootstrap = s0.seed_addr(addr.rsplit("/p2p/", 1)[1])
 
-        j = s0.deploy_jurisdiction(run, usdc_addr, [o.address for o in scripted + [me]],
+        j = s0.deploy_jurisdiction(run, tokens, [o.address for o in scripted + [me]],
                                    bootstrap)
         jkey = f"{s0.CHAIN_ID}:{j['dao']['governor'].lower()}"
         procs.start("relay", relay_args + ["--jurisdiction", jkey], cwd=REPO,
@@ -119,14 +116,14 @@ async def amain() -> int:
             await h.client.connect()
             s0.log(f"{h.name} up on :{h.ws_port}")
         for h in hs:
-            await s0.onboard(h, j, w3, usdc)
+            await s0.onboard(h, j, w3, tokens)
 
         info = {
             "app_daemon": f"ws://127.0.0.1:{OWNER_WS_PORT}",
             "wallet_network": {"rpc": s0.RPC_URL, "chain_id": s0.CHAIN_ID},
             "owner_wallet": me.address,
             "owner_key_local_only": me.key.hex(),
-            "test_stablecoin": usdc_addr,
+            "index_tokens": {k: t.address for k, t in tokens.items()},
             "jurisdiction": j,
             "your_daemon_log": str(mine.home / "daemon.log"),
         }
@@ -135,8 +132,8 @@ async def amain() -> int:
                f"details in {run / 'manual.json'}")
 
         stop = asyncio.Event()
-        col = asyncio.create_task(s0.collector(run, hs, j, w3, stop))
-        act = s0.Activity(run, hs, j, w3)
+        act = s0.Activity(run, hs, j, w3, tokens)
+        col = asyncio.create_task(s0.collector(run, hs, j, w3, stop, act))
         await act.author()
         await act.adopt()
         s0.PHASES = [(1.0, EPOCH_SECS)]

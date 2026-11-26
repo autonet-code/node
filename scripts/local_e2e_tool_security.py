@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """End-to-end proof that reviews, the review mint and malware verdicts
 compose on a local chain (Decisions 2026-11-09 and 2026-11-10,
-docs/tool_substrate.md; trustless-contracts ToolBond 8dcc1be).
+docs/tool_substrate.md; trustless-contracts ToolBond f297209, in the value
+index's tokens).
 
 Stands up a LOCAL hardhat node with the autonet Substrate plus the
-jurisdiction contracts the rail needs (a Registry holding the charter and
-the treasury, RepToken with ToolBond as slasher, ToolBond with short
-windows; the timelock is an EOA that owns the Registry, so the run can play
-the DAO's proposals, and the deployer anchors as the Substrate's governor),
-then drives the DAEMON code paths against them:
+jurisdiction contracts the rail needs (a Registry holding the charter, the
+value index and the treasury, RepToken with ToolBond as slasher, ToolBond
+with short windows; the DAO's contracts are EIP-1167 clones initialized by
+the deployer; the timelock is an EOA that owns the Registry, so the run can
+play the DAO's proposals, and the deployer anchors as the Substrate's
+governor). Money is USD6, one 6-decimal index token at parity 1e30 (a base
+unit is a value unit). Then it drives the DAEMON code paths against them:
 
   - publish: ``register_tool`` + ``publish_tool`` (registerTool, approve,
-    bond); a bounty on one tool (``addBounty``);
+    bond in USD6); a bounty on one tool (``addBounty``);
   - review: ``attest_tools`` and ``vet_tool`` queue reviews with the four
     fixed fields (correctness, simplicity, novelty, malware) and charter
     axes into each reviewer's ToolBond epoch batch (no stake); a malware
@@ -20,32 +23,34 @@ then drives the DAEMON code paths against them:
     refuses its commit (NoWeight);
   - driver: ``ReviewDriver.tick`` commits at the epoch's close, reveals
     after the anchor, finalizes after the reveal window and claims (REP by
-    accuracy, the bounty to the households); a malware-yes round settles
-    like any other (a slashed stake goes to the treasury);
+    accuracy, the bounty owed to the households and paid out by payOut); a
+    malware-yes round settles like any other (a slashed stake is owed to the
+    treasury and paid by payTreasury);
   - withdraw: refused while a tool is caught before conclusion
     (MalwareSuspected), allowed for what is left once the verdict settled;
   - close: ``read_voice_state`` (ToolBond logs pinned to the anchor) feeds
     ``federated_epoch_close``: each concluding tool's share of the pool by
     the REP behind its reviews, 40% to its reviewers by accuracy, the
     author side by V x C x S kept by N; a malware verdict leaves the author
-    side unpaid, recorded in ATN (``malware_unpaid``) and carried over, and
-    prunes the tool; one concluded leaf per tool in the anchor's
-    agentMintRoot, claimed through ``AuthoritativeChainSubmitter``;
+    side unpaid, recorded per token (``malware_unpaid``) and carried over,
+    and prunes the tool; one concluded leaf per tool in the anchor's
+    claimRoot, claimed and withdrawn through ``AuthoritativeChainSubmitter``;
   - verdicts: ``VerdictSubmitter`` concludes each tool on ToolBond from the
     anchored leaf, which settles a malware verdict at once (the stake's
-    share to the treasury, the author household's REP burned by that share
-    x authorSlashBps); no appeal window;
+    share owed to the treasury, the author household's REP burned by that
+    share x authorSlashBps); no appeal window;
   - the DAO's word: the timelock designates a clean tool malware (the whole
-    stake to the treasury, no REP burn) and clears a reviewers' verdict
-    (ToolBond gives the burned REP back); the next close prunes the one and
-    un-prunes the other and mints nothing for the cleared tool, whose
-    stake and recorded unpaid amount the treasury pays by
+    stake owed to the treasury, no REP burn) and clears a reviewers'
+    verdict (ToolBond gives the burned REP back); the next close prunes the
+    one and un-prunes the other and pays nothing for the cleared tool,
+    whose stake and recorded unpaid amount the treasury pays by
     ``Registry.transferERC20``.
 
 The jurisdiction contracts are NOT vendored: they are copied at run time
 from a trustless-contracts checkout (env TRUSTLESS_CONTRACTS_DIR, default
 C:/code/dao/trustless-contracts) into a scratch hardhat project under
-build/ (gitignored), compiled there with Substrate.sol from this repo. The
+build/ (gitignored), compiled there with Substrate.sol and the test tokens
+(contracts/test/IndexTokenMocks.sol) from this repo. The
 checkout itself is never written. HOME, USERPROFILE and KEYSTORE_DIR point
 at a temp dir for the whole run.
 
@@ -99,24 +104,26 @@ HH_TIMELOCK_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78
 HH_TREASURY_PK = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"  # #2
 
 E18 = 10 ** 18
-ATN = 10 ** 6            # ATN has 6 decimals
-MIN_STAKE = 100 * ATN
-PARAMS = {  # ToolBond.Params (8dcc1be), short windows for a local run
+U6 = 10 ** 6             # one USD6 (6 decimals, parity 1e30): one value unit
+USD6_PARITY = 10 ** 30
+MIN_STAKE = 100 * U6     # a value: 100 units of the index
+PARAMS = {  # ToolBond.Params (f297209), short windows for a local run
     "minStake": MIN_STAKE, "revealWindow": 300, "degradeBps": 1000,
     "authorSlashBps": 10_000, "unbondDelay": 120, "reviewerShareBps": 4000,
 }
 SERVICE_FEE_BPS = 250  # Substrate default
 FEE_TREASURY_BPS = 5000
 CHARTER_KEY = "jurisdiction.autonet.charter"
-BOUNTY = 10 * ATN
-PAYMENT = 400 * ATN     # per epoch: 10 ATN of fees, 5 ATN burned
-TOP_UP = 1 * ATN
+BOUNTY = 10 * U6
+PAYMENT = 400 * U6      # per epoch: 10 USD6 of fees, 5 to the pool
+POOL_PER_PAYMENT = PAYMENT * SERVICE_FEE_BPS // 10_000 // 2
+TOP_UP = 1 * U6
 
 # REP at the genesis anchor; rev-3's REP arrives after it (task: the
 # daemon reads REP at the epoch's snapshot, as ToolBond does).
 REP_GRANTS = {"author-1": 100, "rev-1": 300, "rev-2": 200}
 REP_LATE = {"rev-3": 50}
-ATN_GRANTS = {"author-1": 1000, "rev-1": 200, "rev-2": 200, "rev-3": 50}
+USD6_GRANTS = {"author-1": 1000, "rev-1": 200, "rev-2": 200, "rev-3": 50}
 
 # The reviews of epoch 1 (rev-1 300 REP, rev-2 200 REP). rev-1 flags both
 # lower-case tools as malware, so 60% of the reviewing REP says yes.
@@ -137,7 +144,7 @@ REV2 = {
 }
 
 DAO_SOURCES = ["ToolBond.sol", "RepToken.sol", "Registry.sol", "IAdminToken.sol",
-               "IJurisdictionData.sol"]
+               "IJurisdictionData.sol", "CloneMaker.sol"]
 
 HARDHAT_CONFIG = """module.exports = {
   solidity: { version: "0.8.26", settings: { evmVersion: "cancun",
@@ -245,6 +252,7 @@ def build_scratch_project() -> Path:
     for name in DAO_SOURCES:
         shutil.copy2(DAO_DIR / "contracts" / name, src / name)
     shutil.copy2(REPO / "contracts" / "core" / "Substrate.sol", src / "Substrate.sol")
+    shutil.copy2(REPO / "contracts" / "test" / "IndexTokenMocks.sol", src / "IndexTokenMocks.sol")
     (SCRATCH / "hardhat.config.js").write_text(HARDHAT_CONFIG, encoding="utf-8")
     pkg = SCRATCH / "package.json"
     if not pkg.exists():
@@ -386,6 +394,17 @@ def deploy(w3, name: str, args: list, pk: str = HH_DEPLOYER_PK,
     factory = w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"])
     rcpt = send(w3, factory.constructor(*args), pk, gas=16_000_000)
     return w3.eth.contract(address=rcpt.contractAddress, abi=art["abi"])
+
+
+def deploy_clone(w3, maker, name: str, init_args: list, pk: str = HH_DEPLOYER_PK):
+    """A DAO contract as AutonetSetup makes it: an EIP-1167 clone of a
+    deployed implementation, initialized by ``pk`` (RepToken's admin)."""
+    impl = deploy(w3, name, [], pk)
+    rcpt = send(w3, maker.functions.clone(impl.address), pk)
+    addr = maker.events.Cloned().process_receipt(rcpt)[0]["args"]["instance"]
+    c = w3.eth.contract(address=addr, abi=impl.abi)
+    send(w3, c.functions.initialize(*init_args), pk, gas=6_000_000)
+    return c
 
 
 def fund_eth(w3, to: str, eth: int = 5) -> None:
@@ -530,23 +549,32 @@ async def amain() -> int:
         timelock = Account.from_key(HH_TIMELOCK_PK).address
         treasury = Account.from_key(HH_TREASURY_PK).address
         fund_eth(w3, timelock)
-        # The timelock owns the Registry (the treasury), as on a live network.
-        registry = deploy(w3, "Registry", [timelock, "0x" + "00" * 20])
+        maker = deploy(w3, "CloneMaker", [])
+        # The timelock owns the Registry (the treasury and the value index),
+        # as on a live network.
+        registry = deploy_clone(w3, maker, "Registry", [timelock, "0x" + "00" * 20])
         send(w3, registry.functions.editRegistry(CHARTER_KEY, DEFAULT_CHARTER.text),
              HH_TIMELOCK_PK)
-        rep = deploy(w3, "RepToken", ["Autonet REP", "REP", registry.address, timelock,
-                                      [], []])
-        # (treasury, vaultMinter, governor): the deployer is the governor,
-        # so it anchors directly (an EOA governor, as on a dev network), and
-        # the vault minter, so it hands out ATN.
-        substrate = deploy(w3, "Substrate", [treasury, deployer, deployer, "0x" + "00" * 20,
-                                             bytes(32), "Test ATN", "REPATN",
-                                             SERVICE_FEE_BPS, FEE_TREASURY_BPS])
-        bond = deploy(w3, "ToolBond", [substrate.address, rep.address, registry.address,
-                                       timelock, tuple(PARAMS.values())])
+        rep = deploy_clone(w3, maker, "RepToken", ["Autonet REP", "REP", registry.address,
+                                                   timelock, [], []])
+        usd = deploy(w3, "MockIndexToken", ["USD 6", "USD6", 6], sol="IndexTokenMocks")
+        send(w3, registry.functions.editRegistry(
+            f"jurisdiction.parity.{usd.address.lower()}", str(USD6_PARITY)), HH_TIMELOCK_PK)
+        # (treasury, governor, anchorer, registry, fee, treasury share): the
+        # deployer is the governor, so it anchors directly (an EOA governor,
+        # as on a dev network).
+        substrate = deploy(w3, "Substrate", [treasury, deployer, "0x" + "00" * 20,
+                                             registry.address, SERVICE_FEE_BPS,
+                                             FEE_TREASURY_BPS])
+        bond = deploy_clone(w3, maker, "ToolBond", [substrate.address, rep.address,
+                                                    registry.address, timelock,
+                                                    tuple(PARAMS.values())])
         send(w3, rep.functions.setSlasher(bond.address, True), HH_DEPLOYER_PK)
         addrs = {"substrate": substrate.address, "rep": rep.address,
-                 "tool_bond": bond.address, "registry": registry.address}
+                 "tool_bond": bond.address, "registry": registry.address,
+                 "usd6": usd.address}
+        check(substrate.functions.acceptsToken(usd.address).call(),
+              "USD6 is in the value index (parity 1e30)")
         check(rep.functions.slashers(bond.address).call(), "ToolBond is a RepToken slasher")
         check("appealPeriod" not in {f["name"] for f in bond.abi if f.get("type") == "function"},
               "no appeal period: the DAO clears or designates at any time")
@@ -564,7 +592,7 @@ async def amain() -> int:
         return finish()
 
     # ------------------------------------------------------------------
-    s2 = board.stage(2, "fleet (two daemons, self-owned agents on Substrate, REP + ATN)")
+    s2 = board.stage(2, "fleet (two daemons, self-owned agents on Substrate, REP + USD6)")
     log("Stage 2: fleet")
     rt_a = rt_b = None
     agents: Dict[str, Any] = {}
@@ -587,10 +615,8 @@ async def amain() -> int:
             defn.identity.registered_on_chain = True
             if aid in REP_GRANTS:
                 send(w3, rep.functions.mint(addr, REP_GRANTS[aid] * E18), HH_DEPLOYER_PK)
-            send(w3, substrate.functions.mintFromVault(addr, ATN_GRANTS[aid] * ATN),
-                 HH_DEPLOYER_PK)
-        send(w3, substrate.functions.mintFromVault(deployer, 3 * PAYMENT + BOUNTY),
-             HH_DEPLOYER_PK)
+            send(w3, usd.functions.mint(addr, USD6_GRANTS[aid] * U6), HH_DEPLOYER_PK)
+        send(w3, usd.functions.mint(deployer, 3 * PAYMENT + BOUNTY), HH_DEPLOYER_PK)
         blobs_a = rt_a.tool_store._blob_store()
         blobs_b = rt_b.tool_store._blob_store()
 
@@ -619,12 +645,14 @@ async def amain() -> int:
     def rep_of(aid: str) -> int:
         return rep.functions.balanceOf(agents[aid]).call()
 
-    def atn_of(aid: str) -> int:
-        return substrate.functions.balanceOf(agents[aid]).call()
+    def usd_of(aid: str) -> int:
+        return usd.functions.balanceOf(agents[aid]).call()
 
     def pay_fees() -> None:
-        """Service volume: the deployer pays author-1, burning half the fee."""
-        send(w3, substrate.functions.payForService(agents["author-1"], PAYMENT,
+        """Service volume: the deployer pays author-1 in USD6; half the fee
+        is the tool share, the pool of the next close."""
+        send(w3, usd.functions.approve(substrate.address, PAYMENT), HH_DEPLOYER_PK)
+        send(w3, substrate.functions.payForService(usd.address, agents["author-1"], PAYMENT,
                                                    keccak(text=f"svc-{time.time()}")),
              HH_DEPLOYER_PK)
 
@@ -647,12 +675,13 @@ async def amain() -> int:
                                      rt_a, caller_id="author-1")
             if "error" in pub:
                 raise RuntimeError(f"publish_tool: {pub}")
-            check(pub.get("published") is True and pub["stake"]["amount"] == MIN_STAKE,
-                  f"{name}: published with a {MIN_STAKE // ATN} ATN bond "
+            check(pub.get("published") is True and pub["stake"]["amount"] == MIN_STAKE
+                  and pub["stake"]["token"] == usd.address.lower(),
+                  f"{name}: published with a {MIN_STAKE // U6} USD6 bond "
                   f"({len(pub['stake']['txs'])} txs)")
             return pub["digest"]
 
-        atn_before = atn_of("author-1")
+        usd_before = usd_of("author-1")
         tools["clean"] = await publish("upper_case", CLEAN_CODE, {
             "statement": "Upper-cases a string; no comparable tool exists yet.",
             "prior_art": []})
@@ -666,12 +695,36 @@ async def amain() -> int:
             check(substrate.functions.toolAuthor(b32).call() == agents["author-1"],
                   f"{d[:8]}: Substrate.toolAuthor = author-1")
             check(bond.functions.isBonded(b32).call(), f"{d[:8]}: isBonded")
-        check(atn_before - atn_of("author-1") == 3 * MIN_STAKE, "author ATN down by three bonds")
+        check(usd_before - usd_of("author-1") == 3 * MIN_STAKE, "author USD6 down by three bonds")
         check((await ToolBondGate(rt_b).is_bonded(tools["clean"]))[0], "daemon gate: is_bonded")
-        send(w3, substrate.functions.approve(bond.address, BOUNTY), HH_DEPLOYER_PK)
+        send(w3, usd.functions.approve(bond.address, BOUNTY), HH_DEPLOYER_PK)
         send(w3, bond.functions.addBounty(bytes.fromhex(tools["clean"]), BOUNTY), HH_DEPLOYER_PK)
         check(bond.functions.bonds(bytes.fromhex(tools["clean"])).call()[4] == BOUNTY,
-              f"a {BOUNTY // ATN} ATN bounty on upper_case")
+              f"a {BOUNTY // U6} USD6 bounty on upper_case")
+        # A deposit worth less than one value base unit: ToolBond reverts
+        # DustAmount (not NotInIndex), and the daemon says why before sending.
+        dust_tok = deploy(w3, "MockIndexToken", ["Dust 18", "D18", 18], sol="IndexTokenMocks")
+        send(w3, registry.functions.editRegistry(
+            f"jurisdiction.parity.{dust_tok.address.lower()}", str(10 ** 12)), HH_TIMELOCK_PK)
+        reg = await execute_tool("register_tool", {
+            "name": "dust_case", "description": "dust bond", "input_schema": SCHEMA,
+            "code": CLEAN_CODE + "# dust\n",
+            "novelty": {"statement": "No comparable tool exists: a dust probe.",
+                        "prior_art": []}}, rt_a, caller_id="author-1")
+        send(w3, dust_tok.functions.mint(agents["author-1"], 10), HH_DEPLOYER_PK)
+        dust = await execute_tool("publish_tool", {"digest": reg["digest"],
+                                                   "token": dust_tok.address, "amount": "1"},
+                                  rt_a, caller_id="author-1")
+        check("DustAmount" in str(dust.get("error"))
+              and not rt_a.tool_store.get(reg["digest"]).published,
+              "publish_tool refuses the dust bond with the reason; the tool stays private")
+        from atn.review_driver import reverted_with as _rw
+        why = reverts(bond.functions.bond(bytes.fromhex(reg["digest"]), dust_tok.address, 1),
+                      agents["author-1"])
+        check(_rw({"error": why}, "DustAmount") and not _rw({"error": why}, "NotInIndex"),
+              f"and ToolBond would revert DustAmount, not NotInIndex ({why[:60]})")
+        send(w3, registry.functions.editRegistry(
+            f"jurisdiction.parity.{dust_tok.address.lower()}", ""), HH_TIMELOCK_PK)
         for k, d in tools.items():
             s3.note(k, d[:16] + "...")
         s3.status = "PASS"
@@ -770,7 +823,7 @@ async def amain() -> int:
         drivers = [ReviewDriver(rt_a), ReviewDriver(rt_b)]
         idle = await tick_all(drivers)
         check(idle.get("committed", 0) == 0, "no commit before the epoch's close fires")
-        atn0 = {a: atn_of(a) for a in agents}
+        usd0 = {a: usd_of(a) for a in agents}
         for d in drivers:
             d.on_local_close()
         got = await tick_all(drivers)
@@ -779,7 +832,7 @@ async def amain() -> int:
             c = bond.functions.commits(1, agents[aid]).call()
             check(c[0] != b"\x00" * 32 and c[1] == w * E18 and not c[2],
                   f"{aid}: commitment on chain, weight {w} REP (at the snapshot), hidden")
-            check(atn_of(aid) == atn0[aid], f"{aid}: no ATN moved (no stake)")
+            check(usd_of(aid) == usd0[aid], f"{aid}: no token moved (no stake)")
         early = await tick_all(drivers)
         check(early.get("revealed", 0) == 0, "no reveal before the anchor")
         anchor_epoch(w3, substrate, "e1")
@@ -815,7 +868,7 @@ async def amain() -> int:
         supply0 = rep.functions.totalSupply().call()
         credit0 = rep.functions.slashedCredit(bond.address).call()
         rep0 = {a: rep_of(a) for a in agents}
-        atn0 = {a: atn_of(a) for a in agents}
+        usd0 = {a: usd_of(a) for a in agents}
         advance(w3, PARAMS["revealWindow"] + 1)
         got = await tick_all(drivers, ticks=2)
         for k, d in tools.items():
@@ -836,13 +889,16 @@ async def amain() -> int:
         bounty = {str(e["args"]["household"]): int(e["args"]["amount"]) for e in paid}
         check(set(bounty) == {agents["rev-1"], agents["rev-2"]}
               and BOUNTY - 2 <= sum(bounty.values()) <= BOUNTY,
-              f"the bounty paid out to both households "
-              f"({ {k[:8]: v / ATN for k, v in bounty.items()} } ATN)")
+              f"the bounty owed to both households "
+              f"({ {k[:8]: v / U6 for k, v in bounty.items()} } USD6)")
         check(abs(bounty[agents["rev-1"]] * 200 - bounty[agents["rev-2"]] * 300) <= 300 * 2,
               "split by REP x accuracy (300:200)")
+        check(bond.functions.roundBounty(bytes.fromhex(tools["clean"]), 1).call()[4]
+              == usd.address, "the round's bounty parts are in USD6 (roundBounty's token)")
         for aid in ("rev-1", "rev-2"):
-            check(atn_of(aid) - atn0[aid] == bounty[agents[aid]],
-                  f"{aid} received its bounty part")
+            check(usd_of(aid) - usd0[aid] == bounty[agents[aid]]
+                  and bond.functions.owed(agents[aid], usd.address).call() == 0,
+                  f"{aid} received its bounty part (its daemon sent payOut)")
         check(bond.functions.bonds(bytes.fromhex(tools["clean"])).call()[4] <= 2,
               "the tool's bounty is spent (dust at most)")
         d1 = rep_of("rev-1") - rep0["rev-1"]
@@ -885,8 +941,8 @@ async def amain() -> int:
         r = await client_a.withdraw(keys["author-1"], mal_a)
         check(reverted_with(r, "MalwareSuspected"),
               "withdraw reverts MalwareSuspected (60% of its REP says malware)")
-        send(w3, substrate.functions.approve(bond.address, TOP_UP), keys["author-1"])
-        send(w3, bond.functions.bond(bytes.fromhex(mal_a), TOP_UP), keys["author-1"])
+        send(w3, usd.functions.approve(bond.address, TOP_UP), keys["author-1"])
+        send(w3, bond.functions.bond(bytes.fromhex(mal_a), usd.address, TOP_UP), keys["author-1"])
         check(bond.functions.isBonded(bytes.fromhex(mal_a)).call(),
               "a top-up cancels the unbond: bonded again")
         s8.status = "PASS"
@@ -900,16 +956,17 @@ async def amain() -> int:
     resolver = DictResolver()
     close1: Dict[str, Any] = {}
     e3 = ""
+    U = usd.address.lower()
     try:
         from nodes.common.authoritative_encoding import (
-            encode_agent_mint_blob, encode_authoritative_payload, payload_hash)
+            encode_authoritative_payload, encode_claims_blob, payload_hash)
         from nodes.common.authoritative_submitter import (
             AuthoritativeChainSubmitter, AuthoritativeSubmitterConfig)
         from nodes.common.canonical_ordering import canonical_order
         from nodes.common.event_gossip import EventBatch, Keypair
         from nodes.common.federated_reconcile import UNMINTED, federated_epoch_close
         from nodes.common.library.tool_manifest import registration_event
-        from nodes.common.mint_merkle import mint_merkle_root
+        from nodes.common.mint_merkle import claim_merkle_root
         from nodes.common.voice_state import read_voice_state
 
         anchor_epoch(w3, substrate, "e2")
@@ -921,9 +978,12 @@ async def amain() -> int:
         check(set(snap["tools"]) == set(tools.values()), "snapshot pinned to e2 rates all three")
         check(set(snap["rounds"]) == set(tools.values()), "all three rounds in the e1..e2 window")
         check(tuple(state["mint_gate"]) == (100, 50), "gate: 1% of REP, 0.5% of households")
-        pool = float(state["emission_pool"])
-        check(close_to(pool, PAYMENT * SERVICE_FEE_BPS / 10_000 / 2 / ATN, 1e-9),
-              f"pool = epoch 2's burned fees = {pool} ATN")
+        check(snap["bonds"][tools["mal_a"]]["value"] == MIN_STAKE + TOP_UP,
+              "the snapshot's bonds carry the value posted (lower_case: 101 units)")
+        window = {str(t).lower(): int(v) for t, v in state["tool_share_window"].items()}
+        check(window == {U: POOL_PER_PAYMENT},
+              f"pool = epoch 2's tool share = {POOL_PER_PAYMENT / U6:g} USD6")
+        pool = POOL_PER_PAYMENT   # value units too (parity 1e30)
 
         author = agents["author-1"].lower()
         r1, r2 = agents["rev-1"].lower(), agents["rev-2"].lower()
@@ -942,9 +1002,9 @@ async def amain() -> int:
                 for d in tools.values()]
         canon = canonical_order(batches(regs, Keypair.generate()))
         close1 = federated_epoch_close(
-            canon, emission_pool=pool, agent_owner_map=state["owner_map"],
-            rep_shares=state["rep_shares"], review_snapshot=snap,
-            mint_gate=tuple(state["mint_gate"]))
+            canon, tool_share_window=state["tool_share_window"], parity=state["parity"],
+            agent_owner_map=state["owner_map"], rep_shares=state["rep_shares"],
+            review_snapshot=snap, mint_gate=tuple(state["mint_gate"]))
         tm = close1["tool_mint"]
         check(close1["concluded"] == {tools["clean"]: 0, tools["mal_a"]: 6000,
                                       tools["mal_b"]: 6000},
@@ -959,11 +1019,11 @@ async def amain() -> int:
               f"upper_case score V x C x S = {c['score']:.6f} "
               f"(V {want_v:.3f}, C {want_c:.3f}, S {want_s:.3f})")
         # Each concluding tool's share of the pool is its weight (the REP
-        # behind its reviews) over all of theirs.
+        # behind its reviews) over all of theirs; tool_mint is in value units.
         share = pool * c["weight"] / sum(tm[d]["weight"] for d in tools.values())
-        check(close_to(c["author_mint"], share * 0.6 * want_score * want_n, 1e-6),
-              f"author side x N {want_n:.2f}: {c['author_mint']:.6f} ATN of the tool's "
-              f"{share:.6f}")
+        check(abs(c["author_mint"] - share * 0.6 * want_score * want_n) <= 3,
+              f"author side x N {want_n:.2f}: {c['author_mint'] / U6:.6f} units of the tool's "
+              f"{share / U6:.6f}")
         check(c["reviewers"] == 2, "upper_case pays both reviewers")
         for k in ("mal_a", "mal_b"):
             m = tm[tools[k]]
@@ -974,40 +1034,38 @@ async def amain() -> int:
                   and unpaid["amounts"] == (close1["malware_unpaid"].get(tools[k]) or {})
                   .get("amounts", {}),
                   f"{k}: what its author side would have paid is recorded "
-                  f"({sum(unpaid['amounts'].values()):.6f} ATN)")
+                  f"({unpaid['amounts']})")
         # title_case would pay its author 60% of its share x V x C x S x N:
-        # fixed in ATN now, recorded for a proposal that clears the verdict.
+        # fixed per token now, recorded for a proposal that clears the verdict.
         share_b = pool * tm[tools["mal_b"]]["weight"] / sum(tm[d]["weight"]
                                                             for d in tools.values())
         score_b = hundredths_mean([(300, 0.2), (200, 0.8)]) * 0.5 * (
             0.5 + 0.5 * hundredths_mean([(300, 0.5), (200, 0.6)]))
         n_b = hundredths_mean([(300, 0.4), (200, 0.5)])
         unpaid_b = close1["malware_unpaid"][tools["mal_b"]]["amounts"]
+        unpaid_b_usd = int(unpaid_b.get(author, {}).get("tokens", {}).get(U, 0))
         check(set(unpaid_b) == {author}
-              and close_to(unpaid_b[author], share_b * 0.6 * score_b * n_b, 1e-6)
-              and close_to(tm[tools["mal_b"]]["unpaid"], unpaid_b[author], 1e-6),
-              f"title_case: {unpaid_b[author]:.6f} ATN recorded unpaid for its author")
+              and abs(unpaid_b_usd - share_b * 0.6 * score_b * n_b) <= 3
+              and abs(tm[tools["mal_b"]]["unpaid"] - unpaid_b[author]["value"]) <= 1,
+              f"title_case: {unpaid_b_usd / U6:.6f} USD6 recorded unpaid for its author")
         check(tools["mal_a"] not in close1["malware_unpaid"],
               "lower_case: nothing to record (its correctness mean is below 0)")
         check(close1["pruned"] == sorted([tools["mal_a"], tools["mal_b"]])
               and close1["tool_rounds"]["pruned"] == close1["pruned"],
               "both malware tools are pruned (carried in the state)")
-        am = close1["agent_mint"]
-        check(set(am) == {author, r1, r2}, "mint: the author and both reviewers")
-        minted = sum(am.values())
-        carry = close1["tool_rounds"]["pool_carry"]
-        minted1_raw = sum(round(v * ATN) for v in am.values())
-        pool1_raw = round(pool * ATN)
-        check(minted <= pool and carry == pool1_raw - minted1_raw
-              and carry >= round(unpaid_b[author] * ATN),
-              f"minted {minted:.6f} of {pool}; {carry / ATN:.6f} ATN carried over, "
+        claims = close1["claims"]
+        check(set(claims) == {author, r1, r2} and UNMINTED not in claims,
+              "claims: the author and both reviewers")
+        paid1 = sum(int(v["tokens"].get(U, 0)) for v in claims.values())
+        carry = int(close1["tool_rounds"]["pool_carry"].get(U, 0))
+        check(paid1 + carry == pool and carry >= unpaid_b_usd,
+              f"paid {paid1 / U6:.6f} of {pool / U6:g}; {carry / U6:.6f} USD6 carried over, "
               f"the unpaid author side in it")
-        check(UNMINTED not in am, "no unminted sentinel in the claim map")
 
-        # Anchor e3 with the close's mint tree and concluded leaves.
+        # Anchor e3 with the close's claim tree and concluded leaves.
         e3 = "e3"
         concluded = close1["concluded"]
-        blob = encode_agent_mint_blob(am, concluded=concluded)
+        blob = encode_claims_blob(claims, concluded=concluded)
         cid = resolver.put(blob)
         prev_root = substrate.functions.latestEpochRoot().call().hex()
         payload = encode_authoritative_payload(
@@ -1015,20 +1073,21 @@ async def amain() -> int:
             epoch_root_hex=close1["epoch_root"], prev_epoch_root_hex=prev_root)
         idx3 = anchor_epoch(w3, substrate, e3, epoch_root=bytes.fromhex(close1["epoch_root"]),
                             cid=cid, payload_hash=payload_hash(payload),
-                            mint_root=mint_merkle_root(am, concluded=concluded))
-        check(idx3 == 3, "anchored e3 with the close's agentMintRoot")
+                            mint_root=claim_merkle_root(claims, concluded=concluded))
+        check(idx3 == 3, "anchored e3 with the close's claimRoot")
         sub_abi = artifact("Substrate")["abi"]
         for aid in ("author-1", "rev-1", "rev-2"):
-            before = atn_of(aid)
+            before = usd_of(aid)
+            want = int(claims[agents[aid].lower()]["tokens"].get(U, 0))
             res = AuthoritativeChainSubmitter(
                 agents[aid].lower(), agents[aid], resolver,
                 AuthoritativeSubmitterConfig(substrate_address=substrate.address,
                                              rpc_url=RPC_URL, chain_id=CHAIN_ID,
                                              private_key=keys[aid]),
                 web3=w3, substrate_abi=sub_abi).submit_for_epoch(e3)
-            check(res.success and atn_of(aid) - before == res.contribution_scaled > 0,
-                  f"{aid} claims {res.contribution_scaled / ATN:.6f} ATN against e3")
-        s9.note("tool_mint", {k: round(tm[d]["mint"], 6) for k, d in tools.items()})
+            check(res.success and usd_of(aid) - before == want > 0,
+                  f"{aid} claims and withdraws {want / U6:.6f} USD6 against e3")
+        s9.note("tool_mint", {k: tm[d]["mint"] for k, d in tools.items()})
         s9.note("score_upper_case", round(c["score"], 6))
         s9.status = "PASS"
     except Exception as e:
@@ -1055,13 +1114,16 @@ async def amain() -> int:
         def bond_stake(k: str) -> int:
             return bond.functions.bonds(bytes.fromhex(tools[k])).call()[1]
 
-        def treasury_atn() -> int:
-            return substrate.functions.balanceOf(registry.address).call()
+        def treasury_owed() -> int:
+            return bond.functions.treasuryOwed(usd.address).call()
+
+        def treasury_usd() -> int:
+            return usd.functions.balanceOf(registry.address).call()
 
         stakes0 = {k: bond_stake(k) for k in tools}
-        check(stakes0["mal_a"] == MIN_STAKE + TOP_UP, f"lower_case bond {stakes0['mal_a'] / ATN:g} ATN")
+        check(stakes0["mal_a"] == MIN_STAKE + TOP_UP, f"lower_case bond {stakes0['mal_a'] / U6:g} USD6")
         rep_author0 = rep_of("author-1")
-        treasury0 = treasury_atn()
+        treasury0, owed0 = treasury_usd(), treasury_owed()
         verdicts = VerdictSubmitter(
             w3=w3, tool_bond_address=bond.address,
             substrate=w3.eth.contract(address=substrate.address, abi=artifact("Substrate")["abi"]),
@@ -1088,7 +1150,7 @@ async def amain() -> int:
             slashed[k] = stakes0[k] * 6 * 10 ** 17 // E18
             check(ev[tools[k]]["by"] == 1 and ev[tools[k]]["bondSlashed"] == slashed[k]
                   and bond_stake(k) == stakes0[k] - slashed[k],
-                  f"{k}: 60% of the stake slashed ({slashed[k] / ATN:g} ATN)")
+                  f"{k}: 60% of the stake slashed ({slashed[k] / U6:g} USD6)")
             want_burn = rep_left * 10_000 // 10_000 * 6 * 10 ** 17 // E18
             burned[k] = rb[tools[k]]
             check(burned[k] == want_burn and v[4] == burned[k]
@@ -1097,8 +1159,13 @@ async def amain() -> int:
                   f"({burned[k] / E18:g} REP)")
             rep_left -= burned[k]
         check(rep_of("author-1") == rep_left, f"author-1 left with {rep_left / E18:g} REP")
-        check(treasury_atn() - treasury0 == slashed["mal_a"] + slashed["mal_b"],
-              "the slashed stakes went to the treasury (the Registry), not the flaggers")
+        check(treasury_usd() == treasury0
+              and treasury_owed() - owed0 == slashed["mal_a"] + slashed["mal_b"],
+              "the verdicts moved no token: the slashed stakes are owed to the treasury")
+        send(w3, bond.functions.payTreasury(usd.address), keys["rev-2"])
+        check(treasury_owed() == 0 and treasury_usd() - treasury0
+              == slashed["mal_a"] + slashed["mal_b"],
+              "payTreasury (anyone) pays them to the treasury (the Registry), not the flaggers")
         check(not any(f.get("name") in ("claimBondShare", "settleMalware", "registerDaoProposal",
                                         "daoOverrule")
                       for f in bond.abi if f.get("type") == "function"),
@@ -1108,16 +1175,16 @@ async def amain() -> int:
         r = await client_a.request_unbond(keys["author-1"], tools["mal_a"])
         check(r.get("success"), "author requests unbond of lower_case after its verdict")
         advance(w3, PARAMS["unbondDelay"] + 1)
-        before = atn_of("author-1")
+        before = usd_of("author-1")
         r = await client_a.withdraw(keys["author-1"], tools["mal_a"])
-        check(r.get("success") and atn_of("author-1") - before == stakes0["mal_a"] - slashed["mal_a"]
+        check(r.get("success") and usd_of("author-1") - before == stakes0["mal_a"] - slashed["mal_a"]
               and bond_stake("mal_a") == 0,
-              f"and withdraws the 40% left ({(stakes0['mal_a'] - slashed['mal_a']) / ATN:g} ATN)")
+              f"and withdraws the 40% left ({(stakes0['mal_a'] - slashed['mal_a']) / U6:g} USD6)")
         got = await tick_all(drivers, ticks=2)
         statuses = {b.status for rt in (rt_a, rt_b) for b in store_for(rt).all()
                     if b.reviews}
         check(statuses == {"settled"}, f"every batch settled ({statuses})")
-        s10.note("slashed", {k: v / ATN for k, v in slashed.items()})
+        s10.note("slashed", {k: v / U6 for k, v in slashed.items()})
         s10.note("burned", {k: v / E18 for k, v in burned.items()})
         s10.status = "PASS"
     except Exception as e:
@@ -1142,13 +1209,14 @@ async def amain() -> int:
 
         # The DAO designates upper_case: the whole stake to the treasury, no burn.
         stake_c = bond_stake("clean")
-        rep_author1, treasury1 = rep_of("author-1"), treasury_atn()
+        rep_author1, owed1 = rep_of("author-1"), treasury_owed()
         send(w3, bond.functions.designate(clean_b), timelock_pk)
         v = bond.functions.verdicts(clean_b).call()
         check(v[1] == 2 and not v[2] and v[3] == E18 and v[4] == 0,
               "upper_case designated by the DAO (by 2, share 100%)")
-        check(bond_stake("clean") == 0 and treasury_atn() - treasury1 == stake_c,
-              f"its whole stake ({stake_c / ATN:g} ATN) went to the treasury")
+        check(bond_stake("clean") == 0 and treasury_owed() - owed1 == stake_c,
+              f"its whole stake ({stake_c / U6:g} USD6) is owed to the treasury")
+        send(w3, bond.functions.payTreasury(usd.address), keys["rev-2"])
         check(rep_of("author-1") == rep_author1, "a designation burns no REP")
 
         # The DAO clears title_case: ToolBond gives back the REP it burned.
@@ -1161,13 +1229,13 @@ async def amain() -> int:
         check(rep_of("author-1") == rep_author1 + burned["mal_b"], "author-1's REP is back up")
         # The same proposal pays the stake back and the recorded unpaid side
         # from the treasury (Registry.transferERC20, the timelock its owner).
-        owed = slashed["mal_b"] + round(unpaid_b[author] * ATN)
-        before, treasury2 = atn_of("author-1"), treasury_atn()
-        send(w3, registry.functions.transferERC20(substrate.address, agents["author-1"], owed),
+        owed = slashed["mal_b"] + unpaid_b_usd
+        before, treasury2 = usd_of("author-1"), treasury_usd()
+        send(w3, registry.functions.transferERC20(usd.address, agents["author-1"], owed),
              timelock_pk)
-        check(atn_of("author-1") - before == owed and treasury2 - treasury_atn() == owed,
-              f"the treasury pays title_case's author {owed / ATN:.6f} ATN (stake "
-              f"{slashed['mal_b'] / ATN:g} + unpaid {unpaid_b[author]:.6f}), no fee")
+        check(usd_of("author-1") - before == owed and treasury2 - treasury_usd() == owed,
+              f"the treasury pays title_case's author {owed / U6:.6f} USD6 (stake "
+              f"{slashed['mal_b'] / U6:g} + unpaid {unpaid_b_usd / U6:.6f}), no fee")
 
         anchor_epoch(w3, substrate, "e4")
         advance(w3, 5)
@@ -1182,30 +1250,31 @@ async def amain() -> int:
               "snapshot: title_case cleared by the DAO")
         check(vs[tools["mal_a"]] == {"concluded": True, "dao": None},
               "snapshot: lower_case keeps the reviewers' verdict")
-        pool2 = float(state["emission_pool"])
+        pool2 = int({str(t).lower(): int(v) for t, v in
+                     state["tool_share_window"].items()}.get(U, 0))
         close2 = federated_epoch_close(
-            canonical_order([]), emission_pool=pool2, agent_owner_map=state["owner_map"],
+            canonical_order([]), tool_share_window=state["tool_share_window"],
+            parity=state["parity"], agent_owner_map=state["owner_map"],
             tool_registrations=close1["tool_registrations"],
             tool_rounds=close1["tool_rounds"], rep_shares=state["rep_shares"],
             review_snapshot=snap, mint_gate=tuple(state["mint_gate"]))
         check(close2["pruned"] == sorted([tools["clean"], tools["mal_a"]]),
               "the next close prunes upper_case and un-prunes title_case")
-        check(close2["tool_mint"] == {} and close2["agent_mint"] == {}
+        check(close2["tool_mint"] == {} and close2["claims"] == {}
               and close2["concluded"] == {},
-              "and mints nothing: a tool is paid once, so the cleared one is the treasury's")
+              "and pays nothing: a tool is paid once, so the cleared one is the treasury's")
         t2 = close2["tool_rounds"]["tools"]
         check(t2[tools["mal_b"]]["unpaid"]["amounts"] == unpaid_b,
               "title_case's unpaid record stays in the state")
-        carry2 = close2["tool_rounds"]["pool_carry"]
-        check(carry2 == round(pool2 * ATN) + carry
-              and minted1_raw + carry2 == pool1_raw + round(pool2 * ATN),
-              f"conservation: minted {minted1_raw / ATN:.6f} + carried {carry2 / ATN:.6f} "
-              f"= the two pools ({pool} + {pool2} ATN)")
-        check(substrate.functions.networkMintTotal().call()
-              <= substrate.functions.mintPoolTotal().call(),
-              "claims stay within the cumulative pool")
+        carry2 = int(close2["tool_rounds"]["pool_carry"].get(U, 0))
+        check(carry2 == pool2 + carry and paid1 + carry2 == pool + pool2,
+              f"conservation: paid {paid1 / U6:.6f} + carried {carry2 / U6:.6f} "
+              f"= the two pools ({pool / U6:g} + {pool2 / U6:g} USD6)")
+        check(substrate.functions.claimedTotal(usd.address).call()
+              <= substrate.functions.poolCap(usd.address).call(),
+              "claims stay within the pool cap")
         s11.note("pruned", [d[:8] for d in close2["pruned"]])
-        s11.note("treasury_paid", f"{owed / ATN:.6f} ATN")
+        s11.note("treasury_paid", f"{owed / U6:.6f} USD6")
         s11.status = "PASS"
     except Exception as e:
         run_stage(s11, e)

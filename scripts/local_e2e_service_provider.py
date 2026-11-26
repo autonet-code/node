@@ -14,7 +14,8 @@ wss endpoint. Nothing is mocked but the close's gossip input:
          a request the tool fails costs nothing
       -> a new price list, with no transaction and no new spec
       -> the seller cashes in without closing (settle, ChannelPaid; the fee
-         burns), and the credits keep serving
+         is collected, half of it to the token's pool), and the credits keep
+         serving
       -> a top-up, then requests until the credits are spent
       -> the buyer closes; the seller settles inside the window without moving
          the buyer's deadline; the remainder comes back
@@ -24,6 +25,9 @@ wss endpoint. Nothing is mocked but the close's gossip input:
 Sessions (a connection kept open, metered per second, gigabyte and token)
 need libp2p between daemons and are proved by tests/test_service_session.py,
 the mesh NAT harness and the S0 run.
+
+Money is USD6, a 6-decimal test token in the value index (a MockRegistry
+holds its parity, 1e30). The service is priced in it, and credits are in it.
 
 Run:
     python scripts/local_e2e_service_provider.py
@@ -64,7 +68,7 @@ CHAIN_ID = 1337
 HH_ACCT0_PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 HH_ACCT1_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 
-PRICE = 1000            # ATN base units per request
+PRICE = 1000            # USD6 base units per request
 NEW_PRICE = 2000        # after the price change
 VOUCHER = 3000          # what each voucher pays ahead
 DEPOSIT = 9000          # the buyer's credits
@@ -211,14 +215,23 @@ const { ethers } = require("hardhat");
 const fs = require("fs");
 async function main() {
   const [deployer] = await ethers.getSigners();
-  // Substrate(treasury, vaultMinter, governor), Decision 2026-10-16:
-  // deployer = treasury + test vaultMinter (purchased-ATN faucet) + governor
-  // (the only anchoring account). Nobody retunes the fee here, so it stays
-  // at its 2.5% default, which is what this script asserts.
+  // The value index: a test Registry holding one 6-decimal token at parity
+  // 1e30 (one token = one value unit); its mint is open (test only).
+  const Reg = await ethers.getContractFactory("MockRegistry");
+  const daoRegistry = await Reg.deploy();
+  await daoRegistry.waitForDeployment();
+  const Tok = await ethers.getContractFactory("MockIndexToken");
+  const token = await Tok.deploy("USD 6", "USD6", 6);
+  await token.waitForDeployment();
+  await (await daoRegistry.setParity(await token.getAddress(), 10n ** 30n)).wait();
+  // Substrate(treasury, governor, anchorer, registry, fee, treasury share):
+  // deployer = treasury + governor (the only anchoring account). Nobody
+  // retunes the fee here, so it stays at its 2.5% default, which is what
+  // this script asserts.
   const Substrate = await ethers.getContractFactory("Substrate");
   const substrate = await Substrate.deploy(
-    deployer.address, deployer.address, deployer.address, ethers.ZeroAddress,
-    ethers.ZeroHash, "Test ATN", "REPATN", 250, 5000);
+    deployer.address, deployer.address, ethers.ZeroAddress,
+    await daoRegistry.getAddress(), 250, 5000);
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 
@@ -237,7 +250,8 @@ async function main() {
   const channelAddr = await channel.getAddress();
 
   const out = { substrate: substrateAddr, serviceRegistry: registryAddr,
-                paymentChannel: channelAddr };
+                paymentChannel: channelAddr, token: await token.getAddress(),
+                daoRegistry: await daoRegistry.getAddress() };
   fs.writeFileSync(process.env.DEPLOY_OUT, JSON.stringify(out, null, 2));
   console.log("DEPLOYED " + JSON.stringify(out));
 }
@@ -486,8 +500,12 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
     owner_buyer = Account.from_key(HH_ACCT1_PK)
     shape = resolve_binding_shape(substrate_abi)
 
-    def atn(addr: str) -> int:
-        return int(substrate.functions.balanceOf(Web3.to_checksum_address(addr)).call())
+    token_c = w3.eth.contract(address=Web3.to_checksum_address(addresses["token"]),
+                              abi=load_abi("MockIndexToken"))
+    TOKEN = addresses["token"].lower()
+
+    def atn(addr: str) -> int:   # the USD6 balance
+        return int(token_c.functions.balanceOf(Web3.to_checksum_address(addr)).call())
 
     # ------------------------------------------------------------------
     # Stage 2: the seller daemon's operator and a buyer agent, on chain
@@ -516,13 +534,13 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                                 agent_addr=buyer_addr, owner_acct=owner_buyer,
                                 peer_id=b"peer-buyer")
         buyer_defn.identity.registered_on_chain = True
-        send_tx(w3, substrate.functions.mintFromVault(buyer_addr, BUYER_FUNDING),
+        send_tx(w3, token_c.functions.mint(buyer_addr, BUYER_FUNDING),
                 HH_ACCT0_PK, owner_seller.address)
         assert atn(buyer_addr) == BUYER_FUNDING
         s2.note("seller_operator", seller_addr)
         s2.note("buyer", buyer_addr)
         step(f"seller operator {seller_addr[:10]} and buyer {buyer_addr[:10]} "
-             f"registered; buyer holds {BUYER_FUNDING} ATN base units")
+             f"registered; buyer holds {BUYER_FUNDING} USD6 base units")
         s2.status = "PASS"
     except Exception as e:
         s2.status = "FAIL"
@@ -555,7 +573,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             "backing_tool": tool["digest"], "name": "count_words",
             "description": "Counts the words in a text.",
             "settings": {"language": "English"},
-            "price": PRICE, "voucher": VOUCHER}, owner_session())
+            "token": TOKEN, "price": PRICE, "voucher": VOUCHER}, owner_session())
         if not reg.get("ok") or not reg["result"].get("on_chain"):
             raise RuntimeError(f"register_service failed: {reg}")
         spec_digest = reg["result"]["digest"]
@@ -614,8 +632,8 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         assert reply["result"]["result"] == {"words": 3, "language": "English"}, reply
         assert reply["paid_directly"]["amount"] == PRICE
         assert atn(buyer_addr) == BUYER_FUNDING - PRICE
-        fee = PRICE * 250 // 10_000
-        assert abs(atn(seller_addr) - seller_before - (PRICE - fee)) <= 1, (
+        fee = -(-PRICE * 250 // 10_000)    # rounded up
+        assert atn(seller_addr) - seller_before == PRICE - fee, (
             atn(seller_addr), seller_before)
         rid = reply["request_id"]
         args = {"text": "one two three"}
@@ -647,12 +665,12 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             raise RuntimeError("stage 4 did not complete")
         opened = await _open_credits(rt_buyer, {"_caller_id": "buyer-1",
                                                 "provider_address": seller_addr,
-                                                "deposit": DEPOSIT})
+                                                "token": TOKEN, "deposit": DEPOSIT})
         assert opened.get("ok"), opened
         channel_id = int(opened["credits"]["channel_id"])
         again = await _open_credits(rt_buyer, {"_caller_id": "buyer-1",
                                                "provider_address": seller_addr,
-                                               "deposit": DEPOSIT})
+                                               "token": TOKEN, "deposit": DEPOSIT})
         assert "already open" in str(again.get("error")), again
         ledger = rt_seller.service_store
 
@@ -714,7 +732,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         failed = True
 
     # ------------------------------------------------------------------
-    # Stage 7: the seller settles without closing; the fee burns
+    # Stage 7: the seller settles without closing; the fee is collected
     # ------------------------------------------------------------------
     s7 = board.stage(7, "the seller cashes in without closing (settle, ChannelPaid)")
     try:
@@ -725,22 +743,24 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         smc_s = ServiceMarketClient(rt_seller._config.rpb)
         cumulative = rt_seller.service_store.balance(channel_id)[1]
         seller_before = atn(seller_addr)
-        burned_before = int(substrate.functions.totalBurned().call())
+        pool_before = int(substrate.functions.toolShareTotal(token_c.address).call())
         out = await settle_channels(rt_seller.service_store, smc_s,
                                     lambda p: seller_key, settle_min=1)
         assert any(o.get("action") == "settled" and o.get("ok") for o in out), out
         state = channel_c.functions.getChannel(channel_id).call()
-        assert int(state[5]) == 1, state            # still Open
-        assert int(state[3]) == cumulative, (state, cumulative)
-        fee = cumulative * 250 // 10_000
-        assert abs(atn(seller_addr) - seller_before - (cumulative - fee)) <= 1
-        assert int(substrate.functions.totalBurned().call()) > burned_before, "no fee burned"
+        # Channel: client, provider, token, deposit, claimed, closesAt, status, window
+        assert int(state[6]) == 1, state            # still Open
+        assert int(state[4]) == cumulative, (state, cumulative)
+        fee = -(-cumulative * 250 // 10_000)
+        assert atn(seller_addr) - seller_before == cumulative - fee
+        assert (int(substrate.functions.toolShareTotal(token_c.address).call()) - pool_before
+                == fee - fee * 5000 // 10_000), "the fee's tool share did not reach the pool"
         pays = await smc_s.channel_payments(0)
         assert any(int(p["channel_id"]) == channel_id
                    and p["client"].lower() == buyer_addr.lower() for p in pays), pays
         r = await buy("still open")
         assert r.get("ok"), r
-        step(f"settled {cumulative} (seller net about {cumulative - fee}, the fee partly burned); "
+        step(f"settled {cumulative} (seller net {cumulative - fee}, half the fee to the pool); "
              "the credits stayed open and kept serving")
         s7.status = "PASS"
     except Exception as e:
@@ -761,7 +781,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                                               "amount": TOP_UP})
         assert up.get("ok") and int(up["deposit"]) == DEPOSIT + TOP_UP, up
         state = channel_c.functions.getChannel(channel_id).call()
-        assert int(state[2]) == DEPOSIT + TOP_UP, state
+        assert int(state[3]) == DEPOSIT + TOP_UP, state
         spent = None
         for _ in range(40):
             r = await buy("more")
@@ -795,19 +815,19 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
         closed = await _close_credits(rt_buyer, {"_caller_id": "buyer-1",
                                                  "provider_address": seller_addr})
         assert closed.get("ok"), closed
-        closes_at = int(channel_c.functions.getChannel(channel_id).call()[4])
+        closes_at = int(channel_c.functions.getChannel(channel_id).call()[5])
         served = rt_seller.service_store.balance(channel_id)[0]
         out = await settle_channels(rt_seller.service_store,
                                     ServiceMarketClient(rt_seller._config.rpb),
                                     lambda p: seller_key, settle_min=1)
         state = channel_c.functions.getChannel(channel_id).call()
-        assert int(state[4]) == closes_at, "the settle moved the buyer's deadline"
-        claimed = int(state[3])
-        deposit = int(state[2])
+        assert int(state[5]) == closes_at, "the settle moved the buyer's deadline"
+        claimed = int(state[4])
+        deposit = int(state[3])
         assert claimed == served, (claimed, served)   # never what was only paid ahead
         while int(w3.eth.get_block("latest")["timestamp"]) <= closes_at:
             time.sleep(1)
-            send_tx(w3, substrate.functions.mintFromVault(owner_seller.address, 1),
+            send_tx(w3, token_c.functions.mint(owner_seller.address, 1),
                     HH_ACCT0_PK, owner_seller.address)
         before = atn(buyer_addr)
         # Hardhat's block clock runs ahead of the wall clock: the sweep
@@ -857,7 +877,9 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
             return read_service_snapshot(
                 w3, block=block, substrate_address=addresses["substrate"],
                 service_registry_address=addresses["serviceRegistry"],
-                payment_channel_address=addresses["paymentChannel"])
+                payment_channel_address=addresses["paymentChannel"],
+                # The parity pinned for the close (the value index's key).
+                registry_writes={f"jurisdiction.parity.{TOKEN}": str(10 ** 30)})
 
         kp = Keypair.generate()
         batch = EventBatch(rpb_address=jurisdiction, sender_pubkey=kp.public_key,

@@ -7,7 +7,7 @@ Run inside a cloud session, from a checkout of the run branch in a venv:
 
 For each household (an owner wallet on the hub's test chain, by index):
 start one `atn --headless` daemon in its own home, onboard it the way its
-owner would (operator registered and delegated REP, ATN bought, an external
+owner would (operator registered and delegated REP, index tokens sent, an external
 agent created, funded and registered), then start the telemetry sidecar.
 The run's files come from the hub (obs.autonet.computer/share). The process
 then stays up: the daemons exit when it does.
@@ -23,7 +23,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -46,16 +45,7 @@ async def amain(a) -> int:
     j = fetch("jurisdiction.json", token)
     vm_env = fetch("vm_env.json", token)
     summary = fetch("summary.json", token)
-    # The dao ABIs the onboarding needs, laid out like a trustless-contracts tree.
-    dao = Path(tempfile.mkdtemp(prefix="dao-abi-"))
-    for rel, name in (("test/TestToken6.sol/TestToken6.json", "abi_TestToken6.json"),
-                      ("AutonetVault.sol/AutonetVault.json", "abi_AutonetVault.json")):
-        p = dao / "artifacts" / "contracts" / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(fetch(name, token)), encoding="utf-8")
-
     os.environ.update({
-        "TRUSTLESS_CONTRACTS_DIR": str(dao),
         "S0_RPC_URL": vm_env["ATN_JURISDICTION_RPC"],
         "S0_KEEP_PROXY": "1",
         "S0_DIR": str(Path(a.dir).expanduser()),
@@ -84,8 +74,9 @@ async def amain(a) -> int:
     run.mkdir(parents=True, exist_ok=True)
     w3, accts = s0.w3_and_accounts()
     s0.wait_for(lambda: w3.is_connected(), 60, "the hub chain")
-    usdc = w3.eth.contract(address=w3.to_checksum_address(summary["usdc"]),
-                           abi=s0.artifact("test/TestToken6.sol/TestToken6.json")["abi"])
+    # The value index's tokens (s2_deploy's summary): plain ERC-20 calls only.
+    tokens = {k: w3.eth.contract(address=w3.to_checksum_address(a), abi=s0.ERC20_ABI)
+              for k, a in summary["tokens"].items()}
     procs = s0.Procs()
     households = []
     for idx in a.households:
@@ -98,7 +89,7 @@ async def amain(a) -> int:
         if a.resume:
             s0.log(f"{h.name} resumed")
             continue
-        await s0.onboard(h, j, w3, usdc)
+        await s0.onboard(h, j, w3, tokens)
         s0.log(f"{h.name} onboarded: agent {h.agent_id} {h.agent_address}")
 
     obs_token_file = run / "obs.token"

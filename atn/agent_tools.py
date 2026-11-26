@@ -760,7 +760,9 @@ _TOOLS: list[ToolDefinition] = [
             "a separately granted capability — having register_tool does not imply "
             "having this. You can only publish your own tools. Publishing STAKES "
             "a bond on ToolBond from your own wallet (you must be registered "
-            "on-chain); the stake stands behind the tool and is slashed if "
+            "on-chain), in one token of the value index (list_index_tokens), "
+            "worth at least ToolBond's minimum when posted; the stake stands "
+            "behind the tool and is slashed if "
             "more than half the REP reviewing it says malware. A novelty "
             "claim is required: search "
             "probe_tools first and name the closest existing tools (reviewers "
@@ -773,6 +775,8 @@ _TOOLS: list[ToolDefinition] = [
             "properties": {
                 "digest": {"type": "string", "description": "Manifest digest (or name/reg_ prefix) of a tool you registered."},
                 "novelty": _NOVELTY_SCHEMA,
+                "token": {"type": "string", "description": "The index token (0x address) the bond is in. Optional when your wallet holds exactly one index token; a bond that already holds a token keeps it."},
+                "amount": {"type": "string", "description": "Bond amount in the token's base units (decimal string). Default: the fewest worth ToolBond's minimum stake at the index."},
             },
             "required": ["digest"],
         },
@@ -3307,7 +3311,9 @@ async def _publish_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
                 "published": True, "note": "already published"}
 
     return await publish_with_stake(runtime, record,
-                                    novelty=input.get("novelty"))
+                                    novelty=input.get("novelty"),
+                                    token=input.get("token"),
+                                    amount=input.get("amount"))
 
 
 async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:

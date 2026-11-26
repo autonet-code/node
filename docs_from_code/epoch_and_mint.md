@@ -255,7 +255,7 @@ Read from `jurisdiction.<id>.<name>` at the pinned block, with defaults in `voic
 
 | key | default | meaning |
 |---|---|---|
-| `epoch_target_share` | 0 | ppm of ATN supply that must burn in fees to end an epoch. 0 means every epoch lasts the floor. |
+| `epoch_target_value` | 0 | Value of the fees (all tokens, each at its parity pinned at the last anchor, 6-decimal value units) collected since the previous cutoff that ends an epoch. 0 means every epoch lasts the floor. |
 | `epoch_retarget_window` | 4 | Retired. Read and ignored. |
 | `epoch_ceiling_votes` | 10 | Ceiling on epoch length, in voting periods. |
 | `epoch_grace` | 120 | Seconds after the cutoff before a daemon closes. |
@@ -385,7 +385,7 @@ Source: `:38-55`.
 | `jurisdiction.<id>.robots` | `[]` | `voice_state.py:801-802` |
 | `jurisdiction.<id>.robot_standards` | `[]` (64-hex pack digests) | `:803-805` |
 | `jurisdiction.<id>.parent` | none (`{"registry","id"}`; max depth 8) | `:759`, `:806-815` |
-| `jurisdiction.<id>.epoch_target_share` | 0 | `:846` |
+| `jurisdiction.<id>.epoch_target_value` | 0 | `voice_state.py:1080` |
 | `jurisdiction.<id>.epoch_retarget_window` | 4 (unused) | `:849` |
 | `jurisdiction.<id>.epoch_ceiling_votes` | 10 | `:851` |
 | `jurisdiction.<id>.epoch_grace` | 120 | `:854` |

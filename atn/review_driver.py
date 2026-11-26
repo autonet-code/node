@@ -393,6 +393,13 @@ class ReviewDriver:
             if res.get("success") or reverted_with(res, "NothingToClaim"):
                 batch.rounds[digest] = "claimed"
                 claimed += 1 if res.get("success") else 0
+                if res.get("success") and hasattr(client, "pay_out_bounty"):
+                    # The claim's bounty part is owed, not sent: pay it out
+                    # (a frozen token leaves it owed and blocks nothing).
+                    paid = await client.pay_out_bounty(key, digest, batch.epoch, batch.agent)
+                    if not paid.get("success"):
+                        batch.last_error = (f"bounty payOut {digest[:12]}: "
+                                            f"{paid.get('error')}")
             else:
                 batch.last_error = f"claim {digest[:12]}: {res.get('error')}"
                 open_rounds += 1

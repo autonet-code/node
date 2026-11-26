@@ -5,46 +5,58 @@ end on a local chain (Decisions 2026-11-07, 2026-11-08, 2026-11-09 and
 
 Stands up a LOCAL hardhat node with this repo's Substrate and ServiceMarket
 (ServiceRegistry + PaymentChannel) and the jurisdiction contracts the loop
-needs from trustless-contracts (a Registry holding the charter and the
-treasury, RepToken with ToolBond as slasher, ToolBond with short windows,
-AutonetRepClaim as a RepToken minter). Three households run on it, each an
-owner wallet plus a daemon whose operator key is registered on Substrate
-bound to that wallet, and an external agent that acts on chain as the
-operator. The DAEMON code paths drive every step:
+needs from trustless-contracts (a Registry holding the charter, the value
+index and the treasury, RepToken with ToolBond as slasher, ToolBond with
+short windows, AutonetRepClaim as a RepToken minter; the DAO's contracts
+are EIP-1167 clones initialized by the deployer, as AutonetSetup makes
+them). The value index holds two tokens: USD6 (6 decimals, parity 1e30, so
+one token is one value unit; its issuer can pause it) and T18 (18 decimals,
+parity 1.25e18, one token worth 1.25 units). Three households run on it,
+each an owner wallet plus a daemon whose operator key is registered on
+Substrate bound to that wallet, and an external agent that acts on chain as
+the operator. The DAEMON code paths drive every step:
 
   1. chain up;
-  2. households: genesis REP to the owner wallets, ATN bought from the vault
-     for the operators, the genesis anchor;
-  3. household A's agent publishes a tool with a ToolBond stake
-     (``register_tool`` + ``publish_tool``);
+  2. households: genesis REP to the owner wallets, index tokens to the
+     operators, the genesis anchor;
+  3. household A's agent publishes a tool with a ToolBond stake in the one
+     index token its operator holds (``register_tool`` + ``publish_tool``:
+     registerTool, approve, bond); B puts a bounty on it in the bond's token;
   4. households B and C adopt it, use it and review it (``attest_tools``
      with the four fields); each daemon's ``ReviewDriver`` commits, reveals
-     after the anchor, finalizes and claims on ToolBond; the reviewing
+     after the anchor, finalizes, claims on ToolBond and pays out the
+     bounty parts its households are owed (``payOut``); the reviewing
      households clear the conclusion gate;
-  5. B buys a service C sells (``request_service`` with no credits: one
-     direct payment): the payment's fee is burned, which is what funds the
-     next pool;
-  6. ``read_voice_state`` pinned to the anchor after the burn feeds
+  5. B buys two services C sells, one priced in each token
+     (``request_service`` with no credits: one direct payment each): each
+     payment's fee is collected, half to the treasury and half to that
+     token's pool;
+  6. ``read_voice_state`` pinned to the anchor after the payments feeds
      ``federated_epoch_close``: the tool concludes and is paid once from its
      reviews (40% to the reviewers by accuracy, the author side by
-     V x C x S kept by N). Each daemon's ``ChainSubmissionDriver`` takes the
-     close: A's anchors it (operator A is Substrate's governor on this dev
-     network), then every operator claims its owner wallet's ATN
-     (``claimFor``) and shows ToolBond the conclusion;
-  7. the same driver step claims each household's REP 1:1 on its tool-pool
-     earnings (``AutonetRepClaim.claim``, ``agentMintTotal``);
-  8. B opens credits with C and buys C's service twice on them (vouchers
-     pay ahead); C's sweep settles what it served without closing; B closes,
-     C settles inside the window, and B's refund sweep withdraws the rest;
+     V x C x S kept by N), each earner taking the same fraction of both
+     pools. Each daemon's ``ChainSubmissionDriver`` takes the close: A's
+     anchors it (operator A is Substrate's governor on this dev network),
+     then every operator claims its owner wallet's basket and withdraws it
+     token by token, and shows ToolBond the conclusion. USD6's issuer pauses
+     it before C's daemon takes the close: C's claim and its T18 withdrawal
+     go through, its USD6 stays owed and is withdrawn once unpaused;
+  7. the same driver step claims each household's REP 1:1 on the value of
+     its pool earnings (``AutonetRepClaim.claim``, ``earnedValue``);
+  8. B opens credits with C in T18 and buys C's T18 service twice on them
+     (vouchers pay ahead); C's sweep settles what it served without
+     closing; B closes, C settles inside the window, and B's refund sweep
+     withdraws the rest;
   9. teardown.
 
 The jurisdiction contracts are NOT vendored: they are copied at run time
 from a trustless-contracts checkout (env TRUSTLESS_CONTRACTS_DIR, default
 C:/code/dao/trustless-contracts) into a scratch hardhat project under
-build/ (gitignored), compiled there with Substrate.sol and ServiceMarket.sol
-from this repo. The checkout itself is never written. HOME, USERPROFILE and
-KEYSTORE_DIR point at a temp dir for the whole run. The chain, setup and
-helpers follow scripts/local_e2e_tool_security.py.
+build/ (gitignored), compiled there with Substrate.sol, ServiceMarket.sol
+and the test tokens (contracts/test/IndexTokenMocks.sol) from this repo.
+The checkout itself is never written. HOME, USERPROFILE and KEYSTORE_DIR
+point at a temp dir for the whole run. The chain, setup and helpers follow
+scripts/local_e2e_tool_security.py.
 
 Run:
     python scripts/local_e2e_tool_economy.py
@@ -99,9 +111,11 @@ HH_TIMELOCK_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78
 HH_TREASURY_PK = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"  # #2
 
 E18 = 10 ** 18
-ATN = 10 ** 6            # ATN has 6 decimals
-MIN_STAKE = 100 * ATN
-PARAMS = {  # ToolBond.Params (8dcc1be), short windows for a local run
+U6 = 10 ** 6             # one USD6 (6 decimals); also one value unit
+PARITY_SCALE = 10 ** 30  # value = amount x parity / 1e30 (6-decimal value units)
+PARITY = {"usd6": 10 ** 30, "t18": 125 * 10 ** 16}   # 1 USD6 = 1 unit, 1 T18 = 1.25
+MIN_STAKE = 100 * U6     # a value: 100 units of the index
+PARAMS = {  # ToolBond.Params (97ad738), short windows for a local run
     "minStake": MIN_STAKE, "revealWindow": 300, "degradeBps": 1000,
     "authorSlashBps": 10_000, "unbondDelay": 120, "reviewerShareBps": 4000,
 }
@@ -109,14 +123,19 @@ SERVICE_FEE_BPS = 250  # Substrate default
 FEE_TREASURY_BPS = 5000
 CHANNEL_WINDOW = 60    # PaymentChannel challenge window, seconds
 CHARTER_KEY = "jurisdiction.autonet.charter"
-SERVICE_ASK = 400 * ATN  # one request of C's service: 10 ATN fee, 5 ATN burned
+# One request of each of C's services: 400 USD6 (10 fee, 5 to the pool),
+# 80 T18 = 100 units (2 T18 fee, 1 T18 to the pool).
+ASK = {"usd6": 400 * U6, "t18": 80 * E18}
+BOUNTY = 10 * U6         # B's bounty on A's tool, in the bond's token (USD6)
 
 HOUSES = ("A", "B", "C")
 AGENT = {h: f"agent-{h.lower()}" for h in HOUSES}
 # REP at the genesis anchor, held by the owner wallets (the households).
 REP_GENESIS = {"A": 100, "B": 300, "C": 200}
-# ATN each operator buys from the vault (bond; service purchases; gas is ETH).
-ATN_BOUGHT = {"A": 1000, "B": 2000, "C": 100}
+# Index tokens each operator holds (the bond, the bounty, services; gas is
+# ETH). A holds only USD6, so its bond defaults to it.
+FUNDS = {"A": {"usd6": 1000 * U6}, "B": {"usd6": 2000 * U6, "t18": 1000 * E18},
+         "C": {"t18": 10 * E18}}
 
 # The reviews of epoch 1 (B holds 300 REP, C 200). Only B scores a charter
 # axis; the others count 0.5 for each review.
@@ -127,10 +146,11 @@ REVIEWS = {
 }
 
 DAO_SOURCES = ["ToolBond.sol", "RepToken.sol", "Registry.sol", "IAdminToken.sol",
-               "IJurisdictionData.sol", "AutonetRepClaim.sol"]
+               "IJurisdictionData.sol", "AutonetRepClaim.sol", "CloneMaker.sol"]
 # This repo's contracts go under contracts/core/, the Hardhat layout the
 # daemon's ABI loader reads (ATN_ARTIFACTS_DIR, nodes/common/contract_artifacts).
 REPO_SOURCES = ["Substrate.sol", "ServiceMarket.sol"]
+REPO_TEST_SOURCES = ["IndexTokenMocks.sol"]   # the index's test tokens
 
 HARDHAT_CONFIG = """module.exports = {
   solidity: { version: "0.8.26", settings: { evmVersion: "cancun",
@@ -155,12 +175,12 @@ WORDS_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}}}
 STAGES = [
     (1, "chain up (scratch compile, hardhat, Substrate + DAO suite + ServiceMarket)"),
     (2, "households (three daemons; operators bound to owner wallets; genesis REP + anchor)"),
-    (3, "household A's agent publishes a bonded tool (register_tool + publish_tool)"),
-    (4, "B and C adopt, use and review it (four fields, commit-reveal on ToolBond)"),
-    (5, "service fees burned (B buys C's service through payForService)"),
-    (6, "close: the tool concludes and is paid; anchor; operators claimFor their owners"),
-    (7, "REP claimed 1:1 on tool-pool earnings (AutonetRepClaim)"),
-    (8, "credits: vouchers pay ahead, the provider settles what it served, the buyer closes and withdraws the rest"),
+    (3, "household A's agent publishes a tool bonded in an index token; B adds a bounty"),
+    (4, "B and C adopt, use and review it (four fields, commit-reveal, bounty paid out)"),
+    (5, "service fees collected in both tokens (B buys C's two services)"),
+    (6, "close: baskets of both pools; anchor; claims and per-token withdrawals; a paused token"),
+    (7, "REP claimed 1:1 on the value of the pool earnings (AutonetRepClaim)"),
+    (8, "credits in T18: vouchers pay ahead, the provider settles, the buyer closes and withdraws"),
     (9, "teardown"),
 ]
 
@@ -246,10 +266,13 @@ def build_scratch_project() -> Path:
     if src.exists():
         shutil.rmtree(src)
     (src / "core").mkdir(parents=True)
+    (src / "test").mkdir(parents=True)
     for name in DAO_SOURCES:
         shutil.copy2(DAO_DIR / "contracts" / name, src / name)
     for name in REPO_SOURCES:
         shutil.copy2(REPO / "contracts" / "core" / name, src / "core" / name)
+    for name in REPO_TEST_SOURCES:
+        shutil.copy2(REPO / "contracts" / "test" / name, src / "test" / name)
     (SCRATCH / "hardhat.config.js").write_text(HARDHAT_CONFIG, encoding="utf-8")
     pkg = SCRATCH / "package.json"
     if not pkg.exists():
@@ -272,8 +295,9 @@ def compile_scratch(cli: Path) -> None:
         raise RuntimeError(f"compile failed:\n{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}")
 
 
-def artifact(name: str, sol: Optional[str] = None, core: bool = False) -> Dict[str, Any]:
-    base = SCRATCH / "artifacts" / "contracts" / ("core" if core else "")
+def artifact(name: str, sol: Optional[str] = None, core: bool = False,
+             sub: str = "") -> Dict[str, Any]:
+    base = SCRATCH / "artifacts" / "contracts" / ("core" if core else sub)
     p = base / f"{sol or name}.sol" / f"{name}.json"
     return json.loads(p.read_text(encoding="utf-8"))
 
@@ -391,11 +415,29 @@ def reverts(call, sender: str) -> str:
 
 
 def deploy(w3, name: str, args: list, pk: str = HH_DEPLOYER_PK,
-           sol: Optional[str] = None, core: bool = False):
-    art = artifact(name, sol, core)
+           sol: Optional[str] = None, core: bool = False, sub: str = ""):
+    art = artifact(name, sol, core, sub)
     factory = w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"])
     rcpt = send(w3, factory.constructor(*args), pk, gas=16_000_000)
     return w3.eth.contract(address=rcpt.contractAddress, abi=art["abi"])
+
+
+def deploy_clone(w3, maker, name: str, init_args: list, pk: str = HH_DEPLOYER_PK):
+    """A DAO contract as AutonetSetup makes it: an EIP-1167 clone of a
+    deployed implementation (whose constructor disables its initializers),
+    initialized by ``pk`` (the caller becomes RepToken's admin)."""
+    impl = deploy(w3, name, [], pk)
+    rcpt = send(w3, maker.functions.clone(impl.address), pk)
+    addr = maker.events.Cloned().process_receipt(rcpt)[0]["args"]["instance"]
+    c = w3.eth.contract(address=addr, abi=impl.abi)
+    send(w3, c.functions.initialize(*init_args), pk, gas=6_000_000)
+    return c
+
+
+def set_parity(w3, registry, token: str, parity: int) -> None:
+    """Put ``token`` in the value index (the Registry's owner, the timelock)."""
+    send(w3, registry.functions.editRegistry(
+        f"jurisdiction.parity.{token.lower()}", str(int(parity))), HH_TIMELOCK_PK)
 
 
 def fund_eth(w3, to: str, eth: int = 5) -> None:
@@ -558,6 +600,7 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
     op_key = {h: new_key() for h in HOUSES}
     owner = {h: address_of(k) for h, k in owner_key.items()}
     op = {h: address_of(k) for h, k in op_key.items()}
+    tok: Dict[str, Any] = {}
     try:
         from nodes.common.library.charter import DEFAULT_CHARTER
         cli = _find_hardhat_cli()
@@ -570,26 +613,35 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         if not wait_rpc():
             raise RuntimeError("hardhat RPC never came up")
         w3 = Web3(Web3.HTTPProvider(RPC_URL))
-        deployer = address_of(HH_DEPLOYER_PK)
         timelock = address_of(HH_TIMELOCK_PK)
         treasury = address_of(HH_TREASURY_PK)
         fund_eth(w3, timelock)
-        # The timelock owns the Registry (the treasury), as on a live network.
-        registry = deploy(w3, "Registry", [timelock, "0x" + "00" * 20])
+        maker = deploy(w3, "CloneMaker", [])
+        # The timelock owns the Registry (the DAO treasury and the value
+        # index), as on a live network; the deployer is RepToken's admin.
+        registry = deploy_clone(w3, maker, "Registry", [timelock, "0x" + "00" * 20])
         send(w3, registry.functions.editRegistry(CHARTER_KEY, DEFAULT_CHARTER.text),
              HH_TIMELOCK_PK)
-        rep = deploy(w3, "RepToken", ["Autonet REP", "REP", registry.address, timelock,
-                                      [], []])
-        # (treasury, vaultMinter, governor, anchorer, genesisRoot, ...): the
-        # deployer is the vault minter (sells ATN), operator A the governor
-        # (anchors directly, an EOA governor as on a dev network).
-        substrate = deploy(w3, "Substrate", [treasury, deployer, op["A"], "0x" + "00" * 20,
-                                             bytes(32), "Test ATN", "REPATN",
-                                             SERVICE_FEE_BPS, FEE_TREASURY_BPS], core=True)
-        bond = deploy(w3, "ToolBond", [substrate.address, rep.address, registry.address,
-                                       timelock, tuple(PARAMS.values())])
+        rep = deploy_clone(w3, maker, "RepToken", ["Autonet REP", "REP", registry.address,
+                                                   timelock, [], []])
+        # The value index: a pausable 6-decimal token and an 18-decimal one.
+        tok["usd6"] = deploy(w3, "PausableToken", [], sol="IndexTokenMocks", sub="test")
+        tok["t18"] = deploy(w3, "MockIndexToken", ["Test 18", "T18", 18],
+                            sol="IndexTokenMocks", sub="test")
+        for k, t in tok.items():
+            set_parity(w3, registry, t.address, PARITY[k])
+        # (treasury, governor, anchorer, registry, fee, treasury share):
+        # operator A is the governor (anchors directly, an EOA governor as on
+        # a dev network).
+        substrate = deploy(w3, "Substrate", [treasury, op["A"], "0x" + "00" * 20,
+                                             registry.address, SERVICE_FEE_BPS,
+                                             FEE_TREASURY_BPS], core=True)
+        bond = deploy_clone(w3, maker, "ToolBond", [substrate.address, rep.address,
+                                                    registry.address, timelock,
+                                                    tuple(PARAMS.values())])
         send(w3, rep.functions.setSlasher(bond.address, True), HH_DEPLOYER_PK)
-        rep_claim = deploy(w3, "AutonetRepClaim", [substrate.address, rep.address, [], []])
+        rep_claim = deploy_clone(w3, maker, "AutonetRepClaim",
+                                 [substrate.address, rep.address, [], []])
         send(w3, rep.functions.setMinter(rep_claim.address, True), HH_DEPLOYER_PK)
         svc_registry = deploy(w3, "ServiceRegistry", [substrate.address],
                               sol="ServiceMarket", core=True)
@@ -599,15 +651,24 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
                  "tool_bond": bond.address, "registry": registry.address,
                  "rep_claim": rep_claim.address,
                  "service_registry": svc_registry.address,
-                 "payment_channel": channel.address}
+                 "payment_channel": channel.address,
+                 "usd6": tok["usd6"].address, "t18": tok["t18"].address}
         check(substrate.functions.governor().call() == op["A"],
               "Substrate's governor is operator A (dev network: it anchors directly)")
+        for k, t in tok.items():
+            check(substrate.functions.acceptsToken(t.address).call()
+                  and substrate.functions.parityOf(t.address).call() == PARITY[k],
+                  f"{k} is in the value index at parity {PARITY[k]}")
+        check(substrate.functions.valueOf(tok["t18"].address, 4 * E18).call() == 5 * U6,
+              "4 T18 are worth 5 value units")
         check(rep.functions.slashers(bond.address).call(), "ToolBond is a RepToken slasher")
         check(rep.functions.minters(rep_claim.address).call(),
               "AutonetRepClaim is a RepToken minter")
         check(rep_claim.functions.substrate().call() == substrate.address,
               "AutonetRepClaim reads its earnings from Substrate")
-        check(bond.functions.reviewerShareBps().call() == 4000, "reviewerShareBps = 4000")
+        check(bond.functions.minStake().call() == MIN_STAKE
+              and bond.functions.reviewerShareBps().call() == 4000,
+              "ToolBond: minStake 100 value units, reviewerShareBps 4000")
         check(registry.functions.getRegistryValue(CHARTER_KEY).call() == DEFAULT_CHARTER.text,
               "the Registry holds the charter text")
         for k, v in addrs.items():
@@ -617,11 +678,13 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         fail(s1, e)
         return await finish()
 
-    def atn_of(addr: str) -> int:
-        return substrate.functions.balanceOf(addr).call()
+    def bal(k: str, addr: str) -> int:
+        return tok[k].functions.balanceOf(addr).call()
 
     def rep_of(addr: str) -> int:
         return rep.functions.balanceOf(addr).call()
+
+    T = {k: t.address.lower() for k, t in tok.items()}   # token keys as the close has them
 
     # ------------------------------------------------------------------
     s2 = S[2]
@@ -648,8 +711,8 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
             check(rt.get_agent(AGENT[h]).identity.registered_on_chain,
                   f"{h}: so the external agent counts as registered")
             send(w3, rep.functions.mint(owner[h], REP_GENESIS[h] * E18), HH_DEPLOYER_PK)
-            send(w3, substrate.functions.mintFromVault(op[h], ATN_BOUGHT[h] * ATN),
-                 HH_DEPLOYER_PK)
+            for k, amount in FUNDS[h].items():
+                send(w3, tok[k].functions.mint(op[h], amount), HH_DEPLOYER_PK)
             check(w3.eth.get_balance(owner[h]) == 0,
                   f"{h}: the owner wallet holds no gas (the operator pays it)")
         stores = {h: rt.tool_store._blob_store() for h, rt in rts.items()}
@@ -666,6 +729,10 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         for h, rt in rts.items():
             # Manifests and code travel between the daemons' blob stores.
             rt.tool_store.blob_fetcher = fetcher_for(h)
+        listed = await execute_tool("list_index_tokens", {}, rts["B"],
+                                    caller_id=AGENT["B"])
+        check(sorted(t["token"] for t in listed.get("tokens", [])) == sorted(T.values()),
+              f"the daemon lists the value index: {[t['symbol'] for t in listed.get('tokens', [])]}")
         check(rep.functions.totalSupply().call() == 600 * E18, "REP supply = 600 (genesis)")
         # The genesis anchor: REP held now weighs epoch 1's reviews.
         advance(w3, 5)
@@ -692,11 +759,11 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
     digest = ""
     announced: List[tuple] = []
     try:
-        from atn.runtime.tool_bond import ToolBondGate
+        from atn.runtime.tool_bond import ToolBondClient, ToolBondGate
         # What the autonet bridge wires (autonet_service): a published
         # manifest goes to the library, which emits its tool_registered event.
         rt_a.tool_store.manifest_sink = lambda m, author: announced.append((m, author))
-        atn0 = atn_of(op["A"])
+        usd0 = bal("usd6", op["A"])
         reg = await execute_tool("register_tool", {
             "name": "upper_case", "description": "Upper-cases a string.",
             "input_schema": UPPER_SCHEMA, "code": UPPER_CODE,
@@ -704,26 +771,45 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
                         "prior_art": []}}, rt_a, caller_id=AGENT["A"])
         if "error" in reg:
             raise RuntimeError(f"register_tool: {reg}")
+        # No token named: A's operator holds one index token only.
         pub = await execute_tool("publish_tool", {"digest": reg["digest"]}, rt_a,
                                  caller_id=AGENT["A"])
         if "error" in pub:
             raise RuntimeError(f"publish_tool: {pub}")
         digest = pub["digest"]
         b32 = bytes.fromhex(digest)
-        check(pub.get("published") is True and pub["stake"]["amount"] == MIN_STAKE,
-              f"published with a {MIN_STAKE // ATN} ATN bond ({len(pub['stake']['txs'])} txs)")
+        st = pub["stake"]
+        check(pub.get("published") is True and st["token"] == T["usd6"]
+              and st["amount"] == MIN_STAKE and st["value"] == MIN_STAKE,
+              f"published with a {MIN_STAKE // U6} USD6 bond worth {st['value'] // U6} "
+              f"units ({len(st['txs'])} txs: registerTool, approve, bond)")
         manifest = rt_a.tool_store.get(digest).manifest
         check(str(manifest.get("author", "")).lower() == op["A"].lower(),
               "the manifest's author is operator A")
         check(substrate.functions.toolAuthor(b32).call() == op["A"],
               "Substrate.toolAuthor = operator A")
-        check(bond.functions.isBonded(b32).call(), "ToolBond.isBonded")
-        check(atn0 - atn_of(op["A"]) == MIN_STAKE, "operator A's ATN down by the bond")
+        row = bond.functions.bonds(b32).call()
+        check(bond.functions.isBonded(b32).call() and row[5] == tok["usd6"].address
+              and row[1] == MIN_STAKE and row[6] == MIN_STAKE,
+              "ToolBond: bonded in USD6, stake and value 100 units")
+        check(usd0 - bal("usd6", op["A"]) == MIN_STAKE, "operator A's USD6 down by the bond")
         check((await ToolBondGate(rt_b).is_bonded(digest))[0],
               "daemon B's gate sees the bond")
+        again = await ToolBondClient(rt_a).register_and_bond(op_key["A"], digest)
+        check(again.get("success") and again.get("note") == "already bonded"
+              and not again.get("txs"), "bonding a bonded tool again sends nothing")
+        wrong = await ToolBondClient(rt_a).register_and_bond(
+            op_key["A"], digest, amount=E18, token=T["t18"])
+        check(not wrong.get("success") and "keeps its token" in str(wrong.get("error")),
+              "a top-up in another token is refused before any transaction")
         check(len(announced) == 1 and announced[0][0] == manifest
               and str(announced[0][1]).lower() == op["A"].lower(),
               "the daemon announces the published manifest once, author operator A")
+        # B puts a bounty on it for its reviewers, in the bond's token.
+        bty = await ToolBondClient(rt_b).add_bounty(op_key["B"], digest, BOUNTY)
+        check(bty.get("success") and bty["token"] == T["usd6"]
+              and bond.functions.bonds(b32).call()[4] == BOUNTY,
+              f"B adds a {BOUNTY // U6} USD6 bounty (approve, addBounty)")
         s3.note("digest", digest[:16] + "...")
         s3.status = "PASS"
     except Exception as e:
@@ -793,7 +879,7 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         drivers = [ReviewDriver(rt_b), ReviewDriver(rt_c)]
         idle = await tick_all(drivers)
         check(idle.get("committed", 0) == 0, "no commit before the epoch's close fires")
-        atn0 = {h: atn_of(op[h]) for h in ("B", "C")}
+        held0 = {h: {k: bal(k, op[h]) for k in tok} for h in ("B", "C")}
         for d in drivers:
             d.on_local_close()
         got = await tick_all(drivers)
@@ -803,7 +889,8 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
             check(c[0] != b"\x00" * 32 and c[1] == REP_GENESIS[h] * E18 and not c[2],
                   f"{h}: commitment from operator {h}, weight {REP_GENESIS[h]} REP "
                   "(its owner's, at the snapshot), hidden")
-            check(atn_of(op[h]) == atn0[h], f"{h}: no ATN moved (no stake)")
+            check({k: bal(k, op[h]) for k in tok} == held0[h],
+                  f"{h}: no token moved (a review stakes nothing)")
         anchor_epoch(w3, substrate, "e1", op_key["A"])
         check(bond.functions.revealEnds(1).call() > 0, "anchor e1 opens the reveal window")
         got = await tick_all(drivers)
@@ -817,6 +904,7 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
               "Reviewed carries the four fields (B: 90, 80, 70, no malware)")
         supply0 = rep.functions.totalSupply().call()
         credit0 = rep.functions.slashedCredit(bond.address).call()
+        owner_usd0 = {h: bal("usd6", owner[h]) for h in HOUSES}
         advance(w3, PARAMS["revealWindow"] + 1)
         got = await tick_all(drivers, ticks=2)
         check(bond.functions.getRound(b32, 1).call()[0] == 3,
@@ -824,6 +912,18 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         credit = rep.functions.slashedCredit(bond.address).call()
         check(rep.functions.totalSupply().call() + (credit - credit0) == supply0,
               "REP conserved by the review settlement")
+        # The bounty: each review's part owed to its household, then paid
+        # out by the reviewer's daemon (payOut), in the bond's token.
+        paid = {str(e["args"]["household"]): int(e["args"]["amount"]) for e in
+                bond.events.BountyPaid().get_logs(from_block=0, to_block="latest")}
+        check(set(paid) == {owner["B"], owner["C"]}
+              and BOUNTY - 2 <= sum(paid.values()) <= BOUNTY,
+              f"the bounty is owed to households B and C "
+              f"({ {k[:8]: v / U6 for k, v in paid.items()} } USD6)")
+        for h in ("B", "C"):
+            check(bond.functions.owed(owner[h], tok["usd6"].address).call() == 0
+                  and bal("usd6", owner[h]) - owner_usd0[h] == paid[owner[h]],
+                  f"{h}: its daemon paid it out to the owner wallet (payOut)")
         corr_sum, corr_mass = bond.functions.toolRating(b32, (0).to_bytes(32, "big")).call()
         want_c = hundredths_mean([(300, 0.9), (200, 0.5)])
         check(corr_mass == 500 * E18 and close_to(corr_sum / corr_mass / 100, want_c),
@@ -839,6 +939,7 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
               f"B and C clear the gate: {reviewing * 100 / supply:.1f}% of REP, "
               f"2 of {len(holders)} REP-holding households")
         s4.note("rep_after_reviews", {h: round(rep_of(owner[h]) / E18, 6) for h in HOUSES})
+        s4.note("bounty_paid", {h: paid[owner[h]] / U6 for h in ("B", "C")})
         s4.status = "PASS"
     except Exception as e:
         fail(s4, e)
@@ -847,12 +948,16 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
     # ------------------------------------------------------------------
     s5 = S[5]
     log("Stage 5: service fees")
-    service_id = 0
+    service_id: Dict[str, int] = {}
+    fee: Dict[str, int] = {}
+    pool_share: Dict[str, int] = {}
     try:
         from atn.on_chain import OnChainService
         from atn.ws_server import WebSocketBridge
-        # C's owner sells a local tool as a service, registered and paid
-        # under operator C, reachable at the endpoint it publishes on chain.
+        from atn import service_catalog as sc
+        # C's owner sells a local tool as two services, one priced in each
+        # token, registered and paid under operator C, reachable at the
+        # endpoint it publishes on chain.
         reg = await execute_tool("register_tool", {
             "name": "word_count", "description": "Counts the words in a text.",
             "input_schema": WORDS_SCHEMA, "code": WORDS_CODE}, rt_c, caller_id=None)
@@ -861,57 +966,60 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         port_c = _free_port()
         ws_c = WebSocketBridge(rt_c, host="127.0.0.1", port=port_c)
         await ws_c.start()
-        listed = await ws_c._handle_message({
-            "type": "register_service", "msg_id": "svc-1", "mode": "request",
-            "name": "word-count", "description": "Word counts on C's machine.",
-            "backing_tool": reg["digest"], "price": SERVICE_ASK,
-            "voucher": SERVICE_ASK}, owner_session())
-        if not listed.get("ok") or not listed["result"].get("on_chain"):
-            raise RuntimeError(f"register_service: {listed}")
-        service_id = int(listed["result"]["service_id"])
-        entry = svc_registry.functions.getService(service_id).call()
-        check(entry[0] == op["C"] and entry[2] == 0,
-              f"service #{service_id} on ServiceRegistry: provider operator C, no "
-              f"registry price (the price list says {SERVICE_ASK // ATN} ATN)")
-        # B's catalog takes the spec and C's signed price list (what C's
-        # daemon gossips on the services topic).
-        from atn import service_catalog as sc
-        record_c = rt_c.service_store.get(listed["result"]["digest"])
         catalog_b = sc.catalog_for(rt_b)
-        await asyncio.to_thread(catalog_b.sync_chain)
-        check(catalog_b.accept_announcement(sc.announcement(
-            record_c.spec, service_id, record_c.price_list)),
-              "B's catalog holds C's spec and price list")
+        for k in ("usd6", "t18"):
+            listed = await ws_c._handle_message({
+                "type": "register_service", "msg_id": f"svc-{k}", "mode": "request",
+                "name": f"word-count-{k}", "description": f"Word counts, paid in {k}.",
+                "backing_tool": reg["digest"], "token": T[k],
+                "price": ASK[k], "voucher": ASK[k]}, owner_session())
+            if not listed.get("ok") or not listed["result"].get("on_chain"):
+                raise RuntimeError(f"register_service ({k}): {listed}")
+            service_id[k] = int(listed["result"]["service_id"])
+            entry = svc_registry.functions.getService(service_id[k]).call()
+            check(entry[0] == op["C"] and entry[2] == 0,
+                  f"service #{service_id[k]} ({k}): provider operator C, no registry "
+                  "price (the signed price list names the token and the price)")
+            record_c = rt_c.service_store.get(listed["result"]["digest"])
+            check(str(record_c.price_list.get("token", "")).lower() == T[k],
+                  f"its price list names {k}")
+            await asyncio.to_thread(catalog_b.sync_chain)
+            check(catalog_b.accept_announcement(sc.announcement(
+                record_c.spec, service_id[k], record_c.price_list)),
+                  f"B's catalog holds the {k} service's spec and price list")
         ep = await OnChainService(rt_c._config.autonet).update_endpoint(
             op_key["C"], f"ws://127.0.0.1:{port_c}")
         check(ep.get("success") and substrate.functions.getAgentEndpoint(op["C"]).call()
               == f"ws://127.0.0.1:{port_c}", "C's endpoint published on chain")
 
-        # B's agent pays directly and sends the request with the proof.
-        before = {"b": atn_of(op["B"]), "c": atn_of(op["C"]), "t": atn_of(treasury)}
-        burned0 = substrate.functions.burnedSinceAnchor().call()
-        # No credits with C: request_service pays this one request directly.
-        reply = await execute_tool("request_service", {
-            "service_id": service_id, "payload": {"text": "one turn of the loop"}},
-            rt_b, caller_id=AGENT["B"])
-        check(bool(reply.get("paid_directly")), "paid with one direct payment")
-        check(reply.get("ok") and '"words": 5' in json.dumps(reply),
-              f"C serves B's paid request over {reply.get('transport', '?')} "
-              f"({json.dumps(reply.get('result'))[:80]})")
-        pay = substrate.events.ServicePayment().get_logs(from_block=0, to_block="latest")[-1]
-        check(pay["args"]["payer"] == op["B"] and pay["args"]["recipient"] == op["C"]
-              and pay["args"]["amount"] == SERVICE_ASK,
-              "ServicePayment: operator B pays operator C the ask")
-        fee = SERVICE_ASK * SERVICE_FEE_BPS // 10_000
-        burned = fee - fee * FEE_TREASURY_BPS // 10_000
-        check(before["b"] - atn_of(op["B"]) == SERVICE_ASK
-              and atn_of(op["C"]) - before["c"] == SERVICE_ASK - fee,
-              f"B paid {SERVICE_ASK // ATN} ATN, C got it net of the {fee / ATN:g} ATN fee")
-        check(atn_of(treasury) - before["t"] == fee - burned
-              and substrate.functions.burnedSinceAnchor().call() - burned0 == burned,
-              f"half the fee to the treasury, {burned / ATN:g} ATN burned: the next pool")
-        s5.note("service_id", service_id)
-        s5.note("burned", f"{burned / ATN:g} ATN")
+        for k in ("usd6", "t18"):
+            addr = tok[k].address
+            before = {"b": bal(k, op["B"]), "c": bal(k, op["C"]),
+                      "t": substrate.functions.treasuryOwed(addr).call(),
+                      "pool": substrate.functions.toolShareTotal(addr).call()}
+            # No credits with C: request_service pays this one request directly.
+            reply = await execute_tool("request_service", {
+                "service_id": service_id[k], "payload": {"text": "one turn of the loop"}},
+                rt_b, caller_id=AGENT["B"])
+            check(bool(reply.get("paid_directly")), f"{k}: paid with one direct payment")
+            check(reply.get("ok") and '"words": 5' in json.dumps(reply),
+                  f"{k}: C serves B's paid request over {reply.get('transport', '?')}")
+            pay = substrate.events.ServicePayment().get_logs(from_block=0, to_block="latest")[-1]
+            check(pay["args"]["payer"] == op["B"] and pay["args"]["recipient"] == op["C"]
+                  and pay["args"]["token"] == addr and pay["args"]["amount"] == ASK[k],
+                  f"{k}: ServicePayment from operator B to operator C in {k}")
+            fee[k] = -(-ASK[k] * SERVICE_FEE_BPS // 10_000)
+            to_treasury = fee[k] * FEE_TREASURY_BPS // 10_000
+            pool_share[k] = fee[k] - to_treasury
+            check(before["b"] - bal(k, op["B"]) == ASK[k]
+                  and bal(k, op["C"]) - before["c"] == ASK[k] - fee[k],
+                  f"{k}: B paid {ASK[k]}, C got it net of the {fee[k]} fee")
+            check(substrate.functions.treasuryOwed(addr).call() - before["t"] == to_treasury
+                  and substrate.functions.toolShareTotal(addr).call() - before["pool"]
+                  == pool_share[k],
+                  f"{k}: half the fee owed to the treasury, {pool_share[k]} to the pool")
+        s5.note("service_ids", service_id)
+        s5.note("pool_share", pool_share)
         s5.status = "PASS"
     except Exception as e:
         fail(s5, e)
@@ -919,11 +1027,12 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
 
     # ------------------------------------------------------------------
     s6 = S[6]
-    log("Stage 6: close, anchor, ATN claims")
+    log("Stage 6: close, anchor, claims and withdrawals")
     close: Dict[str, Any] = {}
     rep_before: Dict[str, int] = {}
     outs: Dict[str, Dict[str, Any]] = {}
     delegate_a0 = ""
+    claims: Dict[str, Any] = {}
     try:
         from nodes.common.blob_resolver import InMemoryBlobResolver
         from nodes.common.canonical_ordering import canonical_order
@@ -933,8 +1042,8 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         from nodes.common.federated_close_driver import FederatedCloseResult
         from nodes.common.federated_reconcile import UNMINTED, federated_epoch_close
         from nodes.common.library.tool_manifest import registration_event
-        from nodes.common.mint_merkle import mint_merkle_root, scale_mint
-        from nodes.common.voice_state import read_voice_state
+        from nodes.common.mint_merkle import claim_merkle_root
+        from nodes.common.voice_state import ANCHOR_CLAIM_ROOT, read_voice_state
 
         anchor_epoch(w3, substrate, "e2", op_key["A"])
         advance(w3, 5)   # RepToken checkpoints only answer for past timepoints
@@ -944,11 +1053,17 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         snap = state["review_snapshot"]
         check(digest in snap["tools"] and digest in snap["rounds"],
               "the snapshot pinned to e2 holds the tool's rating and round")
+        check(snap["bonds"][digest]["value"] == MIN_STAKE
+              and snap["min_stake"] == MIN_STAKE,
+              "the snapshot's bond: value 100 units against minStake 100")
         check(all(state["owner_map"].get(op[h].lower()) == owner[h].lower() for h in HOUSES),
               "owner map from chain: each operator to its owner wallet")
-        pool = float(state["emission_pool"])
-        check(close_to(pool, burned / ATN, 1e-9),
-              f"pool = the fees burned between e1 and e2 = {pool} ATN")
+        window = {str(t).lower(): int(v) for t, v in state["tool_share_window"].items()}
+        check(window == {T[k]: pool_share[k] for k in tok},
+              f"the pools = the tool share collected between e1 and e2, per token ({window})")
+        parity = {str(t).lower(): int(v) for t, v in state["parity"].items()}
+        check(all(parity.get(T[k]) == PARITY[k] for k in tok),
+              "the index pinned to e2: both parities")
 
         manifest, author = announced[0]
         kp = Keypair.generate()
@@ -957,9 +1072,10 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
                                manifest, digest, agent_id=author)],
                            prev_batch_hash=b"", timestamp=1_700_000_000.0)
         close = federated_epoch_close(
-            canonical_order([batch]), emission_pool=pool,
-            agent_owner_map=state["owner_map"], rep_shares=state["rep_shares"],
-            review_snapshot=snap, mint_gate=tuple(state["mint_gate"]))
+            canonical_order([batch]), tool_share_window=state["tool_share_window"],
+            parity=state["parity"], agent_owner_map=state["owner_map"],
+            rep_shares=state["rep_shares"], review_snapshot=snap,
+            mint_gate=tuple(state["mint_gate"]))
         check(tuple(state["mint_gate"]) == (100, 50), "gate: 1% of REP, 0.5% of households")
         check(close["concluded"] == {digest: 0},
               f"the tool concludes, no malware share ({close['concluded']})")
@@ -972,25 +1088,40 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
               and close_to(tm["score"], want_score, 1e-9),
               f"score V x C x S = {tm['score']:.6f} (V {want_v:.3f}, C {want_c:.3f}, "
               f"S {want_s:.3f}), both reviewers paid")
-        # One tool concludes, so its share is the whole pool.
-        check(close_to(tm["author_mint"], pool * 0.6 * want_score * want_n, 1e-6),
-              f"author side 60% x V x C x S x N {want_n:.2f} = {tm['author_mint']:.6f} ATN")
-        am = close["agent_mint"]
+        claims = close["claims"]
         hk = {h: owner[h].lower() for h in HOUSES}
-        check(set(am) == set(hk.values()) and UNMINTED not in am,
-              "the mint is keyed by the three owner wallets (households), not operators")
-        check(close_to(am[hk["A"]], tm["author_mint"], 2e-6),
-              f"household A: {am[hk['A']]:.6f} ATN (the author side)")
-        check(close_to(am[hk["B"]] + am[hk["C"]], 0.4 * pool, 2e-6),
-              f"households B + C: {am[hk['B']] + am[hk['C']]:.6f} ATN "
-              "(40% of the tool's share, by accuracy)")
-        carry = close["tool_rounds"]["pool_carry"]
-        minted_raw = sum(scale_mint(v) for v in am.values())
-        check(carry == round(pool * ATN) - minted_raw,
-              f"{carry / ATN:.6f} ATN unminted carries over to the next close")
+        check(set(claims) == set(hk.values()) and UNMINTED not in claims,
+              "the claims are keyed by the three owner wallets (households), not operators")
+        pools = {str(t).lower(): int(v) for t, v in close["pools"].items()}
+        check(pools == window, "one concluding tool: its share is the whole of each pool")
+
+        def frac(h: str, k: str) -> float:
+            return claims[hk[h]]["tokens"].get(T[k], 0) / pools[T[k]]
+        # The basket: every earner takes the same fraction of every pool
+        # (each amount floored, so within one base unit of each pool).
+        for h in HOUSES:
+            check(abs(frac(h, "usd6") - frac(h, "t18")) <= 2 / pools[T["usd6"]],
+                  f"{h}: the same fraction of both pools ({frac(h, 'usd6'):.6f}, "
+                  f"{frac(h, 't18'):.6f})")
+        check(close_to(frac("A", "usd6"), 0.6 * want_score * want_n, 2e-6),
+              f"household A: the author side, 60% x V x C x S x N {want_n:.2f} = "
+              f"{frac('A', 'usd6'):.6f} of each pool")
+        check(close_to(frac("B", "usd6") + frac("C", "usd6"), 0.4, 2e-6),
+              "households B + C: 40% of each pool (the reviewers, by accuracy)")
+        carry = {str(t).lower(): int(v) for t, v in close["tool_rounds"]["pool_carry"].items()}
+        for k in tok:
+            paid = sum(c["tokens"].get(T[k], 0) for c in claims.values())
+            check(paid + carry.get(T[k], 0) == pools[T[k]],
+                  f"{k}: paid {paid} + carried {carry.get(T[k], 0)} = the pool {pools[T[k]]}")
+        for h in HOUSES:
+            want_value = sum(a * PARITY[k] // PARITY_SCALE for k in tok
+                             for a in [claims[hk[h]]["tokens"].get(T[k], 0)])
+            check(abs(claims[hk[h]]["value"] - want_value) <= 1,
+                  f"{h}: its basket is worth {claims[hk[h]]['value'] / U6:.6f} units")
 
         # The daemons take the close: A's driver anchors it (its operator is
-        # Substrate's governor), every driver claims for its household.
+        # Substrate's governor), every driver claims for its household and
+        # withdraws token by token.
         close["epoch_id"] = "e3"
         fed = FederatedCloseResult(
             epoch_id="e3", close_result=close, senders=[kp.public_key],
@@ -1004,46 +1135,76 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
                 owner_wallet=owner[h], tool_bond_address=bond.address),
             agent_chain_resolver=(lambda h=h: [AgentChainIdentity(op[h], op_key[h])]),
             blob_resolver=blobs) for h in HOUSES}
-        atn_before = {h: (atn_of(owner[h]), atn_of(op[h])) for h in HOUSES}
+        held0 = {h: {k: (bal(k, owner[h]), bal(k, op[h])) for k in tok} for h in HOUSES}
         rep_before.update({h: rep_of(owner[h]) for h in HOUSES})
         delegate_a0 = str(rep.functions.delegates(owner["A"]).call())
         outs["A"] = await asyncio.to_thread(csd["A"].handle_federated_close, fed)
         check(outs["A"].get("anchored"),
               f"daemon A's driver anchors e3 ({outs['A'].get('anchor_error', 'direct')})")
         a3 = substrate.functions.getAnchorByEpochId("e3").call()
-        check(bytes(a3[9]) == mint_merkle_root(am, concluded=close["concluded"]),
-              "e3's agentMintRoot is the close's mint and concluded leaves")
-        for h in ("B", "C"):
-            outs[h] = await asyncio.to_thread(
-                csd[h].handle_federated_close, dataclasses.replace(fed, is_winner=False))
-            check(outs[h].get("anchor_skipped") == "already anchored",
-                  f"daemon {h}'s driver finds e3 anchored and only claims")
+        check(bytes(a3[ANCHOR_CLAIM_ROOT]) == claim_merkle_root(
+            claims, concluded=close["concluded"]),
+              "e3's claimRoot is the close's claim and concluded leaves")
+        idx3 = int(substrate.functions.anchorCount().call()) - 1
+        check(all(substrate.functions.anchorParity(idx3, t.address).call() == PARITY[k]
+                  for k, t in tok.items()), "the anchor stored both parities")
+        outs["B"] = await asyncio.to_thread(
+            csd["B"].handle_federated_close, dataclasses.replace(fed, is_winner=False))
+        check(outs["B"].get("anchor_skipped") == "already anchored",
+              "daemon B's driver finds e3 anchored and only claims")
+        # USD6's issuer pauses it before C's daemon takes the close.
+        send(w3, tok["usd6"].functions.setPaused(True), HH_DEPLOYER_PK)
+        outs["C"] = await asyncio.to_thread(
+            csd["C"].handle_federated_close, dataclasses.replace(fed, is_winner=False))
+        check(outs["C"].get("anchor_skipped") == "already anchored",
+              "daemon C's driver finds e3 anchored and only claims")
         for h in HOUSES:
-            want = scale_mint(am[hk[h]])
+            want = claims[hk[h]]["tokens"]
             row = next((r for r in outs[h]["agent_submissions"]
                         if r["claimant"].lower() == hk[h]), {})
-            got_owner = atn_of(owner[h]) - atn_before[h][0]
-            check(row.get("success") and got_owner == want > 0
-                  and substrate.functions.agentMintTotal(owner[h]).call() == want,
-                  f"{h}: operator claimFor its owner: +{want / ATN:.6f} ATN, "
-                  "agentMintTotal the same")
-            check(atn_of(op[h]) == atn_before[h][1],
-                  f"{h}: the operator received nothing (it paid the gas)")
-        recorded = {e["args"]["agent"]: e["args"]["amount"] for e in
-                    substrate.events.TrainingRecorded().get_logs(from_block=0,
-                                                                 to_block="latest")}
-        check(set(recorded) == {owner[h] for h in HOUSES},
-              "TrainingRecorded names the owner wallets only")
-        check(substrate.functions.networkMintTotal().call()
-              <= substrate.functions.mintPoolTotal().call(),
-              "claims stay within the cumulative pool")
+            check(row.get("success") and {str(t).lower(): int(v) for t, v in
+                                          row.get("tokens", {}).items()} == want,
+                  f"{h}: operator claims its owner's basket ({ {k: want.get(T[k], 0) for k in tok} })")
+            for k in tok:
+                got = bal(k, owner[h]) - held0[h][k][0]
+                if h == "C" and k == "usd6":
+                    check(got == 0 and substrate.functions.owed(owner[h], tok[k].address).call()
+                          == want[T[k]] and T[k] in {str(t).lower() for t in
+                                                     row.get("withdraw_errors", {})},
+                          "C: USD6 is paused, so its USD6 stays owed (the withdrawal failed)")
+                else:
+                    check(got == want.get(T[k], 0)
+                          and substrate.functions.owed(owner[h], tok[k].address).call() == 0,
+                          f"{h}: {k} withdrawn to the owner wallet (+{got})")
+                check(bal(k, op[h]) == held0[h][k][1],
+                      f"{h}: the operator received no {k} (it paid the gas)")
+        send(w3, tok["usd6"].functions.setPaused(False), HH_DEPLOYER_PK)
+        send(w3, substrate.functions.withdraw(owner["C"], tok["usd6"].address), HH_DEPLOYER_PK)
+        check(bal("usd6", owner["C"]) - held0["C"]["usd6"][0] == claims[hk["C"]]["tokens"][T["usd6"]]
+              and substrate.functions.owed(owner["C"], tok["usd6"].address).call() == 0,
+              "unpaused, C's USD6 is withdrawn (anyone may send it; it goes to the earner)")
+        for h in HOUSES:
+            want_value = sum(claims[hk[h]]["tokens"].get(T[k], 0) * PARITY[k] // PARITY_SCALE
+                             for k in tok)
+            check(substrate.functions.earnedValue(owner[h]).call() == want_value,
+                  f"{h}: earnedValue {want_value / U6:.6f} units (the amounts at the anchor's "
+                  "parities)")
+        for k, t in tok.items():
+            check(substrate.functions.claimedTotal(t.address).call()
+                  <= substrate.functions.poolCap(t.address).call(),
+                  f"{k}: claims stay within the pool cap")
+            owed_t = substrate.functions.treasuryOwed(t.address).call()
+            t0 = bal(k, treasury)
+            send(w3, substrate.functions.withdrawTreasury(t.address), HH_DEPLOYER_PK)
+            check(bal(k, treasury) - t0 == owed_t == fee[k] - pool_share[k],
+                  f"{k}: the treasury withdraws its share of the fee ({owed_t})")
         v = bond.functions.verdicts(bytes.fromhex(digest)).call()
         check(v[0] > 0 and v[1] == 0 and not v[2],
               "ToolBond: the tool concluded from the anchored leaf, no malware")
         check(bond.functions.isBonded(bytes.fromhex(digest)).call(), "and it keeps its bond")
-        s6.note("pool", f"{pool} ATN")
-        s6.note("mint", {h: round(am[hk[h]], 6) for h in HOUSES})
-        s6.note("carry", f"{carry / ATN:.6f} ATN")
+        s6.note("pools", pools)
+        s6.note("claims", {h: claims[hk[h]]["tokens"] for h in HOUSES})
+        s6.note("carry", carry)
         s6.status = "PASS"
     except Exception as e:
         fail(s6, e)
@@ -1056,12 +1217,12 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         claimed = {e["args"]["earner"]: dict(e["args"]) for e in
                    rep_claim.events.RepClaimed().get_logs(from_block=0, to_block="latest")}
         for h in HOUSES:
-            earned = substrate.functions.agentMintTotal(owner[h]).call()
+            earned = substrate.functions.earnedValue(owner[h]).call()
             ev = claimed.get(owner[h], {})
             check(ev.get("to") == owner[h] and ev.get("earningsDelta") == earned
                   and ev.get("repMinted") == earned * 10 ** 12,
-                  f"{h}: RepClaimed {earned / ATN:.6f} REP to the owner wallet "
-                  "(1:1 on agentMintTotal)")
+                  f"{h}: RepClaimed {earned / U6:.6f} REP to the owner wallet "
+                  "(1:1 on earnedValue)")
             check(rep_of(owner[h]) - rep_before[h] == earned * 10 ** 12,
                   f"{h}: owner REP up by exactly that")
             check(rep_claim.functions.claimedEarnings(owner[h]).call() == earned
@@ -1087,9 +1248,10 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
     try:
         from atn.on_chain import ServiceMarketClient
         from atn.service_channels import sweep_refunds
-        before = {"b": atn_of(op["B"]), "c": atn_of(op["C"])}
+        k, price = "t18", ASK["t18"]
+        before = {"b": bal(k, op["B"]), "c": bal(k, op["C"])}
         opened = await execute_tool("open_credits", {
-            "provider_address": op["C"], "deposit": 3 * SERVICE_ASK},
+            "provider_address": op["C"], "token": T[k], "deposit": 3 * price},
             rt_b, caller_id=AGENT["B"])
         if not opened.get("ok"):
             raise RuntimeError(f"open_credits: {opened}")
@@ -1097,33 +1259,34 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
         replies = []
         for text in ("a credits request", "and a second one here"):
             replies.append(await execute_tool("request_service", {
-                "service_id": service_id, "payload": {"text": text}},
+                "service_id": service_id[k], "payload": {"text": text}},
                 rt_b, caller_id=AGENT["B"]))
         check(all(r.get("ok") for r in replies)
-              and replies[1]["credits"]["used"] == 2 * SERVICE_ASK,
-              "two requests served on B's credits with C, one price each")
+              and replies[1]["credits"]["used"] == 2 * price
+              and not any(r.get("paid_directly") for r in replies),
+              "two requests served on B's T18 credits with C, one price each")
         ch = channel.functions.getChannel(cid).call()
-        check(ch[0] == op["B"] and ch[1] == op["C"] and ch[2] == 3 * SERVICE_ASK
-              and ch[5] == 1, f"channel {cid} open: operator B to operator C, "
-                              f"{3 * SERVICE_ASK // ATN} ATN escrowed")
+        check(ch[0] == op["B"] and ch[1] == op["C"] and ch[2] == tok[k].address
+              and ch[3] == 3 * price and ch[6] == 1,
+              f"channel {cid} open: operator B to operator C, 3 x the price in T18 escrowed")
         kept = rt_c.service_store.get_channel_voucher(cid) or {}
-        check(int(kept.get("cumulative", 0)) == 2 * SERVICE_ASK
-              and int(kept.get("consumed", 0)) == 2 * SERVICE_ASK,
+        check(int(kept.get("cumulative", 0)) == 2 * price
+              and int(kept.get("consumed", 0)) == 2 * price,
               "C holds B's voucher for 2 x the price, all of it served")
-        check(before["b"] - atn_of(op["B"]) == 3 * SERVICE_ASK,
+        check(before["b"] - bal(k, op["B"]) == 3 * price,
               "B's deposit left its operator, nothing else")
-        # C's sweep settles what it served once it reaches the threshold,
-        # and the channel stays open.
+        # C's sweep settles what it served once it is worth the minimum
+        # (a value), and the channel stays open.
         rt_c._config.autonet.channel_settle_min = 1
         out = await rt_c.settle_channels_once()
         settled = out.get("settled") or []
         check(settled and settled[0].get("ok") and settled[0].get("action") == "settled",
               f"C's sweep settles without closing ({settled})")
         ch = channel.functions.getChannel(cid).call()
-        fee = 2 * SERVICE_ASK * SERVICE_FEE_BPS // 10_000
-        check(ch[5] == 1 and ch[3] == 2 * SERVICE_ASK
-              and atn_of(op["C"]) - before["c"] == 2 * SERVICE_ASK - fee,
-              f"still open; 2 x the price paid, C net of the {fee / ATN:g} ATN fee")
+        cfee = -(-2 * price * SERVICE_FEE_BPS // 10_000)
+        check(ch[6] == 1 and ch[4] == 2 * price
+              and bal(k, op["C"]) - before["c"] == 2 * price - cfee,
+              f"still open; 2 x the price paid, C net of the {cfee / E18:g} T18 fee")
         # B closes; C settles inside the window (nothing new), B withdraws.
         closed = await execute_tool("close_credits", {"provider_address": op["C"]},
                                     rt_b, caller_id=AGENT["B"])
@@ -1136,20 +1299,19 @@ async def amain() -> int:  # noqa: C901 (a linear E2E script, staged for reading
                                       ServiceMarketClient(rt_b._config.autonet),
                                       rt_b._channel_key_for, now=chain_time(w3))
         actions = [r["action"] for r in refunds]
-        check("withdrew" in actions and channel.functions.getChannel(cid).call()[5] == 3,
+        check("withdrew" in actions and channel.functions.getChannel(cid).call()[6] == 3,
               f"B's refund sweep withdraws the remainder ({actions})")
-        check(atn_of(op["B"]) - (before["b"] - 3 * SERVICE_ASK) == SERVICE_ASK
+        check(bal(k, op["B"]) - (before["b"] - 3 * price) == price
               and rt_b.channel_book.closing() == {},
-              f"B got {SERVICE_ASK // ATN} ATN back, fee-free; its book is clear")
+              f"B got {price / E18:g} T18 back, fee-free; its book is clear")
         s8.note("channel", cid)
-        s8.note("claimed", f"{2 * SERVICE_ASK // ATN} ATN")
-        s8.note("refunded", f"{SERVICE_ASK // ATN} ATN")
+        s8.note("settled", f"{2 * price / E18:g} T18")
+        s8.note("refunded", f"{price / E18:g} T18")
         s8.status = "PASS"
     except Exception as e:
         fail(s8, e)
 
     return await finish()
-
 
 if __name__ == "__main__":
     try:

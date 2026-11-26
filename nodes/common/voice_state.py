@@ -327,8 +327,11 @@ _TOOL_BOND_EVENTS_ABI = [
                       ("repPool", "uint256", False)]),
     _ev("ReviewSettled", [("digest", "bytes32", True), ("epoch", "uint256", True),
                           ("reviewer", "address", True), ("accuracy", "uint256", False)]),
+    # A bond is in one index token; `value` is the stake's value when
+    # posted (6-decimal units), what ToolBond.isBonded compares to minStake.
     _ev("Bonded", [("digest", "bytes32", True), ("author", "address", True),
-                    ("amount", "uint256", False), ("stake", "uint256", False)]),
+                    ("token", "address", True), ("amount", "uint256", False),
+                    ("stake", "uint256", False), ("value", "uint256", False)]),
     _ev("UnbondRequested", [("digest", "bytes32", True), ("availableAt", "uint256", False)]),
     _ev("Unbonded", [("digest", "bytes32", True), ("author", "address", True),
                      ("amount", "uint256", False), ("bounty", "uint256", False)]),
@@ -445,7 +448,8 @@ def tool_review_snapshot_from_logs(
     bps: Optional[int] = None
     reviews: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
     finalized: List[Tuple[str, int, int]] = []   # (digest, epoch, block), in order
-    bonds: Dict[str, Dict[str, Any]] = {}         # digest -> {author, stake, unbonding}
+    bonds: Dict[str, Dict[str, Any]] = {}         # digest -> {author, stake, value, unbonding}
+    slash_pending: set = set()
     verdicts: Dict[str, Dict[str, Any]] = {}
     min_stake = 0
     settled: Dict[Tuple[str, int, str], int] = {}  # (digest, epoch, reviewer) -> accuracy
@@ -459,9 +463,10 @@ def tool_review_snapshot_from_logs(
             min_stake = int(a["minStake"])
         elif name == "Bonded":
             b = bonds.setdefault(_hex32(a["digest"]), {"author": "", "stake": 0,
-                                                       "unbonding": False})
+                                                       "value": 0, "unbonding": False})
             b["author"] = str(a["author"]).lower()
             b["stake"] = int(a["stake"])
+            b["value"] = int(a["value"])
             b["unbonding"] = False   # a top-up cancels a pending unbond
         elif name == "UnbondRequested":
             if _hex32(a["digest"]) in bonds:
@@ -491,17 +496,28 @@ def tool_review_snapshot_from_logs(
                 "supply": int(a["supply"]),
                 "unscored_bps": int(a["unscoredBps"])})
         elif name == "Concluded":
-            verdicts.setdefault(_hex32(a["digest"]), {
-                "concluded": False, "dao": None})["concluded"] = True
+            d = _hex32(a["digest"])
+            verdicts.setdefault(d, {"concluded": False, "dao": None})["concluded"] = True
+            if d in slash_pending:
+                # The reviewers' verdict (MalwareSlashed just before, in the
+                # same call) took this share of the value too (ToolBond._slash).
+                slash_pending.discard(d)
+                b = bonds.get(d)
+                if b is not None:
+                    b["value"] -= b["value"] * int(a["malwareShare"]) // 10 ** 18
         elif name == "MalwareSlashed":
             # A designation is the DAO's word; the reviewers' verdict is
             # the close's own (its concluded leaf). Both slash the stake.
+            d = _hex32(a["digest"])
             if int(a["by"]) == _BY_DAO:
-                verdicts.setdefault(_hex32(a["digest"]), {
-                    "concluded": False, "dao": None})["dao"] = True
-            b = bonds.get(_hex32(a["digest"]))
+                verdicts.setdefault(d, {"concluded": False, "dao": None})["dao"] = True
+            b = bonds.get(d)
             if b is not None:
                 b["stake"] = max(0, b["stake"] - int(a["bondSlashed"]))
+                if int(a["by"]) == _BY_DAO:
+                    b["value"] = 0          # a designation's share is all of it
+                else:
+                    slash_pending.add(d)    # the share comes with Concluded
         elif name == "Cleared":
             verdicts.setdefault(_hex32(a["digest"]), {
                 "concluded": False, "dao": None})["dao"] = False

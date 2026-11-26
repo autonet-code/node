@@ -5,16 +5,19 @@ Four households, each one real ``python -m atn`` daemon with its own home,
 vault and ports, on a local hardhat chain carrying the full packaged
 jurisdiction (trustless-contracts scripts/deploy-autonet-jurisdiction.js:
 governor + timelock, RepToken, AutonetRepClaim, Substrate, AnchorElection,
-ToolBond, ServiceRegistry/PaymentChannel, AutonetVault). Networking is the
-real ws transport, and the only seed is a local ``atn relay`` that the
-daemons find through the Registry key ``jurisdiction.autonet.bootstrap``.
+ToolBond, ServiceRegistry/PaymentChannel), run from a working copy of
+trustless-contracts under S0_DIR (the checkout is never written). The value
+index holds two test tokens, tt6 (6 decimals) and tt18 (18 decimals, at
+another parity). Networking is the real ws transport, and the only seed is
+a local ``atn relay`` that the daemons find through the Registry key
+``jurisdiction.autonet.bootstrap``.
 
 Each household is set up the way an owner would:
-  - the owner wallet (a hardhat account) holds genesis REP and buys ATN
-    from the vault with a test stablecoin;
+  - the owner wallet (a hardhat account) holds genesis REP and both index
+    tokens;
   - the daemon's operator key registers bound to the owner, and the owner
     delegates its REP to the operator by signature;
-  - the owner funds the operator with ATN and gas: every external agent
+  - the owner funds the operator with both tokens and gas: every external agent
     acts on chain as the operator (Decision 2026-11-08), so there is no
     agent key, registration or funding of its own;
   - one scripted external agent (this script is its brain) is created
@@ -23,15 +26,17 @@ Each household is set up the way an owner would:
     session, and both of its sessions' reviews go out in one operator
     batch per epoch.
 
-Then the scripted agents work: author and publish tools, search the
-library, use each other's tools, review them, and pay each other for
-services (the fees those payments burn are the volume that ends an epoch).
+Then the scripted agents work: author and publish tools (households 1 and 3
+bond in tt6, 2 and 4 in tt18), search the library, use each other's tools,
+review them, and pay each other for services in either token (the fees
+those payments collect, valued at the index, are the volume that ends an
+epoch).
 The volume ramps up over the run, so epochs should get shorter. A canary
 rides along: one household publishes a tool that reads outside its
 workspace next to an honest control, and two scripted reviewers flag it
 as malware with evidence: it concludes with its author side unpaid, and
-its verdict settles at once (the bond's share of yes to the treasury, the
-author's REP burned by that share); the close then prunes it. Every agent
+its verdict settles at once (the bond's share of yes owed to the treasury,
+the author's REP burned by that share); the close then prunes it. Every agent
 API reply names the tools the agent adopted and
 the household has not reviewed (``review_due``); the run logs each change.
 After the activity, payments alone keep epochs closing until the late
@@ -64,7 +69,9 @@ Env: S0_DIR (default D:/autonet_s0), S0_MINUTES (activity phase, default
 S0_MODEL_DIR (the shared search model files), S0_MODEL_FROM_PEERS,
 TRUSTLESS_CONTRACTS_DIR (default C:/code/dao/trustless-contracts),
 S0_EXTERNAL_CHAIN=1 (use the chain already running at S0_RPC_URL and the
-suite deployed on it, instead of starting a hardhat node).
+suite deployed on it, instead of starting a hardhat node), S0_DAO_WORK (the
+working copy of trustless-contracts, default build/s0_dao_work: an NTFS
+volume, for its node_modules junction).
 """
 from __future__ import annotations
 
@@ -117,18 +124,24 @@ HH_KEYS = [
 ]
 
 GENESIS_REP = 250 * 10**18          # per owner
-USDC_PER_OWNER = 10_000 * 10**6     # test stablecoin, 6 decimals
-USDC_PARITY = 10**30                # 1 USDC = 1 ATN (dao's convention)
-ATN_BUY = 5_000 * 10**6             # stablecoin each owner spends on ATN
-OPERATOR_FUNDING_SHARE = 5          # owner sends 1/5 of its ATN to its operator
+# The value index: two test tokens of dao's (contracts/test), each owner
+# holds 10,000 units' worth of both. tt6 at parity 1e30 (one token = one
+# value unit), tt18 at 1.25e18 (one token = 1.25 units).
+INDEX = {
+    "tt6": {"artifact": "test/TestToken6.sol/TestToken6.json", "decimals": 6,
+            "parity": 10**30, "per_owner": 10_000 * 10**6},
+    "tt18": {"artifact": "test/TestToken18.sol/TestToken18.json", "decimals": 18,
+             "parity": 125 * 10**16, "per_owner": 8_000 * 10**18},
+}
+OPERATOR_FUNDING_SHARE = 5          # owner sends 1/5 of each token to its operator
 # Scripted external sessions per household (default 1): household 1 runs
 # two, whose reviews share the operator's one batch per epoch.
 SESSIONS = {"h1": 2}
 GAS_FUNDING = 10 * 10**18
-# ppm of the ATN supply burned in fees that ends an epoch. 20,000 ATN
-# supply and 500 ppm: 10 ATN of fees, so 400 ATN of service payments at
-# the 2.5% fee.
-EPOCH_TARGET_SHARE = 500
+# The fees, valued at the index (6-decimal value units), that end an epoch
+# (jurisdiction.autonet.epoch_target_value): 10 units of fees, so 400 units
+# of service payments at the 2.5% fee.
+EPOCH_TARGET_VALUE = 10 * 10**6
 VOTING_DELAY_SECS = 60
 VOTING_PERIOD_SECS = 60
 TIMELOCK_DELAY_SECS = 0
@@ -264,11 +277,61 @@ def send(w3, acct, call=None, *, to=None, value=0, gas=3_000_000) -> Any:
     return receipt
 
 
+# trustless-contracts is read only: the chain, the compile and the deploy
+# run in a copy of it (dao_workdir), whose node_modules is a junction to the
+# checkout's and whose config.js holds no keys.
+# Under build/ (gitignored) by default: the node_modules junction needs NTFS.
+DAO_WORK = Path(os.environ.get("S0_DAO_WORK") or (REPO / "build" / "s0_dao_work"))
+_DAO_COPY = ("contracts", "scripts", "test", "modules", "deployments", "hardhat.config.js",
+             "package.json", "package-lock.json")
+_DAO_SKIP = {".deps", ".states", "node_modules", "artifacts", "cache"}
+
+
+def dao_workdir() -> Path:
+    """A fresh working copy of trustless-contracts (sources, scripts, test
+    fixtures), compiled there. The checkout itself is never written."""
+    import shutil
+    if not (DAO_DIR / "scripts" / "deploy-autonet-jurisdiction.js").exists():
+        raise RuntimeError(f"trustless-contracts not found at {DAO_DIR} "
+                           "(set TRUSTLESS_CONTRACTS_DIR)")
+    for name in _DAO_COPY:
+        src, dst = DAO_DIR / name, DAO_WORK / name
+        if dst.is_dir():
+            shutil.rmtree(dst)
+        if src.is_dir():
+            shutil.copytree(src, dst, ignore=lambda d, names: [n for n in names
+                                                               if n in _DAO_SKIP])
+        elif src.exists():
+            DAO_WORK.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    (DAO_WORK / "deployments").mkdir(parents=True, exist_ok=True)
+    # No keys in the copy: hardhat.config.js only needs well-formed values.
+    (DAO_WORK / "config.js").write_text(
+        "const k = '11'.repeat(32);\nmodule.exports = { INFURA_API_KEY: 'dummy', "
+        "INFURA_KEY: '', SEPOLIA_PRIVATE_KEY: k, PRIVATE_KEY: k, MAINNET_PRIVATE_KEY: '', "
+        "ETHERSCAN_API_KEY: '' };\n", encoding="utf-8")
+    nm = DAO_WORK / "node_modules"
+    if not nm.exists():
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(nm), str(DAO_DIR / "node_modules")],
+                           check=True, capture_output=True)
+        else:
+            nm.symlink_to(DAO_DIR / "node_modules")
+    npx = "npx.cmd" if os.name == "nt" else "npx"
+    r = subprocess.run([npx, "hardhat", "compile"], cwd=str(DAO_WORK), env=base_env(),
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       timeout=3600)
+    if r.returncode != 0:
+        raise RuntimeError(f"compile in {DAO_WORK} failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+    log(f"trustless-contracts copied and compiled in {DAO_WORK}")
+    return DAO_WORK
+
+
 def artifact(rel: str) -> Dict[str, Any]:
-    return json.loads((DAO_DIR / "artifacts" / "contracts" / rel).read_text(encoding="utf-8"))
+    return json.loads((DAO_WORK / "artifacts" / "contracts" / rel).read_text(encoding="utf-8"))
 
 
-BOUNTY_ATN = 5_000_000   # 5 ATN, base units
+BOUNTY_VALUE = 5_000_000   # 5 value units, in the bond's token
 
 
 def abi(name: str) -> list:
@@ -277,11 +340,34 @@ def abi(name: str) -> list:
     return data["abi"] if isinstance(data, dict) else data
 
 
-def deploy_test_usdc(w3, deployer) -> str:
-    art = artifact("test/TestToken6.sol/TestToken6.json")
-    c = w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"])
-    receipt = send(w3, deployer, c.constructor(), gas=3_000_000)
-    return receipt.contractAddress
+ERC20_ABI = [
+    {"name": n, "type": "function", "stateMutability": m,
+     "inputs": [{"name": a, "type": t} for a, t in ins],
+     "outputs": [{"name": "", "type": o} for o in outs]}
+    for n, m, ins, outs in [
+        ("balanceOf", "view", [("a", "address")], ["uint256"]),
+        ("transfer", "nonpayable", [("to", "address"), ("v", "uint256")], ["bool"]),
+        ("approve", "nonpayable", [("s", "address"), ("v", "uint256")], ["bool"]),
+        ("symbol", "view", [], ["string"]),
+    ]]
+
+
+def amount_for_value(key: str, value: int) -> int:
+    """Base units of index token ``key`` worth ``value`` (6-decimal units)."""
+    return -(-int(value) * 10**30 // INDEX[key]["parity"])
+
+
+def deploy_index_tokens(w3, deployer, owners) -> Dict[str, Any]:
+    """The index's two test tokens, ``per_owner`` of each to every owner."""
+    out = {}
+    for key, spec in INDEX.items():
+        art = artifact(spec["artifact"])
+        c = w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"])
+        receipt = send(w3, deployer, c.constructor(), gas=3_000_000)
+        out[key] = w3.eth.contract(address=receipt.contractAddress, abi=art["abi"])
+        for o in owners:
+            send(w3, deployer, out[key].functions.transfer(o.address, spec["per_owner"]))
+    return out
 
 
 def seed_addr(peer: str) -> str:
@@ -289,7 +375,8 @@ def seed_addr(peer: str) -> str:
     return f"/dns4/localhost/tcp/{RELAY_PORT}/ws/p2p/{peer}"
 
 
-def deploy_jurisdiction(run: Path, usdc: str, owners: List[str], bootstrap: str) -> Dict[str, Any]:
+def deploy_jurisdiction(run: Path, tokens: Dict[str, Any], owners: List[str],
+                        bootstrap: str) -> Dict[str, Any]:
     out = run / "jurisdiction.json"
     env = base_env()
     env.update({
@@ -298,18 +385,18 @@ def deploy_jurisdiction(run: Path, usdc: str, owners: List[str], bootstrap: str)
         "TIMELOCK_DELAY_SECS": str(TIMELOCK_DELAY_SECS),
         # Reviews reveal and finalize within minutes, not the default day.
         "TOOLBOND_REVEAL_WINDOW_SECS": "60",
-        "EPOCH_TARGET_SHARE": str(EPOCH_TARGET_SHARE),
+        "EPOCH_TARGET_VALUE": str(EPOCH_TARGET_VALUE),
         "BOOTSTRAP": bootstrap,
         "MEMBERS": ",".join(owners),
         "AMOUNTS": ",".join([str(GENESIS_REP)] * len(owners)),
-        "PARITY_TOKENS": usdc,
-        "PARITY_VALUES": str(USDC_PARITY),
+        "PARITY_TOKENS": ",".join(tokens[k].address for k in INDEX),
+        "PARITY_VALUES": ",".join(str(INDEX[k]["parity"]) for k in INDEX),
         "OUT": str(out),
         "MSYS_NO_PATHCONV": "1",
     })
     npx = "npx.cmd" if os.name == "nt" else "npx"
     r = subprocess.run([npx, "hardhat", "run", "scripts/deploy-autonet-jurisdiction.js",
-                        "--network", "localhost"], cwd=str(DAO_DIR), env=env,
+                        "--network", "localhost"], cwd=str(DAO_WORK), env=env,
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     (run / "deploy.log").write_text(r.stdout + "\n" + r.stderr, encoding="utf-8")
     if r.returncode != 0 or not out.exists():
@@ -653,11 +740,14 @@ SAMPLE_TEXTS = ["the quick brown fox jumps over the lazy dog",
 class Activity:
     """The scripted agents' work, and what it observed."""
 
-    def __init__(self, run: Path, households: List[Household], j: Dict[str, Any], w3) -> None:
+    def __init__(self, run: Path, households: List[Household], j: Dict[str, Any], w3,
+                 tokens: Optional[Dict[str, Any]] = None) -> None:
         self.run = run
         self.hs = households
         self.j = j
         self.w3 = w3
+        # The index's tokens: key -> contract (deploy_index_tokens)
+        self.tokens: Dict[str, Any] = dict(tokens or {})
         self.sub = w3.eth.contract(address=w3.to_checksum_address(j["autonet"]["substrate"]),
                                    abi=abi("Substrate"))
         self.published: Dict[str, Dict[str, str]] = {}   # digest -> {name, author}
@@ -729,44 +819,57 @@ class Activity:
         return ss[0]
 
     def report_mint(self) -> bool:
-        """What the review mint did: claims against the cumulative pool,
-        and the bounty paid out per round. False when the run burned no
-        fees (the payments that fund the pool all failed)."""
+        """What the pools paid: per token, the tool share collected, what
+        claims took of it (within the pool cap), what earners still owe to
+        withdraw; the REP value claimed; the bounty paid out per round.
+        False when the run collected no fees (the payments that fund the
+        pools all failed)."""
         w3 = self.w3
-        burned = True
+        collected = True
         try:
-            minted = int(self.sub.functions.networkMintTotal().call())
-            pool = int(self.sub.functions.mintPoolTotal().call())
-            log(f"MINT: claimed {minted / 1e6:.6f} ATN of a cumulative pool of "
-                f"{pool / 1e6:.6f}")
-            if pool == 0:
-                burned = False
-                log("FAIL: no service fee was burned during the run, so the pool "
+            total = 0
+            for key, t in self.tokens.items():
+                share = int(self.sub.functions.toolShareTotal(t.address).call())
+                claimed = int(self.sub.functions.claimedTotal(t.address).call())
+                cap = int(self.sub.functions.poolCap(t.address).call())
+                total += share
+                d = 10 ** INDEX[key]["decimals"]
+                log(f"POOL {key}: tool share collected {share / d:.6f}, claimed "
+                    f"{claimed / d:.6f} (cap {cap / d:.6f}, within: {claimed <= cap}), "
+                    f"treasury owed {int(self.sub.functions.treasuryOwed(t.address).call()) / d:.6f}")
+                owed = {h.name: int(self.sub.functions.owed(h.owner.address, t.address).call())
+                        for h in self.hs}
+                if any(owed.values()):
+                    log(f"POOL {key}: still owed to owners (not withdrawn) {owed}")
+            log(f"MINT: REP value claimed {int(self.sub.functions.totalEarnedValue().call()) / 1e6:.6f} "
+                "units")
+            if total == 0:
+                collected = False
+                log("FAIL: no service fee was collected during the run, so the pools "
                     "stayed empty: the payments failed (see pay_for_service above)")
-            for i in range(int(self.sub.functions.anchorCount().call())):
-                a = self.sub.functions.getAnchor(i).call()
-                own, got = int(a[11]), int(a[12])   # mintPool, minted
-                if got > own:
-                    log(f"MINT: anchor {i} claimed {got / 1e6:.6f} ATN, more than its "
-                        f"own pool {own / 1e6:.6f}: the carry-over was spent")
         except Exception as exc:  # noqa: BLE001
             log(f"MINT: read failed: {exc}")
         tb = w3.eth.contract(address=w3.to_checksum_address(self.j["autonet"]["toolBond"]),
                              abi=artifact("ToolBond.sol/ToolBond.json")["abi"])
         try:
             paid = tb.events.BountyPaid.get_logs(from_block=0)
-            left = None
+            left, unpaid = None, None
             if getattr(self, "bounty", None):
-                left = int(tb.functions.bonds(bytes.fromhex(self.bounty)).call()[-1])
-            log(f"BOUNTY: {len(paid)} payout(s), {sum(int(e['args']['amount']) for e in paid) / 1e6:.6f} "
-                f"ATN paid, {'?' if left is None else left / 1e6} ATN left")
+                row = tb.functions.bonds(bytes.fromhex(self.bounty)).call()
+                left = int(row[4])
+                unpaid = {h.name: int(tb.functions.owed(h.owner.address, row[5]).call())
+                          for h in self.hs}
+            log(f"BOUNTY: {len(paid)} part(s), {sum(int(e['args']['amount']) for e in paid)} "
+                f"base units owed, {'?' if left is None else left} left on the tool; "
+                f"not yet paid out: {unpaid}")
         except Exception as exc:  # noqa: BLE001
             log(f"BOUNTY: read failed: {exc}")
-        return burned
+        return collected
 
     def add_bounty(self) -> None:
-        """h1's owner puts a bounty on h1's first published tool (ToolBond
-        addBounty): reviewers are paid from it as their rounds settle."""
+        """h1's owner puts a bounty on h1's first published tool, in the
+        bond's token (ToolBond addBounty): reviewers are paid from it as
+        their rounds settle."""
         h = self.hs[0]
         digest = next((d for d, m in self.published.items()
                        if m["author"] == h.name and m["name"] != CANARY), None)
@@ -778,11 +881,15 @@ class Activity:
         tb = w3.eth.contract(address=tb_addr,
                              abi=artifact("ToolBond.sol/ToolBond.json")["abi"])
         try:
-            send(w3, h.owner, self.sub.functions.approve(tb_addr, BOUNTY_ATN))
-            send(w3, h.owner, tb.functions.addBounty(bytes.fromhex(digest), BOUNTY_ATN))
+            token = tb.functions.bonds(bytes.fromhex(digest)).call()[5]
+            key = next(k for k, t in self.tokens.items() if t.address == token)
+            amount = amount_for_value(key, BOUNTY_VALUE)
+            erc20 = w3.eth.contract(address=token, abi=ERC20_ABI)
+            send(w3, h.owner, erc20.functions.approve(tb_addr, amount))
+            send(w3, h.owner, tb.functions.addBounty(bytes.fromhex(digest), amount))
             self.bounty = digest
-            log(f"bounty: {BOUNTY_ATN / 1e6:g} ATN on {self.published[digest]['name']} "
-                f"({digest[:12]})")
+            log(f"bounty: {amount} {key} ({BOUNTY_VALUE / 1e6:g} units) on "
+                f"{self.published[digest]['name']} ({digest[:12]})")
         except Exception as exc:  # noqa: BLE001
             log(f"bounty failed: {exc}")
 
@@ -805,8 +912,13 @@ class Activity:
         if not digest:
             log(f"{s.name} register_tool {name}: no digest in {str(r)[:300]}")
             return
-        p = await self.call(s, {"type": "publish_tool", "digest": digest},
-                            "publish_tool", tool=name)
+        # The operator holds both index tokens, so the agent names one:
+        # households 1 and 3 bond in tt6, 2 and 4 in tt18.
+        key = list(INDEX)[h.i % len(INDEX)]
+        frame = {"type": "publish_tool", "digest": digest}
+        if key in self.tokens:
+            frame["token"] = self.tokens[key].address
+        p = await self.call(s, frame, "publish_tool", tool=name, token=key)
         if "error" not in p:
             self.published[p.get("digest") or digest] = {"name": name,
                                                          "author": h.name}
@@ -953,20 +1065,33 @@ class Activity:
             self.queued.setdefault(s.agent_id, {}).setdefault(int(q["epoch"]), set()).add(
                 str(q.get("reviewer") or "").lower())
 
-    async def pay(self, h: Household, amount: int, rng) -> None:
-        """A direct payment for a service (Substrate.payForService), sent by
-        the household's operator through the agent API's send_transaction:
-        the fee it burns is the volume that ends an epoch."""
+    async def pay(self, h: Household, value: int, rng) -> None:
+        """A direct payment for a service worth ``value`` (6-decimal units),
+        in one of the index's tokens at random (Substrate.payForService after
+        the token's approve), sent by the household's operator through the
+        agent API's send_transaction: the fee it collects, valued at the
+        index, is the volume that ends an epoch."""
         ss = self.sessions(h)
-        if not ss:
+        if not ss or not self.tokens:
             return
         to = rng.choice([o for o in self.hs if o is not h])
+        key = rng.choice(sorted(self.tokens))
+        token = self.tokens[key]
+        amount = amount_for_value(key, value)
         rid = "0x" + os.urandom(32).hex()
+        erc20 = self.w3.eth.contract(address=token.address, abi=ERC20_ABI)
+        ok = await self.call(ss[0], {"type": "send_transaction", "to": token.address,
+                                     "data": erc20.encode_abi("approve", args=[
+                                         self.sub.address, int(amount)]),
+                                     "note": "s0 fee volume: approve"},
+                             "approve_for_service", token=key, amount=int(amount))
+        if "error" in ok:
+            return
         data = self.sub.encode_abi("payForService", args=[
-            self.w3.to_checksum_address(to.agent_address), int(amount), rid])
+            token.address, self.w3.to_checksum_address(to.agent_address), int(amount), rid])
         await self.call(ss[0], {"type": "send_transaction", "to": self.sub.address,
                                 "data": data, "note": "s0 fee volume"},
-                        "pay_for_service", to=to.name, amount=int(amount))
+                        "pay_for_service", to=to.name, token=key, amount=int(amount))
 
     # One query per household, worded so that only meaning (not shared
     # words) finds the tool it is after.
@@ -1074,7 +1199,7 @@ class Activity:
                 a = e["args"]
                 by = {1: "the reviewers", 2: "the DAO"}.get(int(a["by"]), str(a["by"]))
                 log(f"VERDICT: {name(a['digest'])} malware by {by}: bond "
-                    f"slashed {int(a['bondSlashed']) / 1e6:g} ATN to the treasury, REP burned "
+                    f"slashed {int(a['bondSlashed'])} base units owed to the treasury, REP burned "
                     f"{int(a['repBurned']) / 1e18:g}")
             for e in tb.events.Cleared.get_logs(from_block=0):
                 a = e["args"]
@@ -1122,8 +1247,8 @@ class Activity:
         return read
 
     def epoch_threshold(self) -> int:
-        """Fees that end an epoch now: the target share of the supply."""
-        return EPOCH_TARGET_SHARE * int(self.sub.functions.atnTotalSupply().call()) // 1_000_000
+        """The fees, valued at the index, that end an epoch (value units)."""
+        return EPOCH_TARGET_VALUE
 
 
 # Activity phases: (share of the run, epoch length in seconds the payment
@@ -1132,7 +1257,7 @@ class Activity:
 # floor.
 PHASES = [(0.3, 480), (0.3, 240), (0.4, 90)]
 TICK_SECS = 20.0
-BURN_SHARE = 0.0125     # of a payment: the 2.5% fee, half of it burned
+FEE_SHARE = 0.025       # of a payment: the 2.5% fee, all of it counts toward the epoch
 
 
 async def activity_loop(act: Activity, minutes: float) -> None:
@@ -1165,9 +1290,9 @@ async def activity_loop(act: Activity, minutes: float) -> None:
             threshold = act.epoch_threshold()
         except Exception:  # noqa: BLE001
             threshold = 0
-        # Fleet payments per tick so the burned fees reach the threshold
+        # Fleet payments per tick so the fees collected reach the threshold
         # in ``length`` seconds.
-        per_tick = threshold / BURN_SHARE * TICK_SECS / length if threshold else 0
+        per_tick = threshold / FEE_SHARE * TICK_SECS / length if threshold else 0
         per_agent = int(per_tick / len(act.hs))
         t0 = time.time()
         await asyncio.gather(*(act.work(h, rng) for h in act.hs))
@@ -1202,7 +1327,7 @@ async def drain(act: Activity, cap_s: float = 900.0) -> None:
             threshold = act.epoch_threshold()
         except Exception:  # noqa: BLE001
             threshold = 0
-        per_tick = threshold / BURN_SHARE * TICK_SECS / PHASES[-1][1] if threshold else 0
+        per_tick = threshold / FEE_SHARE * TICK_SECS / PHASES[-1][1] if threshold else 0
         per_agent = int(per_tick / len(act.hs))
         t0 = time.time()
         if per_agent > 0:
@@ -1249,7 +1374,8 @@ async def report_p2p(households: List["Household"], relay_peer: str, when: str) 
 
 def _tool_mint_line(names: Dict[str, Dict[str, str]], tool_mint: Dict[str, Any]) -> str:
     """One close's concluding tools: weight, score (V x C x S), the author's
-    and the reviewers' mint, and what a malware verdict left unpaid."""
+    and the reviewers' parts and what a malware verdict left unpaid (value
+    units, 6 decimals, of the pools)."""
     parts = []
     for digest, e in sorted((tool_mint or {}).items()):
         if not isinstance(e, dict):
@@ -1257,9 +1383,9 @@ def _tool_mint_line(names: Dict[str, Dict[str, str]], tool_mint: Dict[str, Any])
         name = (names.get(digest) or {}).get("name") or digest[:12]
         parts.append(f"{name} w={float(e.get('weight') or 0):.4f} "
                      f"score={float(e.get('score') or 0):.3f} "
-                     f"author={float(e.get('author_mint') or 0):.4f} "
-                     f"reviewers={float(e.get('reviewer_mint') or 0):.4f}"
-                     + (f" MALWARE(unpaid {float(e.get('unpaid') or 0):.4f})"
+                     f"author={float(e.get('author_mint') or 0) / 1e6:.6f} "
+                     f"reviewers={float(e.get('reviewer_mint') or 0) / 1e6:.6f}"
+                     + (f" MALWARE(unpaid {float(e.get('unpaid') or 0) / 1e6:.6f})"
                         if e.get('malware') else ""))
     return "; ".join(parts) if parts else "no tool concluded"
 
@@ -1292,14 +1418,21 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
             while seen < n:
                 a = sub.functions.getAnchor(seen).call()
                 cutoff = _anchor_cutoff(a)
+                # The fees collected in the epoch, per token and valued at
+                # today's index: the measure that ends it.
+                fees = {}
+                for t in sub.functions.poolTokens().call():
+                    fees[str(t).lower()] = int(sub.functions.feesBetween(
+                        t, prev_cutoff, cutoff).call())
+                fee_value = sum(int(sub.functions.valueOf(w3.to_checksum_address(t), v).call())
+                                for t, v in fees.items())
                 row = {"index": seen, "epoch_id": a[0], "cutoff": cutoff,
                        "length": cutoff - prev_cutoff, "anchored_at": int(a[8]),
-                       "burned": int(sub.functions.burnedBetween(prev_cutoff, cutoff).call()),
-                       "supply": int(sub.functions.atnTotalSupply().call())}
+                       "fees": fees, "fee_value": fee_value}
                 epochs.write(json.dumps(row) + "\n")
                 epochs.flush()
                 log(f"ANCHOR {seen + 1}: {a[0]} length {row['length']}s "
-                    f"burned {row['burned']}")
+                    f"fees worth {fee_value / 1e6:.6f} units")
                 prev_cutoff = cutoff
                 seen += 1
                 if act is not None:
@@ -1316,7 +1449,8 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
                                              "tool_mint": last.get("tool_mint")},
                                             default=str) + "\n")
                     epochs.flush()
-                    log(f"CLOSE {closes_seen}: total {float(last.get('total_mint') or 0):.6f}; "
+                    log(f"CLOSE {closes_seen}: paid worth "
+                        f"{int(last.get('total_value') or 0) / 1e6:.6f} units; "
                         f"{_tool_mint_line(names, last.get('tool_mint') or {})}")
                     if act is not None:
                         for digest in last.get("tool_mint") or {}:
@@ -1330,12 +1464,16 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
                     res = st.get("result") or {}
                 except Exception as exc:  # noqa: BLE001
                     res = {"error": repr(exc)}
+                toks = act.tokens if act is not None else {}
                 status.write(json.dumps({
                     "t": time.time(), "h": h.name, "anchors": n,
-                    "owner_atn": int(sub.functions.balanceOf(h.owner.address).call()),
+                    "owner_tokens": {k: int(t.functions.balanceOf(h.owner.address).call())
+                                     for k, t in toks.items()},
+                    "owner_earned_value": int(sub.functions.earnedValue(h.owner.address).call()),
                     "owner_rep": int(rep.functions.balanceOf(h.owner.address).call()),
-                    "operator_atn": (int(sub.functions.balanceOf(
-                        w3.to_checksum_address(h.operator)).call()) if h.operator else 0),
+                    "operator_tokens": ({k: int(t.functions.balanceOf(
+                        w3.to_checksum_address(h.operator)).call()) for k, t in toks.items()}
+                        if h.operator else {}),
                     "operator_gas": (int(w3.eth.get_balance(w3.to_checksum_address(h.operator)))
                                      if h.operator else 0),
                     "daemon_alive": h.alive(),
@@ -1353,7 +1491,7 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
 # Stages
 # ---------------------------------------------------------------------------
 
-async def onboard(h: Household, j: Dict[str, Any], w3, usdc) -> None:
+async def onboard(h: Household, j: Dict[str, Any], w3, tokens: Dict[str, Any]) -> None:
     """One household, the way its owner would set it up in the app."""
     c = h.client
     substrate = j["autonet"]["substrate"]
@@ -1370,18 +1508,13 @@ async def onboard(h: Household, j: Dict[str, Any], w3, usdc) -> None:
                           h.operator, int(st["owner_rep_nonce"]), expiry)
     await c.ok({"type": "submit_delegation", "nonce": int(st["owner_rep_nonce"]),
                 "expiry": expiry, "signature": dsig})
-    # Owner buys ATN from the vault.
-    vault = w3.eth.contract(address=w3.to_checksum_address(j["autonet"]["vault"]),
-                            abi=artifact("AutonetVault.sol/AutonetVault.json")["abi"])
-    send(w3, h.owner, usdc.functions.approve(vault.address, ATN_BUY))
-    send(w3, h.owner, vault.functions.buy(usdc.address, ATN_BUY))
-    # The owner funds the operator with ATN: every external agent acts as
-    # the operator (Decision 2026-11-08), whose balance pays its bonds,
-    # stakes and service payments, and whose gas pays every transaction.
-    sub = w3.eth.contract(address=w3.to_checksum_address(substrate), abi=abi("Substrate"))
-    bal = int(sub.functions.balanceOf(h.owner.address).call())
-    send(w3, h.owner, sub.functions.transfer(w3.to_checksum_address(h.operator),
-                                              bal // OPERATOR_FUNDING_SHARE))
+    # The owner funds the operator with both index tokens: every external
+    # agent acts as the operator (Decision 2026-11-08), whose balance pays
+    # its bonds and service payments, and whose gas pays every transaction.
+    for t in tokens.values():
+        bal = int(t.functions.balanceOf(h.owner.address).call())
+        send(w3, h.owner, t.functions.transfer(w3.to_checksum_address(h.operator),
+                                               bal // OPERATOR_FUNDING_SHARE))
     # The scripted external agents, created through the agent API the way a
     # harness creates itself (default grants), each with its own token.
     h.sessions = []
@@ -1392,7 +1525,8 @@ async def onboard(h: Household, j: Dict[str, Any], w3, usdc) -> None:
     same = all(s.address.lower() == h.operator.lower() for s in h.sessions)
     st = await c.ok({"type": "operator_status"})
     log(f"{h.name}: operator {h.operator[:10]} registered={st.get('registered')} "
-        f"delegated={st.get('delegated_to_operator')} ATN={st.get('atn_balance')}; "
+        f"delegated={st.get('delegated_to_operator')} "
+        f"tokens={ {k: int(t.functions.balanceOf(w3.to_checksum_address(h.operator)).call()) for k, t in tokens.items()} }; "
         f"agents {', '.join(s.agent_id for s in h.sessions)} act as "
         f"{h.agent_address[:10]} (the operator's address: {same}), "
         f"external_agents={st.get('external_agents')}")
@@ -1411,9 +1545,10 @@ async def amain() -> int:
         # 1. Chain: our own hardhat node, or (S0_EXTERNAL_CHAIN=1) one already
         # running at RPC_URL, such as the suite dao deployed as the deploy
         # rehearsal; the jurisdiction script then uses that suite.
+        dao_workdir()
         if not EXTERNAL_CHAIN:
             procs.start("hardhat", ["npx.cmd" if os.name == "nt" else "npx", "hardhat", "node",
-                                    "--port", str(RPC_PORT)], cwd=DAO_DIR, env=base_env(),
+                                    "--port", str(RPC_PORT)], cwd=DAO_WORK, env=base_env(),
                         log_path=run / "hardhat.log")
         w3, accts = w3_and_accounts()
         wait_for(lambda: w3.is_connected() and w3.eth.chain_id == CHAIN_ID, 120, "hardhat")
@@ -1424,12 +1559,8 @@ async def amain() -> int:
         w3.provider.make_request("evm_setAutomine", [False])
         w3.provider.make_request("evm_setIntervalMining", [1000])
         deployer, owners = accts[0], accts[1:1 + HOUSEHOLDS]
-        usdc_addr = deploy_test_usdc(w3, deployer)
-        usdc = w3.eth.contract(address=usdc_addr,
-                               abi=artifact("test/TestToken6.sol/TestToken6.json")["abi"])
-        for o in owners:
-            send(w3, deployer, usdc.functions.transfer(o.address, USDC_PER_OWNER))
-        log(f"chain up, test stablecoin {usdc_addr}")
+        tokens = deploy_index_tokens(w3, deployer, owners)
+        log(f"chain up, index tokens { {k: t.address for k, t in tokens.items()} }")
 
         # 2. Relay: first start fixes its peer id (relay.key), which the
         # deploy writes into the Registry by hostname.
@@ -1450,7 +1581,7 @@ async def amain() -> int:
         log(f"relay peer {peer}; seed {bootstrap}")
 
         # 3. The jurisdiction.
-        j = deploy_jurisdiction(run, usdc_addr, [o.address for o in owners], bootstrap)
+        j = deploy_jurisdiction(run, tokens, [o.address for o in owners], bootstrap)
         log(f"jurisdiction: governor {j['dao']['governor']} substrate {j['autonet']['substrate']}")
         jkey = f"{CHAIN_ID}:{j['dao']['governor'].lower()}"
         procs.start("relay", relay_args + ["--jurisdiction", jkey], cwd=REPO, env=base_env(),
@@ -1473,7 +1604,7 @@ async def amain() -> int:
         # 5. Owners set up their households.
         for h in households:
             try:
-                await onboard(h, j, w3, usdc)
+                await onboard(h, j, w3, tokens)
             except Exception:
                 log(f"{h.name} onboarding failed:\n{h.log_tail()}")
                 raise
@@ -1483,7 +1614,7 @@ async def amain() -> int:
 
         # 6. Work, watched by the collector.
         stop = asyncio.Event()
-        act = Activity(run, households, j, w3)
+        act = Activity(run, households, j, w3, tokens)
         col = asyncio.create_task(collector(run, households, j, w3, stop, act))
         await act.author()
         act.add_bounty()
@@ -1519,7 +1650,7 @@ async def amain() -> int:
         # payments going so epochs keep closing at the floor, until its
         # close is anchored and claimed.
         await drain(act)
-        burned = act.report_mint()
+        collected = act.report_mint()
         act.report_verdicts()
         await act.report_evidence()
         act.report_batches()
@@ -1531,7 +1662,7 @@ async def amain() -> int:
             log("S0_KEEP=1: leaving everything running; Ctrl+C to stop")
             while True:
                 await asyncio.sleep(3600)
-        return 0 if burned else 1
+        return 0 if collected else 1
     except Exception:
         log(traceback.format_exc())
         return 1

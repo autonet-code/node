@@ -83,13 +83,10 @@ def main() -> int:
                     "the hub chain through the tunnel")
         deployer, owners = accts[0], accts[1:1 + args.owners]
         founders = owners[:args.rep_owners if args.rep_owners is not None else len(owners)]
-        usdc_addr = s0.deploy_test_usdc(w3, deployer)
-        usdc = w3.eth.contract(address=usdc_addr,
-                               abi=s0.artifact("test/TestToken6.sol/TestToken6.json")["abi"])
-        for o in owners:
-            s0.send(w3, deployer, usdc.functions.transfer(o.address, s0.USDC_PER_OWNER))
+        s0.dao_workdir()   # trustless-contracts is read only: a working copy
+        tokens = s0.deploy_index_tokens(w3, deployer, owners)
         seed = f"/dns4/{RELAY_HOST}/tcp/443/wss/p2p/{args.relay_peer}"
-        j = s0.deploy_jurisdiction(run, usdc_addr, [o.address for o in founders], seed)
+        j = s0.deploy_jurisdiction(run, tokens, [o.address for o in founders], seed)
         jkey = f"{s0.CHAIN_ID}:{j['dao']['governor'].lower()}"
         start_relay(jkey)
         token = TOKEN_FILE.read_text(encoding="utf-8").strip()
@@ -99,7 +96,7 @@ def main() -> int:
         }
         (run / "vm_env.json").write_text(json.dumps(env, indent=1), encoding="utf-8")
         (run / "summary.json").write_text(json.dumps(
-            {"jurisdiction_key": jkey, "seed": seed, "usdc": usdc_addr,
+            {"jurisdiction_key": jkey, "seed": seed, "tokens": {k: t.address for k, t in tokens.items()},
              "owners": [o.address for o in owners],
              "founders": [o.address for o in founders]}, indent=1), encoding="utf-8")
         s0.log(f"deployed: governor {j['dao']['governor']} registry {j['dao']['registry']}")

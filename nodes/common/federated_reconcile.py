@@ -196,7 +196,8 @@ def _normalize_review_snapshot(
        "rounds": {digest: [{"epoch", "supply",
                             "fields": {...}, "axes": {...},
                             "reviews": [{"reviewer", "accuracy"}]}]},
-       "bonds": {digest: {"author", "stake", "unbonding"}}, "min_stake": int,
+       "bonds": {digest: {"author", "stake", "value", "unbonding"}},
+       "min_stake": int (a value, 6-decimal units),
        "verdicts": {digest: {"concluded": bool, "dao": bool | None}}}
 
     ``fields`` are the fixed review fields (``review_fields.REVIEW_FIELDS``)
@@ -267,6 +268,7 @@ def _normalize_review_snapshot(
             bonds[str(digest).lower().removeprefix("0x")] = {
                 "author": str(b["author"]).lower(),
                 "stake": max(0, _int(b.get("stake"))),
+                "value": max(0, _int(b.get("value"))),
                 "unbonding": bool(b.get("unbonding")),
             }
         out["bonds"] = bonds
@@ -587,8 +589,10 @@ def compute_tool_mint(
         author = str(meta.get("author") or "")
         if bonds is not None:
             b = bonds.get(digest)
+            # ToolBond.isBonded: the stake's value when posted (6-decimal
+            # units, a bond being in one index token) against minStake.
             if (not b or b["unbonding"] or b["stake"] <= 0
-                    or b["stake"] < min_stake):
+                    or b["value"] < min_stake):
                 return ""
             author = b["author"]
         return author

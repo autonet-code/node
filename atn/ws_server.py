@@ -1732,7 +1732,8 @@ class WebSocketBridge:
                     return {"msg_id": msg_id, "ok": False,
                             "error": f"Unknown tool digest: {digest[:16]}"}
                 result = await publish_with_stake(
-                    self.runtime, record, novelty=msg.get("novelty"))
+                    self.runtime, record, novelty=msg.get("novelty"),
+                    token=msg.get("token"), amount=msg.get("amount"))
                 if "error" in result:
                     return {"msg_id": msg_id, "ok": False,
                             "error": result["error"], "result": result}

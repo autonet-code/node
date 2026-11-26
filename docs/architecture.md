@@ -227,7 +227,7 @@ four are set up by `initialize` in the transaction that creates them; a
 directly deployed one (local chains, tests) is set up by its constructor
 with the same arguments.
 In `C:\code\dao\trustless-contracts` (dao owns it; coordinate through
-`chat.txt`): governor + timelock, Registry (every parameter lives here),
+dao directly): governor + timelock, Registry (every parameter lives here),
 RepToken, AutonetRepClaim, ToolBond, and the AutonetSetup
 module that werule uses to create a jurisdiction. The indexer
 (`EightRice/indexer`, dao owns) mirrors chain events to Firestore for the

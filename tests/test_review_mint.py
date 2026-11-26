@@ -271,8 +271,8 @@ class TestMalware:
         # but its reviewers cleared the gate: composites using it are unpaid.
         snap = _snap({DIGEST: [_round(1, _rev(R1))], DEP: [_round(1, _rev(R2))]},
                      tools={DIGEST: tool_cells(), DEP: tool_cells(malware=1.0)})
-        snap["bonds"] = {DIGEST: {"author": AUTHOR.lower(), "stake": 10},
-                         DEP: {"author": "depsmith", "stake": 1}}
+        snap["bonds"] = {DIGEST: {"author": AUTHOR.lower(), "stake": 10, "value": 10},
+                         DEP: {"author": "depsmith", "stake": 1, "value": 1}}
         snap["min_stake"] = 5
         out = _mint(None, regs=COMPOSITE_REGS, snapshot=snap)
         assert DEP not in out["per_digest"]

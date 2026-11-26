@@ -3,9 +3,8 @@
 The chain surface is ``runtime/tool_bond.py``. Two pieces live here:
 
   - PUBLISH (``publish_with_stake``): every published tool carries a
-    ToolBond stake (in a value index token once ToolBond's index-token
-    version exists; until then the bond step refuses, see
-    ``tool_bond.BOND_PENDING``). Publishing requires a novelty claim in the manifest, a successor
+    ToolBond stake in a token of the value index, worth at least ToolBond's
+    minStake when posted. Publishing requires a novelty claim in the manifest, a successor
     only by the same author, and ``ToolBondClient.register_and_bond`` signed
     with the author's key (the operator's, for an external agent). No
     ToolBond configured = refused (fail closed), except under the dev
@@ -146,12 +145,17 @@ def rating_for(runtime: Any, digest: str) -> Optional[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 async def publish_with_stake(runtime: Any, record: Any, *,
-                             novelty: Any = None) -> dict[str, Any]:
+                             novelty: Any = None, token: Any = None,
+                             amount: Any = None) -> dict[str, Any]:
     """Publish ``record`` (already resolved, author-checked by the caller):
     novelty claim present, successor by the same author, stake bonded on
     ToolBond, THEN the local publish flip. Returns a result dict or
     ``{"error": ...}``; the chain step happens before anything is marked
     published, so a failed stake leaves the tool private.
+
+    ``token``: the index token the bond is in (default: the one index token
+    the author holds). ``amount``: base units (default: the fewest worth
+    ToolBond's minStake at the index).
 
     ``novelty`` given for a private tool registered without it (or with a
     different claim) stamps it in first (``ToolStore.restamp_novelty``):
@@ -184,7 +188,18 @@ async def publish_with_stake(runtime: Any, record: Any, *,
             stamped = {"digest": record.digest}
             if res.get("replaced"):
                 stamped["replaces_private"] = res["replaced"]
-    return {**await _publish_staked(runtime, record), **stamped}
+    if token is not None and not isinstance(token, str):
+        return {"error": "token must be an index token's 0x address", **stamped}
+    if amount is not None:
+        try:
+            amount = int(str(amount))
+        except (TypeError, ValueError):
+            return {"error": "amount must be a whole number of the token's base units",
+                    **stamped}
+        if amount <= 0:
+            return {"error": "amount must be positive", **stamped}
+    return {**await _publish_staked(runtime, record, token=token or None,
+                                    amount=amount), **stamped}
 
 
 def unpublished_dependencies_error(store: Any, record: Any) -> str:
@@ -209,7 +224,8 @@ def unpublished_dependencies_error(store: Any, record: Any) -> str:
             "digest, register this composite again with that digest)")
 
 
-async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
+async def _publish_staked(runtime: Any, record: Any, *, token: Optional[str] = None,
+                          amount: Optional[int] = None) -> dict[str, Any]:
     from nodes.common.library.tool_manifest import (
         publish_novelty_errors,
     )
@@ -282,20 +298,21 @@ async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
         key = runtime.registry.get_agent_key(local_author)
         if not key:
             return {"error": f"No private key stored for agent '{local_author}'."}
-        try:
-            res = await client.register_and_bond(key, record.digest)
-        except NotImplementedError as exc:
-            return {"error": f"ToolBond stake not made: {exc}. The tool stays "
-                             "registered and unpublished; publish again once it "
-                             "is deployed."}
+        res = await client.register_and_bond(key, record.digest, amount=amount,
+                                             token=token)
         if not res.get("success"):
-            return {"error": "ToolBond stake failed"
-                             + (f" at {res['step']}" if res.get("step") else "")
-                             + f": {res.get('error') or 'unknown error'}",
-                    "txs": list(res.get("txs") or [])}
+            out = {"error": "ToolBond stake failed"
+                            + (f" at {res['step']}" if res.get("step") else "")
+                            + f": {res.get('error') or 'unknown error'}",
+                   "txs": list(res.get("txs") or [])}
+            if res.get("index_tokens"):
+                out["index_tokens"] = list(res["index_tokens"])
+            return out
         stake = {"tx_hash": res.get("tx_hash", ""),
                  "txs": list(res.get("txs") or []),
-                 "amount": res.get("amount")}
+                 "amount": res.get("amount"),
+                 "token": res.get("token"),
+                 "value": res.get("value")}
     try:
         store.set_published(record.digest, True)
     except ValueError as exc:  # orphan-author gate

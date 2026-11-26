@@ -29,8 +29,10 @@ def _snap(bonds=None, **extra):
     return snap
 
 
-def _bonded(author=AUTHOR, stake=100, unbonding=False):
-    return _snap({DIGEST: {"author": author, "stake": stake, "unbonding": unbonding}})
+def _bonded(author=AUTHOR, stake=100, unbonding=False, value=None):
+    """``value``: the stake's value when posted (default = ``stake``)."""
+    return _snap({DIGEST: {"author": author, "stake": stake, "unbonding": unbonding,
+                           "value": stake if value is None else value}})
 
 
 def _mint(snapshot, **kw):
@@ -47,6 +49,10 @@ def test_unbonded_tools_do_not_mint_and_the_bond_author_is_paid():
     assert mint(_snap({})) == {}
     assert mint(_bonded(stake=99)) == {}
     assert mint(_bonded(unbonding=True)) == {}
+    # minStake is a value: a large stake in base units worth too little
+    # doesn't count, a small one worth enough does (ToolBond.isBonded).
+    assert mint(_bonded(stake=10 ** 18, value=99)) == {}
+    assert AUTHOR in mint(_bonded(stake=1, value=100))
     # The gossiped registration names AUTHOR; the chain's bond names the
     # real author, who is paid (the reviewers are paid either way).
     real = "0x" + "b0" * 20
@@ -65,18 +71,31 @@ def test_bonds_fold_from_toolbond_logs():
         "minStake": 100, "revealWindow": 60, "degradeBps": 1000, "authorSlashBps": 10000,
         "unbondDelay": 1, "reviewerShareBps": 4000}}
     kw = dict(since_block=0, epochs={}, accuracies={}, axis_ids=[])
-    logs = [params, rec(2, "Bonded", author=AUTHOR, amount=100, stake=100)]
+    token = "0x" + "c0" * 20
+    # 6-decimal token at parity 1e30: base units = value units
+    logs = [params, rec(2, "Bonded", author=AUTHOR, token=token, amount=100, stake=100,
+                        value=100)]
     snap = tool_review_snapshot_from_logs(logs, block=10, **kw)
-    assert snap["bonds"] == {DIGEST: {"author": AUTHOR, "stake": 100, "unbonding": False}}
+    assert snap["bonds"] == {DIGEST: {"author": AUTHOR, "stake": 100, "value": 100,
+                                      "unbonding": False}}
     assert snap["min_stake"] == 100
     logs.append(rec(3, "UnbondRequested", availableAt=999))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST]["unbonding"]
-    logs.append(rec(4, "Bonded", author=AUTHOR, amount=50, stake=150))
+    logs.append(rec(4, "Bonded", author=AUTHOR, token=token, amount=50, stake=150, value=150))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST] == {
-        "author": AUTHOR, "stake": 150, "unbonding": False}
+        "author": AUTHOR, "stake": 150, "value": 150, "unbonding": False}
+    # The reviewers' verdict: MalwareSlashed, then Concluded with the share
+    # (0.4), which takes the same share of the value.
     logs.append(rec(5, "MalwareSlashed", by=1, bondSlashed=60, repBurned=0))
-    assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST]["stake"] == 90
-    logs.append(rec(6, "Unbonded", author=AUTHOR, amount=90))
+    logs.append({"block": 5, "index": 1, "event": "Concluded", "args": {
+        "digest": d, "anchorIndex": 3, "malwareShare": 4 * 10 ** 17}})
+    b = tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST]
+    assert (b["stake"], b["value"]) == (90, 90)
+    # The DAO's designation takes all of it.
+    logs.append(rec(6, "MalwareSlashed", by=2, bondSlashed=90, repBurned=0))
+    b = tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST]
+    assert (b["stake"], b["value"]) == (0, 0)
+    logs.append(rec(7, "Unbonded", author=AUTHOR, amount=0))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"] == {}
 
 
