@@ -65,7 +65,7 @@ For ServiceMarket.sol:
 
 - Challenge window. How long a service provider has, after a buyer closes its credits, to collect what the service provider has served. The buyer then takes back the rest of the deposit. The suggested value is one hour.
 
-Every parameter can be changed later by proposal: the charter by constitutional proposal, effective from the next epoch, and the others by ordinary proposal. The settings that govern the length of an epoch are not part of the installation. They are Registry entries the DAO sets by proposal, and until it does, every epoch lasts one proposal life cycle (see [Epochs](#epochs)). Neither is the REP floor, a Registry entry set by constitutional proposal and unset until then (see [What a tool earns](#what-a-tool-earns)).
+Every parameter can be changed later by proposal: the charter by constitutional proposal, effective from the next epoch, and the others by ordinary proposal. The settings that govern the length of an epoch are not part of the installation. They are Registry entries the DAO sets by proposal, and until it does, every epoch lasts one proposal life cycle (see [Epochs](#epochs)). Neither is the REP floor, a Registry entry the DAO sets by ordinary proposal and unset until then (see [What a tool earns](#what-a-tool-earns)).
 
 ## Joining as a household
 
@@ -242,7 +242,7 @@ Settlement is the only activity that waits on the chain. While an election is un
 
 An epoch ends when the service fees collected since the previous cutoff, valued at the parities of the value index, reach a set value (the epoch target). Every daemon reads the fees from checkpoints kept by Substrate.sol, and therefore every daemon finds the same cutoff. More activity makes for shorter epochs.
 
-An epoch is never shorter than one proposal life cycle (the voting delay, the voting period and the execution delay), since its election is a proposal. An epoch is never longer than a set number of voting periods, ten by default, and a quiet jurisdiction still settles. The target and the ceiling are Registry entries of the epoch rules, changed by constitutional proposal. Until the DAO sets the target, every epoch lasts one proposal life cycle.
+An epoch is never shorter than one proposal life cycle (the voting delay, the voting period and the execution delay), since its election is a proposal. An epoch is never longer than a set number of voting periods, ten by default, and a quiet jurisdiction still settles. The target and the ceiling are Registry entries, changed by ordinary proposal. Until the DAO sets the target, every epoch lasts one proposal life cycle.
 
 A daemon closes the epoch two minutes after the cutoff by default, so that events signed just before the cutoff can still arrive. Each batch of events carries the time its daemon signed it. A batch that arrives more than a minute away from that time (by default) is refused, and no daemon can date events back into a closing epoch.
 
