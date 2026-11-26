@@ -814,6 +814,29 @@ PAYMENT_CHANNEL_EIP712_NAME = "AutonetPaymentChannel"
 PAYMENT_CHANNEL_EIP712_VERSION = "1"
 
 
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+
+def canonical_signature(sig: bytes) -> bytes | None:
+    """The 65-byte (r, s, v) signature in the one form OpenZeppelin's
+    ECDSA.recover accepts (v 27 or 28, s in the lower half), or None when it
+    has no such form. v of 0/1 becomes 27/28; a high s becomes N - s with v
+    flipped (the same signer)."""
+    if len(sig) != 65:
+        return None
+    r = int.from_bytes(sig[0:32], "big")
+    s_ = int.from_bytes(sig[32:64], "big")
+    v = sig[64]
+    if v in (0, 1):
+        v += 27
+    if v not in (27, 28) or r == 0 or s_ == 0 or s_ >= _SECP256K1_N or r >= _SECP256K1_N:
+        return None
+    if s_ > _SECP256K1_N // 2:
+        s_ = _SECP256K1_N - s_
+        v = 55 - v  # 27 <-> 28
+    return sig[0:32] + s_.to_bytes(32, "big") + bytes([v])
+
+
 def build_voucher_digest(
     channel_id: int,
     token: str,
@@ -2882,6 +2905,16 @@ class ServiceMarketClient:
             sig = (signature if isinstance(signature, bytes)
                    else bytes.fromhex(signature[2:] if signature.startswith("0x")
                                       else signature))
+            # Only the form OpenZeppelin's ECDSA.recover accepts on chain may
+            # be credited: eth_account also recovers v of 0/1 or EIP-155 and
+            # high-s signatures, which PaymentChannel rejects, so a buyer
+            # could be served on a voucher no settle can cash. Canonicalize
+            # (v 27/28, low s) and keep the canonical bytes.
+            sig = canonical_signature(sig)
+            if sig is None:
+                result["reason"] = "malformed voucher signature"
+                return result
+            result["signature"] = "0x" + sig.hex()
             # Recover the signer of the raw typed-data digest.
             signer = (Account._recover_hash(digest, signature=sig)
                       if hasattr(Account, "_recover_hash")

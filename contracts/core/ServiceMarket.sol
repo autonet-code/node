@@ -289,8 +289,8 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
 
     /// ClientClosing (appended, so earlier values keep their numbers): the
     /// client started a close. The provider may still settle with its best
-    /// voucher until closesAt; after that the client takes the whole deposit
-    /// back, so a vanished provider never locks it.
+    /// voucher until the client withdraws; from closesAt the client may take
+    /// back what is unclaimed, so a vanished provider never locks it.
     enum Status { None, Open, Closing, Settled, ClientClosing }
 
     struct Channel {
@@ -529,17 +529,21 @@ contract PaymentChannel is ReentrancyGuard, EIP712, Initializable {
         emit ChannelClosed(channelId, c.claimed, c.deposit - c.claimed, c.closesAt);
     }
 
-    /// @dev The provider may collect while the channel is Open, or inside the
-    ///      window of a close the client started. Checks the caller and the
-    ///      client's voucher signature; returns min(cumulative, deposit).
+    /// @dev The provider may collect while the channel is Open, or while a
+    ///      close the client started is not yet withdrawn: past the window
+    ///      too, so a token paused through the window (when no payout can
+    ///      move) never hands the client what was served. Checks the caller
+    ///      and the client's voucher signature; returns min(cumulative,
+    ///      deposit).
     function _checkProviderVoucher(
         Channel storage c,
         uint256 channelId,
         uint256 cumulativeAmount,
         bytes calldata signature
     ) private view returns (uint256 capped) {
-        if (c.status != Status.Open && !(c.status == Status.ClientClosing
-                && block.timestamp < c.closesAt)) revert ChannelNotOpen();
+        if (c.status != Status.Open && c.status != Status.ClientClosing) {
+            revert ChannelNotOpen();
+        }
         if (msg.sender != c.provider) revert NotProvider();
 
         // Recover the client's signature over the typed voucher.

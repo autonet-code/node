@@ -190,7 +190,7 @@ describe("PaymentChannel (prepaid credits in a value-index token, fee at each pa
     expect(await usd.balanceOf(client.address)).to.equal(10_000n - 1200n);
   });
 
-  it("the provider can still settle inside the client's close window, not after", async function () {
+  it("the provider can still settle in a client's close until the client withdraws", async function () {
     const id = await openChannel(5000n);
     const sig = await signVoucher(channel, client, id, 3000n);
     await channel.connect(client).startClose(id);
@@ -202,7 +202,17 @@ describe("PaymentChannel (prepaid credits in a value-index token, fee at each pa
     const sig2 = await signVoucher(channel, client, id2, 500n);
     await channel.connect(client).startClose(id2);
     await time.increase(CHALLENGE_WINDOW + 1);
+    // Past the window but not yet withdrawn (a paused token can hold both
+    // sides through it): the provider still collects what was served.
     await expect(channel.connect(provider).closeChannel(id2, 500n, sig2, 500n))
+      .to.emit(channel, "ChannelClosed");
+
+    const id3 = await openChannel(1000n);
+    const sig3 = await signVoucher(channel, client, id3, 500n);
+    await channel.connect(client).startClose(id3);
+    await time.increase(CHALLENGE_WINDOW + 1);
+    await channel.withdrawRemainder(id3);
+    await expect(channel.connect(provider).closeChannel(id3, 500n, sig3, 500n))
       .to.be.revertedWithCustomError(channel, "ChannelNotOpen");
   });
 
@@ -474,12 +484,12 @@ describe("PaymentChannel (prepaid credits in a value-index token, fee at each pa
     expect(ch.status).to.equal(4n); // ClientClosing
     expect(ch.closesAt).to.equal(deadline);
     await time.increase(CHALLENGE_WINDOW + 1);
-    await expect(channel.connect(provider).settle(
-      id, 1500n, await signVoucher(channel, client, id, 1500n), 1500n))
-      .to.be.revertedWithCustomError(channel, "ChannelNotOpen");
     await expect(channel.withdrawRemainder(id))
       .to.emit(channel, "RemainderWithdrawn").withArgs(id, client.address, 3800n);
     expect(await usd.balanceOf(client.address)).to.equal(10_000n - 1200n);
+    await expect(channel.connect(provider).settle(
+      id, 1500n, await signVoucher(channel, client, id, 1500n), 1500n))
+      .to.be.revertedWithCustomError(channel, "ChannelNotOpen");
   });
 
   // ---------------------------------------------------------------------------

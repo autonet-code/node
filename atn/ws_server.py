@@ -5250,7 +5250,8 @@ class WebSocketBridge:
             return {"ok": False, "reason": "the voucher is not from the channel's client"}
         try:
             self.runtime.service_store.accept_voucher(
-                cid, cum, str(signature), client=client, provider=provider,
+                cid, cum, str(res.get("signature") or signature), client=client,
+                provider=provider,
                 token=str(res.get("token")))
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
@@ -5401,8 +5402,13 @@ class WebSocketBridge:
                 return {"ok": False, "reason": res.get("reason", "unverified")}
             from time import time as _now
             paid_at = res.get("paid_at")
-            if (isinstance(paid_at, int) and paid_at > 0
-                    and _now() - paid_at > store.REPLAY_HORIZON_S):
+            # Fail closed: without the payment's time its age can't be
+            # checked, and request ids older than the horizon are forgotten.
+            if not isinstance(paid_at, int) or paid_at <= 0:
+                inflight.discard(rid)
+                return {"ok": False, "reason": "could not read when the payment was "
+                                               "made; try again"}
+            if _now() - paid_at > store.REPLAY_HORIZON_S:
                 inflight.discard(rid)
                 return {"ok": False, "reason": "the payment is older than the provider's "
                                                "replay horizon (30 days); pay again"}
